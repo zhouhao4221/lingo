@@ -1,0 +1,19 @@
+{
+  "requirementProject": "lingo",
+  "requirementRole": "primary",
+  "requirementsDir": "docs/requirements",
+  "branchStrategy": {
+    "model": "github-flow",
+    "repoType": "github",
+    "giteaUrl": null,
+    "mainBranch": "main",
+    "developBranch": null,
+    "featurePrefix": "feat/",
+    "fixPrefix": "fix/",
+    "hotfixPrefix": "hotfix/",
+    "branchFrom": "main",
+    "mergeTarget": "main",
+    "mergeMethod": "merge",
+    "deleteBranchAfterMerge": true
+  }
+}

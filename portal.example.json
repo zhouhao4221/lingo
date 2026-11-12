@@ -1,0 +1,12 @@
+{
+  "addr": ":8080",
+  "database_url": "postgres://portal:portal@localhost:5432/portal?sslmode=disable",
+  "gitea": {
+    "base_url": "https://gitea.example.com",
+    "token": "<bot-account-token>",
+    "webhook_secret": "<shared-secret>"
+  },
+  "knowledge": {
+    "enabled": true
+  }
+}
