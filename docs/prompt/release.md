@@ -15,16 +15,23 @@
 
 - 静态检查：`go vet ./...`
 - 运行测试：`go test ./...`
-- 后端构建：`go build -o bin/server ./cmd/server`
+- 后端构建：`go build -o bin/server ./cmd/server`（前端产物经 `go:embed` 打入）
 - 前端构建：`cd web && pnpm install --frozen-lockfile && pnpm build`
 
 ## 发版后步骤
 
 > 仅输出提示，不自动执行副作用操作。
 
-- 提醒执行本版本合并后的迁移 SQL（`migrations/`）
-- 部署：按 `deploy/` 下的部署脚本发布（待补充）
+- 提醒执行本版本合并后的迁移 SQL：`server migrate`（不依赖应用启动时自动迁移）
+- 部署：
+  - 单机：二进制 + systemd，或在管理后台用 `binary` 执行器在线升级
+  - 规模化：推送容器镜像，由流水线 / 编排系统滚动发布（`pipeline` 执行器可从后台触发）
+  - 部署脚本见 `deploy/`（待补充）
 
 ## 额外附件
 
-- `bin/server`
+> 在线升级依赖以下附件，名称保持稳定。
+
+- `bin/server`（linux/amd64 二进制）
+- `bin/server.sha256`（校验和，`binary` 执行器必验）
+- 容器镜像：`<registry>/lingo:<version>`（规模化部署使用，镜像仓库地址待定）
