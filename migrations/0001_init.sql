@@ -1,9 +1,14 @@
--- 初始表结构（草案）
--- tenants        接入系统：id, name, app_key, app_secret_hash, callback_url, gitea_repo, created_at
--- users          用户：id, tenant_id, external_id, name, email, role(external|reviewer|admin)
--- tickets        工单：id, tenant_id, user_id, type(consult|bug|feature), title, body, status,
+-- 初始表结构（草案，未发布）
+-- tenants        接入方（业务系统 / MCP 客户端）：id, name, app_key, app_secret_hash, callback_url, gitea_repo, created_at
+-- users          用户：id, tenant_id, external_id, name, email, role(external|agent|reviewer|admin), token_hash, created_at
+--                固定角色多用户：每个角色下可有多个用户；agent 为 AI 研发 Agent 服务账号，仅令牌认证
+-- conversations  问答会话：id, tenant_id, user_id, channel(web|openapi|mcp), status(open|resolved|escalated),
+--                ticket_id, created_at, updated_at
+-- messages       会话消息：id, conversation_id, role(user|assistant), content, sources, feedback, created_at
+-- tickets        工单：id, tenant_id, user_id, conversation_id, type(consult|bug|feature), title, body, status,
 --                gitea_repo, gitea_issue_number, created_at, updated_at
--- ticket_events  工单事件：id, ticket_id, source(portal|gitea), kind, payload, created_at
--- reviews        需求评审：id, ticket_id, reviewer_id, verdict(approve|reject|need_info), comment
--- notifications  通知 outbox：id, ticket_id, channel, target, payload, status, attempts
--- kb_entries     知识库问答：id, tenant_id, question, answer, source_ticket_id, tags, embedding
+-- ticket_events  工单事件：id, ticket_id, actor_id, source(portal|openapi|mcp|gitea), kind, payload, created_at
+-- reviews        需求评审：id, ticket_id, reviewer_id, verdict(approve|reject|need_info), comment, created_at
+-- notifications  通知 outbox：id, ticket_id, channel, target, payload, status, attempts, next_attempt_at
+-- kb_entries     知识库问答：id, tenant_id, question, answer, source_ticket_id, source_conversation_id,
+--                status(pending|approved), tags, embedding, created_at

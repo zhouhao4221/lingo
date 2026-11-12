@@ -1,6 +1,6 @@
 # 灵问 Lingo
 
-Gitea 外接工单门户：为多个内部系统提供统一的咨询 / Bug / 需求提交入口，同步为 Gitea Issue，更新后反馈提交人，支持需求评审，并把结案记录沉淀为知识库。
+连接 Agent AI 智能开发团队与用户的知识问答 Agent：基于知识库回答用户提问，答不了的转为结构化 Gitea Issue 交给 AI 研发团队，进展自动回传用户，问答回流知识库。接入方式：Web 门户、开放接口（OpenAPI）、MCP Server；固定角色（external / agent / reviewer / admin）多用户。
 
 ## 文档
 

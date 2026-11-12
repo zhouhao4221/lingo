@@ -1,4 +1,4 @@
-// Command server 启动 Gitea 外接工单门户：HTTP API、Gitea Webhook 接收与后台任务。
+// Command server 启动灵问问答平台：HTTP API、Gitea Webhook 接收与后台任务。
 package main
 
 import (

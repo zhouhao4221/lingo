@@ -1,2 +1,2 @@
-// Package knowledge 知识库：从已结案工单与评审记录抽取问答对，提供检索与问答。
+// Package knowledge 知识库：从已结案工单、评审记录与认可的问答会话抽取问答对，支持审核与检索，供问答 Agent 使用。
 package knowledge
