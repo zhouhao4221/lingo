@@ -4,8 +4,8 @@
   "requirementsDir": "docs/requirements",
   "branchStrategy": {
     "model": "github-flow",
-    "repoType": "github",
-    "giteaUrl": null,
+    "repoType": "gitea",
+    "giteaUrl": "https://git.kanhushi.com",
     "mainBranch": "main",
     "developBranch": null,
     "featurePrefix": "feat/",

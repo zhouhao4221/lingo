@@ -454,7 +454,7 @@ flowchart LR
 
 #### 3.2.0.7 系统在线升级
 
-**功能描述**：灵问自身代码托管在 Gitea 私有仓库。管理员可在管理后台检查 lingo 新版本、查看版本说明并发起升级；灵问负责发现版本、校验、确认与审计，实际升级由可插拔的**升级执行器**完成，以适配从单机到集群的不同部署方式。
+**功能描述**：灵问自身代码托管在 Gitea 私有仓库 `smartlab/lingo`（`https://git.kanhushi.com/smartlab/lingo.git`）。管理员可在管理后台检查 lingo 新版本、查看版本说明并发起升级；灵问负责发现版本、校验、确认与审计，实际升级由可插拔的**升级执行器**完成，以适配从单机到集群的不同部署方式。
 
 **用户故事**：
 > 作为管理员，我希望在后台看到 lingo 有新版本及其变更内容，一键发起升级，失败可回滚，不必登录服务器手工操作。
@@ -832,6 +832,7 @@ flowchart LR
 
 | 文档 | 链接 |
 |-----|-----|
+| 代码仓库 | `https://git.kanhushi.com/smartlab/lingo.git` |
 | 架构概览 | [docs/architecture/overview.md](../architecture/overview.md) |
 | 项目架构（开发规范） | [docs/prompt/architecture.md](../prompt/architecture.md) |
 | 数据库草案 | [migrations/0001_init.sql](../../migrations/0001_init.sql) || 原型设计 | 待补充 |

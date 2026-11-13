@@ -4,6 +4,8 @@
 
 ## 文档
 
+- 代码仓库：`https://git.kanhushi.com/smartlab/lingo.git`（Gitea，`smartlab/lingo`）
+
 - 产品需求：[docs/requirements/PRD.md](docs/requirements/PRD.md)
 - 项目架构与开发规范：[docs/prompt/architecture.md](docs/prompt/architecture.md)
 - 业务流与模块：[docs/architecture/overview.md](docs/architecture/overview.md)

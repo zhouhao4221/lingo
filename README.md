@@ -4,6 +4,12 @@
 答不了的整理成结构化 Issue，交给 AI 研发团队在 Gitea 中处理，进展自动回传用户；
 每一次问答都回流知识库。支持 Web 门户、浏览器 JS 嵌入、开放接口（OpenAPI）与 MCP 接入，固定角色多用户协作。
 
+## 仓库
+
+```sh
+git clone https://git.kanhushi.com/smartlab/lingo.git
+```
+
 ## 目录
 
 ```
