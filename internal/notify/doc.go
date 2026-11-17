@@ -1,2 +1,2 @@
-// Package notify 信息反馈：工单更新后通过接入系统回调、邮件、站内消息通知提交人。
+// Package notify 进展回传：把工单、评审、版本事件写入 outbox，由 worker 投递给接入方 lingo.Notifier，失败重试。
 package notify

@@ -1,26 +1,24 @@
 -- 初始表结构（草案，未发布）
--- tenants        接入方（业务系统 / MCP 客户端）：id, name, app_key, app_secret_hash, callback_url, created_at
---                浏览器 JS 接入：public_key（pk_ 前缀，可暴露在前端）, allowed_origins（域名白名单）, allow_anonymous
--- projects       项目：id, key, name, description, default_repo_id, enabled, created_at；唯一键 key
+-- 无租户：lingo 嵌入单个业务项目使用；user_id 为接入方自己的用户 ID（文本），lingo 不保存用户表
+-- projects       项目：id, key, name, description, default_repo_id, enabled, created_at；唯一键 key；由 Config.Projects 同步
 -- repos          Gitea 仓库：id, project_id, owner, name, kind(frontend|backend|mobile|docs|other), enabled, created_at
 --                唯一键 (owner, name)；一个仓库只属于一个项目；机器人账号需有 Issue 读写权限
--- tenant_projects 接入方授权项目：tenant_id, project_id, is_default；每个接入方至多一个默认项目
--- users          用户：id, tenant_id, external_id, name, email, dept, title, role(external|agent|reviewer|admin), token_hash, created_at
---                固定角色多用户：每个角色下可有多个用户；agent 为 AI 研发 Agent 服务账号，仅令牌认证
--- conversations  问答会话：id, tenant_id, user_id, project_id, channel(web|openapi|mcp), status(open|resolved|escalated),
+-- conversations  问答会话：id, user_id, project_id, channel(api|mcp|go), status(open|resolved|escalated),
 --                ticket_id, created_at, updated_at
 -- messages       会话消息：id, conversation_id, role(user|assistant), content, sources, feedback, created_at
--- tickets        工单：id, tenant_id, user_id, conversation_id, project_id, repo_id, type(consult|bug|feature), title, body,
---                status, gitea_issue_number, reported_version, fixed_release_id, created_at, updated_at
+-- tickets        工单：id, user_id, user_name, user_email（提交人快照）, conversation_id, project_id, repo_id,
+--                type(consult|bug|feature), title, body, status, gitea_issue_number, reported_version, fixed_release_id,
+--                created_at, updated_at
 -- releases       版本记录（同步自 Gitea Release）：id, repo_id, tag, name, body, prerelease, published_at,
 --                gitea_release_id, synced_at；唯一键 (repo_id, tag)
 -- release_tickets 版本关联工单：release_id, ticket_id, ref；由版本说明中的 Issue 引用解析生成
--- biz_tools      业务数据接口：id, tenant_id, name, description, input_schema, endpoint, method, required_scope,
---                mode(read|write), sensitive_fields, enabled, created_at
--- data_requests  业务数据请求审计：id, tenant_id, user_id, conversation_id, tool_id, params_digest,
+-- data_requests  业务数据请求审计：id, user_id, conversation_id, tool_name, params_digest,
 --                status(ok|denied|failed), latency_ms, idempotency_key, created_at；不保存业务数据原文
--- ticket_events  工单事件：id, ticket_id, actor_id, source(portal|openapi|mcp|gitea), kind, payload, created_at
+--                唯一键 (user_id, tool_name, idempotency_key)，write 类工具防重复提交
+-- ticket_events  工单事件：id, ticket_id, actor_id, source(api|mcp|go|gitea), kind, payload, created_at
 -- reviews        需求评审：id, ticket_id, reviewer_id, verdict(approve|reject|need_info), comment, created_at
--- notifications  通知 outbox：id, ticket_id, channel, target, payload, status, attempts, next_attempt_at
--- kb_entries     知识库问答：id, tenant_id, project_id, repo_id(可空), question, answer, source_ticket_id, source_conversation_id,
+-- outbox         异步任务：id, kind(gitea|notify), payload, status, attempts, next_attempt_at, created_at
+--                Gitea 写操作与 Notifier 回调均经 outbox 投递
+-- webhook_deliveries Webhook 去重：delivery_id, event, received_at
+-- kb_entries     知识库问答：id, project_id, repo_id(可空), question, answer, source_ticket_id, source_conversation_id,
 --                status(pending|approved), tags, embedding, created_at

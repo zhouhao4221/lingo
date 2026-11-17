@@ -1,2 +1,2 @@
-// Package auth 身份认证：门户登录、接入方 AppKey 签名校验、浏览器公开 Key 与身份令牌校验、MCP/服务账号令牌校验、固定角色鉴权。
+// Package auth 鉴权：调用接入方 Authenticator 解析身份，按固定角色（external/agent/reviewer/admin）与项目范围校验权限，权限判断集中于此。
 package auth

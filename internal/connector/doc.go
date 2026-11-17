@@ -1,2 +1,2 @@
-// Package connector 业务数据接口：接入方登记数据接口，问答时以提问人员身份、基于其权限（scope 预校验 + 业务系统二次校验）发起请求，负责脱敏、审计与熔断。
+// Package connector 业务数据工具：执行接入方注册的 lingo.Tool，以提问人员身份代其取数，负责 scope 预校验、写操作确认、脱敏、审计与熔断。
 package connector

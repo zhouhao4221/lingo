@@ -1,2 +1,2 @@
-// Package httpapi HTTP 路由与处理器：门户 API、浏览器 SDK 接口（CORS 白名单）、开放接口（OpenAPI）、管理后台 API、MCP 挂载。
+// Package httpapi REST JSON 接口：提问、工单、评审、知识库、版本的路由与处理器，由 lingo.Handler 暴露，路径为相对路径。
 package httpapi

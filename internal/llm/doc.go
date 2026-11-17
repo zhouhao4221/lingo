@@ -1,2 +1,2 @@
-// Package llm 大模型与向量服务客户端：对话生成、文本向量化，模型服务可配置。
+// Package llm 模型调用封装：经接入方提供的 lingo.Model 完成对话生成与文本向量化，领域层不直接调用三方 SDK。
 package llm
