@@ -4,7 +4,7 @@
 
 ## 文档
 
-- 代码仓库：`https://git.kanhushi.com/smartlab/lingo.git`（Gitea，`smartlab/lingo`）
+- 代码仓库：`https://github.com/zhouhao4221/lingo.git`（GitHub 开源，`zhouhao4221/lingo`）
 
 - 产品需求：[docs/requirements/PRD.md](docs/requirements/PRD.md)
 - 项目架构与开发规范：[docs/prompt/architecture.md](docs/prompt/architecture.md)

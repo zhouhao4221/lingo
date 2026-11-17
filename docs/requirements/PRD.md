@@ -454,7 +454,7 @@ flowchart LR
 
 #### 3.2.0.7 系统在线升级
 
-**功能描述**：灵问自身代码托管在 Gitea 私有仓库 `smartlab/lingo`（`https://git.kanhushi.com/smartlab/lingo.git`）。管理员可在管理后台检查 lingo 新版本、查看版本说明并发起升级；灵问负责发现版本、校验、确认与审计，实际升级由可插拔的**升级执行器**完成，以适配从单机到集群的不同部署方式。
+**功能描述**：灵问自身代码以开源方式托管在 GitHub 仓库 `zhouhao4221/lingo`（`https://github.com/zhouhao4221/lingo.git`）。管理员可在管理后台检查 lingo 新版本、查看版本说明并发起升级；灵问负责发现版本、校验、确认与审计，实际升级由可插拔的**升级执行器**完成，以适配从单机到集群的不同部署方式。
 
 **用户故事**：
 > 作为管理员，我希望在后台看到 lingo 有新版本及其变更内容，一键发起升级，失败可回滚，不必登录服务器手工操作。
@@ -464,7 +464,7 @@ flowchart LR
 | 执行器 | 适用部署 | 执行方式 |
 |-----|-----|-----|
 | `binary` | 早期 / 单机（二进制 + systemd） | 下载 Release 附件 → 校验 → 备份数据库 → `server migrate` → 替换二进制（保留旧版）→ 平滑重启 → 健康检查失败自动回滚 |
-| `pipeline` | 规模化（容器 + K8s / 编排） | 触发 Gitea Actions `workflow_dispatch` 或 CD 流水线，传入目标版本；由编排系统滚动发布，灵问轮询并展示进度 |
+| `pipeline` | 规模化（容器 + K8s / 编排） | 触发 GitHub Actions `workflow_dispatch` 或 CD 流水线，传入目标版本；由编排系统滚动发布，灵问轮询并展示进度 |
 
 **功能流程**：
 
@@ -832,7 +832,7 @@ flowchart LR
 
 | 文档 | 链接 |
 |-----|-----|
-| 代码仓库 | `https://git.kanhushi.com/smartlab/lingo.git` |
+| 代码仓库 | `https://github.com/zhouhao4221/lingo.git` |
 | 架构概览 | [docs/architecture/overview.md](../architecture/overview.md) |
 | 项目架构（开发规范） | [docs/prompt/architecture.md](../prompt/architecture.md) |
 | 数据库草案 | [migrations/0001_init.sql](../../migrations/0001_init.sql) || 原型设计 | 待补充 |

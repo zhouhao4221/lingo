@@ -7,7 +7,7 @@
 ## 仓库
 
 ```sh
-git clone https://git.kanhushi.com/smartlab/lingo.git
+git clone https://github.com/zhouhao4221/lingo.git
 ```
 
 ## 目录
