@@ -24,6 +24,8 @@
 | v1.6 | 2026-11-13 | haiqing | 新增基于人员权限的业务数据请求：数据接口登记、代用户调用、双重权限校验、审计 |
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
+| v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.9 | 2026-11-18 | haiqing | 细化 Gitea 对接（含启动自检；调研见 [gitea-integration.md](../architecture/gitea-integration.md)）：按仓库 Issue 表单模板提单、评论往来与对外回复规则、工单状态机、PR 合并识别修复、按 tag 区间提交关联版本、上线信号、Webhook 自动注册与对账；Gitea 最低 1.22 |
 
 ---
 
@@ -145,13 +147,15 @@ journey
 | P0 | MCP Server | `MCPHandler` 以 MCP 工具暴露提问、检索知识库、提交/查询工单，与 REST 对齐 | AI 客户端与研发 Agent 直接接入 | 是 |
 | P0 | 接入与配置 | `lingo.Config` 声明依赖与扩展点；`lingo.Migrate` 显式迁移；挂载 Handler、运行 worker | 接入方按需组装，自行决定单体或拆分进程 | 是 |
 | P0 | 项目与对接仓库 | 在代码中声明项目及其多个仓库（前后端等）；按项目提问，Issue 落到项目内合适的仓库 | 用户按产品提问，问题直达对应仓库 | 是 |
-| P0 | 工单提交 | 咨询、Bug、需求；转出时整理为结构化 Issue | AI 研发可直接处理 | 是 |
-| P0 | Gitea 同步 | 建 Issue + 类型标签；Webhook 回流评论、状态、标签变更 | 研发留在 Gitea 工作 | 是 |
+| P0 | 工单提交 | 咨询、Bug、需求；文字 + 截图 / 附件，接口供接入方弹窗组件调用；转出时整理为结构化 Issue | AI 研发可直接处理 | 是 |
+| P0 | 后台确认转出 | 后台人员确认后转出到 Gitea，或直接答复、合并、驳回；按项目与类型设自动 / 手动开关 | 过滤无效反馈，Issue 质量可控 | 是 |
+| P0 | 数据隔离 | 工单、会话、附件按提交人 ID 归属，按角色与项目控制可见范围；个人信息不外传 Gitea | 用户之间、项目之间互不可见 | 是 |
+| P0 | Gitea 同步 | 按仓库 Issue 模板建 Issue + 作用域标签；评论双向往来；Webhook 回流评论、指派、标签、里程碑、PR 合并、关闭 / 重开；定时对账 | 研发留在 Gitea 工作 | 是 |
 | P0 | 信息反馈（Notifier） | 工单 / 版本事件经 outbox 回调接入方 `Notifier`，失败重试 | 提交人及时获知进度，渠道由接入方决定 | 是 |
 | P1 | 需求评审 | 内部人员评审需求类工单并回复，结论回写 Gitea | 评审有入口、有记录 | 是 |
 | P0 | 身份与固定角色 | 预置固定角色，身份由接入方经 `Authenticate` 提供并映射角色；按角色控制权限 | 复用接入方用户体系，权限清晰 | 是 |
 | P0 | 知识库 | 结案工单与问答会话抽取问答对，供问答 Agent 检索 | 问答 Agent 的知识来源 | 是 |
-| P1 | 对接版本记录 | 同步 Gitea Release，版本说明入知识库，工单关联修复版本并通知 | 用户知道问题在哪个版本解决 | 否 |
+| P1 | 对接版本记录 | 同步 Gitea Release，版本说明入知识库，工单关联修复版本并通知；识别上线 | 用户知道问题在哪个版本解决、何时上线 | 否 |
 
 ### 3.2 功能详情
 
@@ -229,9 +233,9 @@ flowchart LR
 
 | 角色 | 标识 | 权限 |
 |-----|-----|-----|
-| 用户 | `external` | 提问、提交工单、查看本人会话与工单 |
+| 用户 | `external` | 提问、提交工单、查看本人会话与工单（可见范围见 3.2.0.6） |
 | AI 研发 Agent | `agent` | 通过 MCP / REST 接口读取工单、回复用户、检索知识库 |
-| 研发负责人 | `reviewer` | 在用户权限之外：查看全部工单、评审需求、回复用户、审核知识库 |
+| 研发负责人 | `reviewer` | 在用户权限之外：查看所负责项目的全部工单、确认转出、评审需求、回复用户、审核知识库 |
 | 管理员 | `admin` | 全部权限 |
 
 **用户故事**：
@@ -294,8 +298,8 @@ flowchart LR
 
 **功能描述**：灵问同步各对接仓库在 Gitea 中的版本记录（Release / Tag 及版本说明），用于三件事：
 - **问答**：版本说明入知识库，回答“最新版本有什么变化”“这个问题在哪个版本修复了”“某功能从哪个版本开始支持”
-- **关联**：解析版本说明中的 Issue 引用（如 `closes #12`、`#12`、`REQ-001`），把工单与修复 / 上线版本关联
-- **通知**：包含某工单的版本发布后，通知提交人“已在 vX.Y.Z 发布”
+- **关联**：以两个版本 tag 之间的提交为准定位已发布的修复，版本说明中的 Issue 引用（如 `closes #12`、`#12`）补漏，把工单与修复版本关联
+- **通知**：包含某工单的版本发布后，通知提交人“已在 vX.Y.Z 发布”；识别到上线后再通知“已上线”
 
 **用户故事**：
 > 作为用户，我希望知道我反馈的问题在哪个版本修复、我现在用的版本有哪些已知问题，以便决定是否升级。
@@ -310,15 +314,28 @@ flowchart LR
   A[Gitea 发布 Release] --> B[Webhook / 定时同步]
   B --> C[保存版本记录]
   C --> D[版本说明入知识库]
-  C --> E[解析 Issue 引用]
-  E --> F[工单关联修复版本]
-  F --> G[经 Notifier 通知提交人]
+  C --> E[比较上一 tag...本 tag 的提交]
+  E --> F[匹配工单修复提交 / PR]
+  C --> E2[解析说明中的 Issue 引用补漏]
+  E2 --> F
+  F --> G[工单 released，经 Notifier 通知]
+  H[部署流水线 / 提交状态 / MarkDeployed] --> I[工单 deployed，经 Notifier 通知]
 ```
 
 **业务规则**：
-- 来源：Gitea Release（标签、标题、说明、发布时间、是否预发布）；通过 `release` Webhook 实时接收，并定时全量同步兜底
+- 来源：Gitea Release（标签、标题、说明、发布时间、是否预发布）；通过 `release` Webhook（published / updated / deleted）实时接收，并定时全量同步兜底；只打 tag 不建 Release 的仓库经 `create` 事件（`ref_type=tag`）与定时列 tag 同步
 - 同步项目下各仓库的版本；草稿（draft）不同步，预发布（prerelease）同步但单独标记，是否通知：待定
-- 关联规则：版本说明中引用的 Issue 编号 → 对应工单标记“修复版本”；同一工单出现在多个版本时取最早的正式版本
+- 关联规则：
+  1. 取同仓库上一个正式版本 tag，调用 `compare/{prevTag}...{tag}` 得到区间提交；
+  2. 提交命中工单的 `fixed_commit`，或经 `commits/{sha}/pull` 反查到的 PR 命中工单的 `fixed_pr`，即关联；
+  3. 再解析版本说明中的 `#N` / `owner/repo#N` 补漏（`release_tickets.ref` 记录来源：`commit` 或引用原文）；
+  4. 同一工单出现在多个版本时取最早的正式版本
+- 跨仓库工单（一个工单对应前端、后端多个 Issue）：所有关联 Issue 的修复都已发布才算 `released`，都已上线才算 `deployed`
+- 上线识别（Gitea 无 Deployment API），按仓库配置 `Repo.Deploy`，任一信号命中即视为该版本上线：
+  - Gitea Actions（需 Gitea ≥ 1.25）：`workflow_run` 事件 `completed` 且 `conclusion=success`，工作流文件名匹配 `Deploy.Workflow`，以 run 的 `head_sha` / tag 对应版本；补偿用 `GET /actions/runs`
+  - 提交状态：外部 CI/CD 调用 `POST /statuses/{sha}`，`context` 等于 `Deploy.StatusContext`（如 `deploy/production`）且 `state=success`，灵问经 `status` 事件识别
+  - 接入方调用 `l.MarkDeployed(ctx, repo, tag, env)`（始终可用的兜底）
+- 研发约定：PR 正文写 `Fixes owner/repo#N`（Gitea 关闭关键词，PR 合并后自动关闭 Issue）
 - 提交 Bug 时可填写当前使用版本（Go 方法 / HTTP 接口 / MCP 参数 `version`），问答 Agent 据此判断问题是否已在更新版本修复，并提示升级
 - 版本记录按仓库保存、按项目汇总：按项目查询时按时间合并前后端各仓库的发布；问答时引用所选项目下的版本记录并注明仓库
 - 项目是否需要统一的产品版本号（映射到各仓库的版本组合）：待定
@@ -333,7 +350,8 @@ flowchart LR
 
 **验收标准**：
 - [ ] Gitea 发布 Release 后，灵问在 1 分钟内同步该版本记录
-- [ ] 版本说明中引用的 Issue 对应的工单显示修复版本，提交人收到发布通知
+- [ ] 修复 PR 已合并的工单，在包含该合并提交的版本发布后显示修复版本，提交人收到发布通知；版本说明未写 `#N` 时同样能关联
+- [ ] 配置的部署工作流成功、提交状态成功或调用 `MarkDeployed` 后，相关工单变为已上线，提交人收到通知
 - [ ] 用户问“某问题在哪个版本修复”时，问答 Agent 能给出版本号并附版本说明来源
 - [ ] 提交 Bug 并填写旧版本号，若该问题已在新版本修复，问答 Agent 提示升级
 
@@ -399,6 +417,34 @@ flowchart LR
 - [ ] `write` 类工具未经用户确认不会被调用
 - [ ] 每次请求均有审计记录；业务数据不进入知识库，转工单时按 `Sensitive` 脱敏
 
+#### 3.2.0.6 提交人身份与数据隔离
+
+**功能描述**：lingo 无租户，但必须保证不同用户、不同项目之间的数据互不可见。所有工单、会话、附件都关联提交人的接入方用户 ID（`User.ID`），并按角色与项目做访问控制；提交人的个人信息不外传到 Gitea。
+
+**业务规则**：
+- **归属**：工单、会话、附件、补充评论都记录 `user_id`（接入方用户 ID）及提交时的姓名 / 邮箱快照；快照只用于后台展示与通知，不用于权限判断
+- **访问控制**（所有接口与 MCP 工具在领域层统一执行，不依赖调用方自觉）：
+
+| 角色 | 工单 / 会话 / 附件可见范围 | 可执行操作 |
+|-----|-----|-----|
+| `external` | 仅 `user_id` 等于本人的数据 | 提交、补充、查看本人工单与对外回复 |
+| `agent` | `User.Projects` 内项目的已转出工单；看不到待确认、已驳回的工单 | 读取工单上下文、回复用户 |
+| `reviewer` | `User.Projects` 内项目的全部工单 | 确认转出、答复、合并、驳回、评审 |
+| `admin` | `User.Projects` 内项目的全部工单（为空表示全部项目） | 全部操作，含修改自动转出开关 |
+
+- **越权返回 404**：访问不属于自己的工单、附件时返回“不存在”，不暴露其存在
+- **存储层强制带范围**：store 层查询函数必须接收访问范围（用户 ID / 项目集合），不提供不带范围的列表查询；测试覆盖越权场景
+- **对 Gitea 脱敏**：Issue 与评论中不写提交人姓名、邮箱、手机号与业务系统账号，只写工单号（`lingo:ticket=<id>`）；研发需要联系提交人时通过灵问评论往来。附件转出前由后台人员勾选（3.2.1.2）
+- **研发回复的可见性**：只有按 `ReplyMode` 判定为对外的评论（3.2.2）才出现在提交人的工单详情中
+- **知识库**：从工单抽取问答对时去除提交人身份信息与附件内容；业务数据工具的结果不入库（3.2.0.5）
+- **合并工单**：被合并工单的提交人只能看到目标工单的对外进展，看不到其他提交人的内容与附件
+
+**验收标准**：
+- [ ] `external` 用户用他人的工单 ID、附件 ID 访问时返回 404
+- [ ] `agent` / `reviewer` 无法访问 `User.Projects` 之外项目的工单
+- [ ] 转出的 Issue 正文与评论中不包含提交人姓名、邮箱
+- [ ] 知识库条目中不出现提交人身份信息
+
 #### 3.2.1 接入与配置
 
 **功能描述**：接入方在业务项目中 `import "github.com/zhouhao4221/lingo"`，通过 `lingo.New(lingo.Config{...})` 创建实例，显式执行迁移，并把 Handler 挂到自己的路由上。最小接入示例见 `examples/server/main.go`。
@@ -435,6 +481,9 @@ go l.Run(ctx)
 | `Authenticate` | 接入方解析请求身份，返回 `lingo.User`（见 3.2.0.2） |
 | `Notifier` | `lingo.Notifier` 接口：工单 / 版本事件回调接入方（见 3.2.3） |
 | `Tools` | 业务数据工具，代用户取数（见 3.2.0.5） |
+| `MaxAttachmentBytes` | 单个附件大小上限，默认 10 MB（见 3.2.1.1） |
+| `TriageRemindAfter` | 待确认工单的提醒间隔，默认 24 小时；负数关闭提醒（见 3.2.1.2） |
+| `Project.AutoForward` | 按工单类型的自动转出默认值，未配置为手动确认（见 3.2.1.2） |
 
 **业务规则**：
 - 迁移 SQL 经 `go:embed` 打包在库内，由接入方在发布流程中显式调用 `lingo.Migrate(ctx, db)`；`New` 时不自动执行迁移（见 5.4）
@@ -445,9 +494,114 @@ go l.Run(ctx)
 - [ ] 按 `examples/server/main.go` 完成 `New`、`Migrate`、挂载与 `Run` 后，可跑通提问、转工单与通知闭环
 - [ ] `New` 不执行迁移；未调用 `Migrate` 时的行为：待确认
 
+#### 3.2.1.1 反馈提交接口（供接入方弹窗组件对接）
+
+**功能描述**：网页上的反馈入口是一个弹出窗口：用户选择类型（咨询 / Bug / 需求）、输入文字、截图或上传文件后提交。弹窗界面由接入方实现（lingo 不提供前端），lingo 提供它需要的全部接口与字段约定：上传附件、提交工单、查看本人工单与进展、补充信息。
+
+**用户故事**：
+> 作为用户，我希望在出问题的页面点开弹窗，选“Bug”，粘贴截图、写两句话就能提交，之后在同一个弹窗里看到处理进展。
+>
+> 作为接入开发者，我希望弹窗只调几个接口，身份沿用宿主页面的登录态，不需要额外签发令牌。
+
+**功能流程**：
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+sequenceDiagram
+  participant U as 用户（弹窗）
+  participant H as 接入方页面
+  participant L as lingo Handler
+  U->>H: 选类型、输入文字、截图 / 选文件
+  H->>L: POST /attachments（multipart，逐个上传）
+  L-->>H: attachment_id
+  H->>L: POST /tickets（type、content、attachment_ids、context）
+  L-->>H: ticket（status=pending_triage 或 submitted）
+  H->>L: GET /tickets/mine、GET /tickets/{id}
+  L-->>H: 状态、对外回复、版本 / 上线信息
+```
+
+**接口（Handler 相对路径，Go 方法同名能力）**：
+
+| 接口 | 说明 |
+|-----|-----|
+| `GET /ticket-types` | 可选类型与每类的表单字段（取自对应仓库的 Issue 模板必填字段，见 3.2.2），弹窗据此渲染表单 |
+| `POST /attachments` | multipart 上传单个附件（截图、日志、文件），返回 `attachment_id`；未关联工单的附件 24 小时后清理 |
+| `POST /tickets` | 提交工单：`project`、`repo`（可选）、`type`、`title`（可选，缺省由模型生成）、`content`、`fields`（模板字段）、`attachment_ids`、`context`（页面 URL、页面标题、浏览器、`version`，由弹窗自动采集）、`conversation_id`（从问答转出时带上） |
+| `GET /tickets/mine` | 本人工单列表，按状态过滤、分页 |
+| `GET /tickets/{id}` | 工单详情：状态时间线、对外回复、附件、修复版本、上线时间；不返回 Gitea 内部讨论 |
+| `POST /tickets/{id}/comments` | 用户补充说明，可带 `attachment_ids`；已转出时同步为 Issue 评论 |
+| `GET /attachments/{id}` | 下载附件，按 3.2.0.6 校验访问权限 |
+
+**业务规则**：
+- 身份由接入方 `Authenticate` 从请求中解析（同域 cookie 或接入方令牌），lingo 不另发凭据；未登录用户能否提交由接入方在 `Authenticate` 中决定
+- 附件限制：类型白名单默认 `png / jpg / gif / webp / pdf / txt / log / zip`，单个大小上限 `Config.MaxAttachmentBytes`（默认 10 MB），单工单最多 10 个；转出时还要满足 Gitea `/settings/attachment` 的限制，超出的附件只留在 lingo、Issue 中注明
+- 附件存在 lingo 数据库中（`attachments` 表），不依赖对象存储；转出到 Gitea 时再上传为 Issue 附件
+- 截图由弹窗在浏览器侧完成（如截取当前页面或粘贴剪贴板图片），lingo 只接收图片文件
+- 弹窗提交与问答转出走同一套工单逻辑；直接提交时，问答 Agent 仍可按模板必填字段追问缺失信息（追问经 `GET /tickets/{id}` 返回的 `pending_questions` 呈现）
+
+**验收标准**：
+- [ ] 弹窗按 `GET /ticket-types` 渲染类型与字段，提交带截图的 Bug 后返回工单号
+- [ ] 超过大小或类型不在白名单的附件被拒绝，并返回明确错误
+- [ ] 用户在弹窗中只能看到本人的工单与对外回复
+
+#### 3.2.1.2 后台确认转出（自动 / 手动开关）
+
+**功能描述**：用户提交的工单不一定都要交给研发。后台人员（`reviewer` / `admin`）可以先确认再转出到上游 Gitea：确认无误后转出，已能答复的直接答复关闭，重复的合并到已有工单。是否需要确认由开关控制，可按项目、按工单类型分别设置。
+
+**用户故事**：
+> 作为研发负责人，我希望用户反馈先经我过目：明显是使用问题的我直接回复，真正的 Bug 再转给 AI 研发，避免无效 Issue。
+>
+> 作为研发负责人，我希望 Bug 自动转出、需求必须人工确认，而且随时能临时关掉自动转出。
+
+**功能流程**：
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+  A[用户提交工单] --> B{该项目 + 类型<br/>自动转出?}
+  B -- 是 --> F[submitted → outbox 建 Issue]
+  B -- 否 --> C[pending_triage 待确认]
+  C --> D[通知后台人员]
+  D --> E{后台人员处理}
+  E -- 转出 --> F
+  E -- 直接答复 --> G[answered，通知提交人]
+  E -- 合并重复 --> H[merged，关联到已有工单]
+  E -- 驳回 --> I[rejected，附原因通知提交人]
+```
+
+**业务规则**：
+- **开关**：`Project.AutoForward`（按工单类型的映射，如 `{bug: true, feature: false}`）为代码中的默认值；未配置的类型默认**手动确认**
+- **运行时覆盖**：`admin` 可经 `PUT /settings/auto-forward`（Go：`l.SetAutoForward(ctx, user, project, type, on)`）临时开关，存入数据库并优先于代码默认值；可恢复为代码默认值；每次修改记录操作人
+- **转出时可修改**：后台人员确认时可改标题、类型、目标仓库、补充说明，并勾选哪些附件转到 Gitea（截图可能含敏感信息）；自动转出时附件全部转出
+- **处理动作**：`forward`（转出）/ `answer`（直接答复并关闭，答复可入知识库）/ `merge`（合并到另一工单，提交人一并收到后者进展）/ `reject`（驳回，必须填原因）
+- 待确认工单通过 `Notifier` 发出 `triage.required` 事件，由接入方通知后台人员；超过 `Config.TriageRemindAfter`（默认 24 小时，可修改）仍未处理时发出 `triage.overdue` 事件，之后每隔同样时长重复提醒，直到被处理；设为负数时关闭 lingo 的提醒，由接入方用 `GET /triage?pending_before=` 自行实现
+- 处理完成（转出 / 答复 / 合并 / 驳回）时发出 `triage.resolved` 事件，带处理动作 `Action` 与操作人 `ActorID`，供接入方消除后台待办；待确认期间用户的补充走 `ticket.comment`
+- 分工：何时提醒由 lingo 判断，提醒谁、经什么渠道由接入方在 `Notifier` 中决定
+- 确认操作按 `User.ID` 留痕；转出的 Issue 评论中注明“由 <后台人员姓名> 确认转出”
+- 需求类工单转出后仍进入需求评审（3.2.4），确认转出不等于评审通过
+
+**接口**：
+
+| 接口 | 说明 |
+|-----|-----|
+| `GET /triage` | 待确认列表（`reviewer` / `admin`），按项目、类型过滤；`pending_before=<时间>` 只返回在该时间之前进入待确认的工单；游标分页 |
+| `GET /triage/summary` | 各项目待确认数与超时数，供后台红点 / 角标 |
+| `POST /tickets/{id}/forward` | 转出，可带修改后的 `title`、`type`、`repo`、`note`、`attachment_ids` |
+| `POST /tickets/{id}/answer` | 直接答复并关闭 |
+| `POST /tickets/{id}/merge` | 合并到 `target_ticket_id` |
+| `POST /tickets/{id}/reject` | 驳回，必须带 `reason` |
+| `GET / PUT /settings/auto-forward` | 查看 / 修改自动转出开关（修改仅 `admin`） |
+
+**验收标准**：
+- [ ] `feature` 设为手动时，提交后状态为 `pending_triage`，Gitea 中不产生 Issue，后台人员收到通知
+- [ ] 后台人员转出后才创建 Issue，Issue 中只包含其勾选的附件
+- [ ] 直接答复、驳回后提交人收到通知，Gitea 中无 Issue
+- [ ] 待确认工单超过 `TriageRemindAfter` 未处理时，`Notifier` 收到 `triage.overdue` 事件；修改该值后按新间隔提醒
+- [ ] `admin` 关闭某类型的自动转出后，新提交的该类型工单立即进入待确认；恢复默认后按代码配置执行
+
 #### 3.2.2 工单提交与 Gitea 同步
 
-**功能描述**：用户经 Go 方法、REST 接口或 MCP 提交工单（或由问答 Agent 转出），灵问以机器人账号在项目内确定的仓库（规则见 3.2.0.3）创建 Issue，打上类型标签并保存 `repo + issue number` 关联；Gitea 侧变更经 Webhook 回流。
+**功能描述**：用户经 Go 方法、REST 接口或 MCP 提交工单（或由问答 Agent 转出），灵问以机器人账号在项目内确定的仓库（规则见 3.2.0.3）按仓库的 Issue 表单模板创建 Issue，打上作用域标签并保存 `repo + issue number` 关联；之后用户与研发经 Issue 评论往来，Gitea 侧变更经 Webhook 回流并定时对账。接口与事件明细见 [Gitea 对接调研](../architecture/gitea-integration.md)。
 
 **用户故事**：
 > 作为用户，我希望不用登录 Gitea 就能提交问题并看到处理进度。
@@ -463,38 +617,126 @@ flowchart LR
   E[Gitea Webhook] --> F[验签 + 去重]
   F --> G[更新工单 / 写 ticket_events]
   G --> H[写通知 outbox]
+  I[定时对账 since 游标] --> G
 ```
+
+**初始化**（`Run` 启动时按仓库执行）：
+- `GET /user` 缓存机器人 login；`GET /repos/{o}/{r}` 校验仓库可访问
+- 补齐标签（前缀 `GiteaConfig.LabelPrefix`，默认 `lingo`）：来源标签 `lingo`；`type/consult|bug|feature`、`review/pending|approved|rejected|need-info`（exclusive 作用域标签，同组互斥）；缓存 `name → id`
+- `GiteaConfig.AutoRegisterWebhook` 为真时，按 `WebhookURL` 查找或创建仓库级 Webhook（`type=gitea`、`content_type=json`、事件 `issues`、`issue_comment`、`issue_assign`、`issue_label`、`issue_milestone`、`pull_request`、`release`、`create`、`status`、`workflow_run`）；否则只校验
+- 启动自检（结果写日志，不阻断启动；清单见 [gitea-integration.md 12.3](../architecture/gitea-integration.md)）：
+  1. `GET /version` ≥ 1.22，低于 1.25 时关闭 Actions 上线信号并告警；`GET /settings/api`、`/settings/attachment` 读取分页上限与附件限制
+  2. 每个仓库可访问、`has_issues=true`、未启用外部 Issue 跟踪
+  3. 机器人对每个仓库有 write 权限（`GET /collaborators/{bot}/permission`）
+  4. 标签齐全（缺的补上）
+  5. Webhook 存在、已启用、事件订阅完整，测试投递成功；失败时提示检查 Gitea `[security] ALLOWED_HOST_LIST`
+  6. `Repo.Templates` 中的模板文件存在，`GET /issue_config/validate` 通过
+  7. 配置了 `Repo.Deploy.Workflow` 时，`GET /actions/workflows` 中能找到该工作流
+- 灵问对仓库设置只读；写操作仅限标签、Webhook 与 Issue 相关接口，不修改仓库属性、分支保护、协作者等，不需要管理员 token
+
+**模板提单**：
+- `GET /repos/{o}/{r}/issue_templates` 读取仓库 `.gitea/ISSUE_TEMPLATE/`（兼容 `.github/`）下的模板；工单类型到模板的映射见 `Repo.Templates`，未配置时按模板 `labels` 匹配类型标签，都没有时用内置结构（现象 / 复现步骤 / 期望 / 环境）
+- 表单模板（YAML）中必填的 `input` / `textarea` / `dropdown` / `checkboxes` 字段作为问答 Agent 的追问槽位，`dropdown` 选项作为候选；字段补齐后才建单
+- 正文按 Gitea 表单渲染格式 `### <label>\n\n<value>` 拼接，末尾附项目、仓库、`reported_version`、环境，以及隐藏标记 `<!-- lingo:ticket=<id> -->`；不写入提交人邮箱等个人信息
+- `POST /issues`：标题 = 模板标题前缀 + 摘要，`labels` 传标签 id，`assignees` 取 `Repo.Assignees`；附件建单后经 `POST /issues/{index}/assets` 上传并在正文引用
+- 幂等：outbox 重试建单前按隐藏标记查重，避免重复 Issue
+
+**评论往来**：
+- 用户补充 → 机器人 `POST /issues/{index}/comments`，正文标明“来自提交人的补充”；工单处于 `need_info` 时补充后回到 `in_progress`
+- 研发回复 → `issue_comment` 事件（created / edited / deleted）；`sender` 为机器人自己的事件只作确认，不再通知，防止回环
+- 哪些评论转给提交人由 `GiteaConfig.ReplyMode` 决定：`marked`（默认）只转发以 `/reply` 开头、含 `<!-- lingo:public -->` 标记或经 MCP 回复工具发出的评论；`all` 转发全部非机器人评论
+- 工单结束（`closed` / `deployed`）后锁定 Issue（`PUT /issues/{index}/lock`），重开时解锁
+
+**工单状态**：
+
+| 状态 | 含义 | 触发 |
+|-----|-----|-----|
+| `pending_triage` | 待后台确认 | 该项目 + 类型未开启自动转出（3.2.1.2） |
+| `answered` | 后台直接答复，未转出 | 后台 `answer` |
+| `merged` | 已合并到其他工单 | 后台 `merge` |
+| `rejected` | 已驳回，未转出 | 后台 `reject` |
+| `submitted` | 已确认，Issue 待创建 | 自动转出或后台 `forward` |
+| `open` | 已转研发 | Issue 创建成功 |
+| `in_progress` | 已领取 / 开发中 | `issue_assign` assigned；引用本 Issue 的 PR opened |
+| `need_info` | 需提交人补充 | 评审 `need_info` 或加 `review/need-info` 标签 |
+| `fixed` | 已修复，待发版 | 引用本 Issue 的 PR 合并（`pull_request` closed 且 `merged=true`），记录 `fixed_pr`、`fixed_commit` |
+| `released` | 修复已随版本发布 | 见 3.2.0.4 关联规则 |
+| `deployed` | 已上线 | 见 3.2.0.4 上线识别 |
+| `closed` | 关闭未修复（已答复 / 不修复 / 重复） | `issues` closed 且无已合并的修复 PR |
+| `abnormal` | Issue 被删除或仓库不可访问 | `issues` deleted；API 返回 404 |
+
+`issues` reopened 时回到 `in_progress` 并通知提交人；`issue_milestone` milestoned 时记录计划版本与截止日期并通知提交人。
 
 **业务规则**：
 - 工单类型：`consult`（咨询）/ `bug` / `feature`（需求），对应 Gitea 标签
 - REST / MCP 请求身份由 `Authenticate` 解析
 - 对 Gitea 的写操作经 outbox + worker 异步执行，可重试；Issue 创建失败不影响工单入库
-- Webhook 必须校验共享密钥签名（`GiteaConfig.WebhookSecret`），并按事件 ID 去重
-- 定期同步补偿，修复漏收 Webhook 导致的状态不一致
+- Webhook 必须校验共享密钥签名：`X-Gitea-Signature` = `hex(HMAC-SHA256(WebhookSecret, 原始请求体))`，常量时间比较；按 `X-Gitea-Event-Type` 分发
+- 去重两层：`X-Gitea-Delivery` 唯一约束；Gitea 手动重投会生成新的 delivery ID、对账数据也没有 delivery ID，因此再按业务键幂等（评论 `comment.id + updated_at`，Issue `issue.id + action + updated_at`，Release `release.id + action`）
+- Webhook 只验签、去重、落库后立即返回 2xx（Gitea 默认投递超时 5 秒），业务处理交给 worker
+- Gitea 投递失败不自动重试，因此定时增量对账为必需：按仓库保存 `since` 游标，拉取 `GET /issues?state=all&labels=lingo&since=` 与仓库级 `GET /issues/comments?since=`，必要时用 `GET /issues/{index}/timeline` 回放
+- 机器人 token 最小 scope：`write:issue`、`read:repository`、`read:user`；自动注册 Webhook 另需 `write:repository`
 
 **验收标准**：
 - [ ] 提交工单后在指定仓库生成带类型标签的 Issue
-- [ ] Gitea 中评论、关闭/重开、改标签后，工单状态与事件记录同步更新
-- [ ] 签名错误的 Webhook 被拒绝；重复投递的事件只处理一次
+- [ ] `Run` 启动后日志列出每个仓库的 7 项自检结果；版本过低、无权限、Webhook 不通等问题给出明确提示，且不阻断启动
+- [ ] Bug 工单按仓库表单模板的必填字段完成追问后建单，Issue 正文与网页按模板提交的格式一致
+- [ ] Gitea 中评论、指派、关闭/重开、改标签、PR 合并后，工单状态与事件记录同步更新
+- [ ] `marked` 模式下，研发的内部讨论不通知提交人，`/reply` 评论通知提交人；机器人自己的评论不触发通知
+- [ ] 签名错误的 Webhook 被拒绝；重复投递（含手动重投）的事件只处理一次
+- [ ] 关闭 Webhook 期间发生的评论与状态变化，在下次对账后补齐
 
 **边界情况**：
 | 场景 | 处理方式 |
 |-----|---------|
 | Gitea 不可用 | 工单正常创建，Issue 创建任务进入 outbox 重试 |
-| Issue 在 Gitea 被删除 | 工单标记异常，待定是否通知提交人 |
-| Webhook 乱序到达 | 以事件时间与 Issue 当前状态为准，待定具体策略 |
+| Issue 在 Gitea 被删除 | 工单标记 `abnormal`，待定是否通知提交人 |
+| Webhook 乱序到达 | 按 Issue `updated_at` 比较，旧于本地记录的事件只记 ticket_events 不改状态；有疑问时以 `GET /issues/{index}` 当前状态为准 |
+| outbox 重试时 Issue 其实已创建 | 按隐藏标记 `lingo:ticket=<id>` 查到后补记关联，不再新建 |
+| 仓库无模板 / 模板不合法 | 用内置结构建单；启动时 `GET /issue_config/validate` 报告问题 |
 
 #### 3.2.3 信息反馈（Notifier）
 
-**功能描述**：工单状态变化、评审结论、Issue 评论、修复版本发布时，灵问调用接入方实现的 `Notifier.Notify(ctx, lingo.Event)`；发邮件、站内信等渠道由接入方决定。
+**功能描述**：工单状态变化、待确认与处理、评审结论、Issue 评论、修复版本发布与上线时，灵问调用接入方实现的 `Notifier.Notify(ctx, lingo.Event)`；发邮件、站内信等渠道由接入方决定。接入方还可以主动查询（Go 方法 / REST）或按事件 ID 增量拉取变更流。
+
+**事件类型**：
+
+| Kind | 触发 | 典型用途 |
+|-----|-----|-----|
+| `ticket.created` | 工单提交 | 回执 |
+| `ticket.status` | 状态变化（含 `PrevStatus`） | 通知提交人进展 |
+| `ticket.comment` | 对外回复、用户补充 | 通知提交人 / 后台人员 |
+| `triage.required` | 进入待确认 | 后台待办 |
+| `triage.overdue` | 待确认超时（按 `TriageRemindAfter` 重复） | 催办 |
+| `triage.resolved` | 后台处理完成（`Action`：forward / answer / merge / reject） | 消除后台待办 |
+| `review.decision` | 需求评审结论 | 通知提交人 |
+| `ticket.released` | 修复版本已发布 | 通知提交人 |
+| `ticket.deployed` | 修复版本已上线 | 通知提交人 |
+
+**Event 字段**：`ID`（全局递增，去重与排序用）、`Kind`、`At`、`ProjectKey`、`TicketID`、`TicketType`、`Title`、`Status`、`PrevStatus`、`Action`、`UserID`（提交人）、`ActorID`（触发人，系统触发为空）、`Body`、`URL`。字段足够直接使用，多数场景不必回查。
+
+**接入方获取数据的方式**：
+
+| 方式 | 接口 | 适用 |
+|-----|-----|-----|
+| 推送 | `Notifier.Notify` | 实时提醒、更新角标 |
+| Go 方法 | `l.GetTicket`、`l.ListTriage`、`l.TriageSummary`、`l.ListEvents` | 接入方为 Go 进程，直接调用，不经 HTTP |
+| REST | `GET /tickets/{id}`、`GET /triage`、`GET /triage/summary`、`GET /events?after=` | 接入方后台前端 |
+| 变更流 | `l.ListEvents(ctx, user, afterID, limit)` / `GET /events?after=<ID>` | 把工单同步进接入方自己的库；补回漏处理的推送（P1，可在 MVP 之后提供） |
+
+推送与变更流使用同一个 `Event.ID`：接入方平时收推送，定期按最后处理的 ID 拉变更流对账。变更流同样按 3.2.0.6 做数据隔离：`external` 只能拉到本人工单的对外事件，`triage.*` 事件只对 `reviewer` / `admin` 可见。
 
 **业务规则**：
-- 事件先写 `outbox`，再由 worker 投递给 `Notifier`，失败按策略重试并记录尝试次数
-- 哪些事件触发通知（内部评论是否外发）：待定
+- 事件先写入 `events` 表（分配 `ID`）并写 `outbox`，再由 worker 投递给 `Notifier`，失败按策略重试并记录尝试次数
+- 投递为至少一次（at-least-once），接入方按 `Event.ID` 去重；同一工单的事件按 `ID` 顺序投递
+- 内部评论是否外发由 `GiteaConfig.ReplyMode` 决定（见 3.2.2）；状态变化（`need_info`、`fixed`、`released`、`deployed`、`closed`、重开、排期）均触发通知
 
 **验收标准**：
 - [ ] 工单状态变更后 `Notifier` 收到对应事件
 - [ ] `Notify` 返回错误时按策略重试，超过上限标记失败
+- [ ] 重试导致的重复投递携带相同 `Event.ID`
+- [ ] 后台处理待确认工单后，`Notifier` 收到 `triage.resolved`，`Action`、`ActorID` 正确
+- [ ] 按 `ListEvents` 从某个 ID 继续拉取，结果与推送的事件一致且不重不漏
 
 #### 3.2.4 需求评审
 
@@ -550,13 +792,15 @@ flowchart LR
 | 业务数据权限 | 代用户调用 Tool，灵问预校验 `User.Scopes` + 业务侧在 `Call` 内二次校验；业务数据不入知识库；`write` 需确认；审计只存摘要 | P0 |
 | 数据安全 | Gitea token 与 Webhook 密钥经 `Config.Gitea` 传入 | P0 |
 | 集成安全 | Webhook 验签 + 按事件去重 | P0 |
+| 数据隔离 | 按 `user_id` 与 `User.Projects` 在领域层统一做访问控制，越权返回 404；store 查询强制带范围；个人信息不写入 Gitea（3.2.0.6） | P0 |
+| 附件安全 | 类型白名单 + 大小上限；按工单归属校验下载权限；转出 Gitea 前由后台人员勾选 | P0 |
 | 审计日志 | 工单事件全量记录于 ticket_events | P1 |
 
 ### 4.4 兼容性需求
 
 - Go 版本：Go 1.24
 - 数据库：PostgreSQL，驱动由接入方选择
-- Gitea 版本：待定（需支持 Issue / Label / Webhook API）
+- Gitea 版本：最低 1.22（Issue 表单模板、依赖、timeline、Release、Webhook）；使用 Actions 上线信号需 1.25 及以上；不依赖仅 main 分支提供的项目看板 API
 - 部署环境：由接入方决定
 
 ---
@@ -573,13 +817,21 @@ flowchart LR
 | repos | Gitea 仓库，归属一个项目 | project_id, owner, name, kind(frontend/backend/mobile/docs/other), enabled |
 | conversations | 问答会话 | user_id(接入方用户 ID，文本), project_id, channel(api/mcp/go), status, ticket_id |
 | messages | 会话消息 | conversation_id, role(user/assistant), content, sources |
-| tickets | 工单 | user_id(接入方用户 ID，文本), 提交人姓名/邮箱快照, project_id, repo_id, type(consult/bug/feature), title, body, status, gitea_issue_number, reported_version, fixed_release_id |
+| tickets | 工单 | user_id(接入方用户 ID，文本), 提交人姓名/邮箱快照, project_id, repo_id, type(consult/bug/feature), title, body, status(见 3.2.2), gitea_issue_number, gitea_updated_at, reported_version, milestone, due_date, fixed_pr, fixed_commit, fixed_release_id, deployed_at |
+| attachments | 附件（截图、文件） | user_id, ticket_id(可空，未关联 24 小时后清理), comment_id(可空), filename, content_type, size, sha256, data(bytea), forwarded(是否已转 Gitea), gitea_attachment_uuid |
+| events | 对外事件（Notifier 推送与变更流共用） | id(递增), kind, project_id, ticket_id, user_id, actor_id, status, prev_status, action, payload, created_at |
+| triage_actions | 后台确认记录 | ticket_id, actor_id, action(forward/answer/merge/reject), note, target_ticket_id, created_at |
+| project_settings | 运行时设置（自动转出覆盖值） | project_id, ticket_type, auto_forward, updated_by, updated_at |
+| ticket_issues | 工单拆到多个仓库时的附加 Issue | ticket_id, repo_id, gitea_issue_number, state, fixed_pr, fixed_commit |
+| deployments | 上线记录 | release_id, env, source(workflow/status/manual), ref, deployed_at |
+| sync_cursors | 对账游标 | repo_id, kind(issues/comments/releases), since |
 | releases | 版本记录 | repo_id, tag, name, body, prerelease, published_at, gitea_release_id |
-| release_tickets | 版本关联工单 | release_id, ticket_id, ref(引用原文) |
+| release_tickets | 版本关联工单 | release_id, ticket_id, ref(`commit` 或引用原文) |
 | data_requests | 业务数据请求审计（只存摘要） | user_id, conversation_id, tool(Tool.Name), params_digest, status, latency_ms, idempotency_key |
 | ticket_events | 工单事件 | ticket_id, source, kind, payload |
 | reviews | 需求评审 | ticket_id, reviewer_id(接入方用户 ID), verdict(approve/reject/need_info), comment |
 | outbox | 异步任务 outbox（原 notifications）：Gitea 写操作、Notifier 投递 | 字段待确认（至少含 payload, status, attempts） |
+| webhook_deliveries | Webhook 去重 | delivery_id(唯一), event, event_type, dedup_key(唯一，业务键), received_at |
 | kb_entries | 知识库问答 | project_id, repo_id(可空), question, answer, source_ticket_id, tags, embedding |
 
 ### 5.2 数据采集
@@ -670,7 +922,11 @@ flowchart LR
 | `lingo.New(cfg)` | Go | 创建实例，同步 `Config.Projects` 入库 |
 | `lingo.Migrate(ctx, db)` | Go | 执行库内 `go:embed` 的迁移 |
 | `l.Ask` / `l.CreateTicket` / `l.GetTicket` / `l.ReplyTicket` / `l.Review` / `l.SearchKnowledge` / `l.ListReleases` 等 | Go | 不走 HTTP 直接调用，签名待设计 |
-| `l.Run(ctx)` | Go | 后台 worker：outbox 投递、Gitea 同步补偿、知识库生成 |
+| `l.Run(ctx)` | Go | 后台 worker：outbox 投递、Gitea 初始化（标签、Webhook）与对账补偿、知识库生成 |
+| `l.SetAutoForward(ctx, user, project, type, on)` / `l.ResetAutoForward(ctx, user, project, type)` | Go | 运行时覆盖 / 恢复自动转出开关（admin） |
+| `l.GetTicket` / `l.ListTriage` / `l.TriageSummary` / `l.ListEvents` | Go | 查询工单、待确认列表、待确认统计、变更流（均接收 `lingo.User` 做数据隔离） |
+| 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2（`/ticket-types`、`/attachments`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
+| `l.MarkDeployed(ctx, repo, tag, env)` | Go | 接入方部署完成后告知灵问某仓库版本已上线（`repo` 为 `owner/name`） |
 | `l.Handler()`（示例挂载 `/lingo/`） | - | REST JSON：提问、工单、评审、知识库、版本，路径待设计 |
 | `l.MCPHandler()`（示例挂载 `/mcp`） | POST/GET | MCP Server（Streamable HTTP），工具见 3.2.0.1、3.2.0.4；提问 / 工单接口支持 `project`、`repo`、`version` 参数 |
 | `l.WebhookHandler()`（示例挂载 `/webhooks/gitea`） | POST | Gitea Webhook 接收，验签 + 去重 |

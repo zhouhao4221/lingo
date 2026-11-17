@@ -37,7 +37,19 @@ type Project struct {
 	Description string
 	Repos       []Repo
 	DefaultRepo string // 默认仓库 "owner/name"，未指定时取 Repos[0]
+	// AutoForward 是各工单类型提交后是否自动转出到 Gitea 的默认值；未配置的类型需后台人员确认。
+	// admin 可经 SetAutoForward 在运行时覆盖。
+	AutoForward map[TicketType]bool
 }
+
+// TicketType 是工单类型，对应 Gitea 类型标签。
+type TicketType string
+
+const (
+	TicketConsult TicketType = "consult" // 咨询
+	TicketBug     TicketType = "bug"
+	TicketFeature TicketType = "feature" // 需求
+)
 
 // RepoKind 是仓库类型，用于判定 Issue 落库仓库。
 type RepoKind string
@@ -55,13 +67,43 @@ type Repo struct {
 	Owner string
 	Name  string
 	Kind  RepoKind
+	// Assignees 是新建 Issue 默认指派的 Gitea 账号（如研发 Agent）；为空不指派。
+	Assignees []string
+	// Templates 把工单类型（consult / bug / feature）映射到仓库 Issue 模板文件名，
+	// 如 {"bug": "bug_report.yaml"}；未配置的类型按模板标签匹配，仍无则用内置结构。
+	Templates map[string]string
+	// Deploy 声明如何识别该仓库的版本已上线；全为空时只能经 MarkDeployed 告知。
+	Deploy DeploySignal
 }
 
-// GiteaConfig 是 Gitea 连接配置。
+// DeploySignal 声明上线信号；Gitea 没有 Deployment API，任一信号命中即视为上线。
+type DeploySignal struct {
+	Workflow      string // Gitea Actions 工作流文件名（如 "deploy-prod.yml"），运行成功即上线；需 Gitea ≥ 1.25
+	StatusContext string // 提交状态 context（如 "deploy/production"），state=success 即上线
+	Env           string // 环境名，记入上线记录；默认 "production"
+}
+
+// ReplyMode 决定 Gitea 中哪些评论转给提交人。
+type ReplyMode string
+
+const (
+	ReplyMarked ReplyMode = "marked" // 默认：只转发 /reply 开头、带 <!-- lingo:public --> 标记或经 MCP 回复的评论
+	ReplyAll    ReplyMode = "all"    // 转发全部非机器人评论
+)
+
+// GiteaConfig 是 Gitea 连接配置；要求 Gitea ≥ 1.22。
 type GiteaConfig struct {
 	BaseURL       string
-	Token         string // 机器人账号 token
+	Token         string // 机器人账号 token，最小 scope：write:issue、read:repository、read:user
 	WebhookSecret string // Webhook 共享密钥
+
+	LabelPrefix string    // 来源标签与作用域标签前缀，默认 "lingo"
+	ReplyMode   ReplyMode // 默认 ReplyMarked
+
+	// AutoRegisterWebhook 为真时，Run 启动时在各仓库查找或创建指向 WebhookURL 的 Webhook
+	// （token 另需 write:repository）；为假时由接入方手工配置。
+	AutoRegisterWebhook bool
+	WebhookURL          string // WebhookHandler 的外部可访问地址
 }
 
 // Message 是对话消息。
@@ -105,19 +147,75 @@ const (
 	EventTicketComment  EventKind = "ticket.comment"
 	EventReviewDecision EventKind = "review.decision"
 	EventTicketReleased EventKind = "ticket.released" // 修复版本已发布
+	EventTicketDeployed EventKind = "ticket.deployed" // 修复版本已上线
+	// EventTriageRequired 表示工单待后台人员确认转出；UserID 仍为提交人，由接入方决定通知哪些后台人员。
+	EventTriageRequired EventKind = "triage.required"
+	EventTriageOverdue  EventKind = "triage.overdue"  // 待确认超过 Config.TriageRemindAfter 未处理，按该间隔重复提醒
+	EventTriageResolved EventKind = "triage.resolved" // 后台处理完成，见 Event.Action
 )
 
-// Event 是回传给接入方的工单进展。
+// TriageAction 是后台人员对待确认工单的处理动作。
+type TriageAction string
+
+const (
+	TriageForward TriageAction = "forward" // 转出到 Gitea
+	TriageAnswer  TriageAction = "answer"  // 直接答复并关闭
+	TriageMerge   TriageAction = "merge"   // 合并到其他工单
+	TriageReject  TriageAction = "reject"  // 驳回
+)
+
+// Event 是回传给接入方的工单进展；Notifier 推送与 ListEvents 变更流共用。
+// 投递为至少一次，接入方按 ID 去重。
 type Event struct {
+	ID         int64 // 全局递增，去重与增量拉取的游标
 	Kind       EventKind
-	UserID     string // 提交人（接入方用户 ID）
+	At         time.Time
 	ProjectKey string
 	TicketID   int64
+	TicketType TicketType
 	Title      string
 	Status     string
+	PrevStatus string       // 状态变化前的状态，非状态类事件为空
+	Action     TriageAction // 仅 triage.resolved
+	UserID     string       // 提交人（接入方用户 ID）
+	ActorID    string       // 触发人（接入方用户 ID）；系统或 Gitea 触发为空
 	Body       string
 	URL        string // Gitea Issue 或 Release 链接
-	At         time.Time
+}
+
+// Ticket 是对接入方可见的工单视图（不含 Gitea 内部讨论）。
+type Ticket struct {
+	ID          int64
+	ProjectKey  string
+	Repo        string // "owner/name"，未转出时为空
+	Type        TicketType
+	Title       string
+	Body        string
+	Status      string
+	UserID      string
+	UserName    string
+	IssueURL    string
+	FixedTag    string // 修复版本
+	DeployedAt  *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	TriageSince *time.Time // 进入待确认的时间，非待确认为空
+}
+
+// TriageFilter 是待确认列表的过滤条件。
+type TriageFilter struct {
+	ProjectKey    string
+	Type          TicketType
+	PendingBefore time.Time // 非零时只返回在该时间之前进入待确认的工单
+	AfterID       int64     // 游标分页
+	Limit         int       // 0 表示默认 50
+}
+
+// TriageCount 是单个项目的待确认统计。
+type TriageCount struct {
+	ProjectKey string
+	Pending    int
+	Overdue    int // 超过 Config.TriageRemindAfter 的数量
 }
 
 // Notifier 接收工单进展事件，经 outbox 投递，返回错误会重试；由接入方决定发邮件、站内信等。
