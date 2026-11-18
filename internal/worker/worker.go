@@ -58,6 +58,13 @@ type Options struct {
 	Notifications NotificationStore
 	Notify        func(ctx context.Context, e notify.Event) error
 
+	// Tasks、Issues、Drafts 同时非空时运行 Gitea 写操作循环（建 Issue 等）。
+	Tasks       TaskStore
+	Issues      IssueWriter
+	Drafts      Drafts
+	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
+	LabelPrefix string                       // 默认 "lingo"
+
 	Logger       *slog.Logger
 	PollInterval time.Duration // 队列为空时的轮询间隔，默认 1 秒
 	BatchSize    int           // 每次领取条数，默认 20
@@ -71,8 +78,10 @@ type Options struct {
 
 // Worker 消费 Webhook 投递与通知 outbox；多实例运行安全（领取用 SKIP LOCKED + 租约）。
 type Worker struct {
-	o   Options
-	log *slog.Logger
+	o         Options
+	log       *slog.Logger
+	labels    labelCache
+	templates templateCache
 }
 
 // New 校验配置并创建 Worker。
@@ -110,6 +119,15 @@ func New(o Options) (*Worker, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.Repos == nil {
+		o.Repos = func(string) RepoConfig { return RepoConfig{} }
+	}
+	if o.LabelPrefix == "" {
+		o.LabelPrefix = "lingo"
+	}
+	if o.Tasks != nil && (o.Issues == nil || o.Drafts == nil) {
+		return nil, errors.New("worker: Issues and Drafts are required with Tasks")
+	}
 	return &Worker{o: o, log: o.Logger.With("component", "lingo.worker")}, nil
 }
 
@@ -138,6 +156,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.o.Notifications != nil && w.o.Notify != nil {
 		wg.Add(1)
 		go loop("notify", w.DeliverNotifications)
+	}
+	if w.o.Tasks != nil {
+		wg.Add(1)
+		go loop("gitea", w.ProcessTasks)
 	}
 	wg.Wait()
 	return nil

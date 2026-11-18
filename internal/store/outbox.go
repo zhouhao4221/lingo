@@ -77,38 +77,114 @@ func (s *Store) ClaimNotifications(ctx context.Context, limit int, lease time.Du
 	return out, nil
 }
 
+// Task 是 worker 领取到的一条 Gitea 写操作任务。
+type Task struct {
+	OutboxID int64
+	Attempts int
+	Failures int
+	TicketID int64
+	Op       string
+	Payload  []byte // 原始 JSON，含 op
+}
+
+// ClaimTasks 领取最多 limit 条到期的 Gitea 任务；同一工单的任务按入队顺序执行。结果按 outbox ID 升序。
+func (s *Store) ClaimTasks(ctx context.Context, limit int, lease time.Duration) ([]Task, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if lease <= 0 {
+		lease = DefaultLease
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		UPDATE outbox o
+		SET locked_until = now() + make_interval(secs => $2), attempts = o.attempts + 1, updated_at = now()
+		WHERE o.id IN (
+		    SELECT c.id FROM outbox c
+		    WHERE c.kind = 'gitea' AND c.status = 'pending'
+		      AND c.next_attempt_at <= now()
+		      AND (c.locked_until IS NULL OR c.locked_until < now())
+		      AND NOT EXISTS (
+		          SELECT 1 FROM outbox p
+		          WHERE p.kind = 'gitea' AND p.status = 'pending' AND p.ticket_id = c.ticket_id AND p.id < c.id)
+		    ORDER BY c.id
+		    LIMIT $1
+		    FOR UPDATE SKIP LOCKED)
+		RETURNING o.id, o.attempts, o.failures, COALESCE(o.ticket_id, 0), COALESCE(o.payload->>'op', ''), o.payload`,
+		limit, lease.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("store: claim tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.OutboxID, &t.Attempts, &t.Failures, &t.TicketID, &t.Op, &t.Payload); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b Task) int { return cmp.Compare(a.OutboxID, b.OutboxID) })
+	return out, nil
+}
+
+// CompleteTask 标记任务完成。
+func (s *Store) CompleteTask(ctx context.Context, t Task) error {
+	return s.finishOutboxRow(ctx, t.OutboxID, t.Attempts, `UPDATE outbox SET status = 'done', locked_until = NULL, last_error = '', updated_at = now()`+outboxLeaseHeld)
+}
+
+// RetryTask 记一次失败，在 retryAt 之后允许重新领取。
+func (s *Store) RetryTask(ctx context.Context, t Task, reason string, retryAt time.Time) error {
+	return s.finishOutboxRow(ctx, t.OutboxID, t.Attempts, `UPDATE outbox SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
+		reason, retryAt)
+}
+
+// ReleaseTask 释放租约，不计失败。
+func (s *Store) ReleaseTask(ctx context.Context, t Task, reason string, retryAt time.Time) error {
+	return s.finishOutboxRow(ctx, t.OutboxID, t.Attempts, `UPDATE outbox SET locked_until = NULL, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
+		reason, retryAt)
+}
+
+// FailTask 放弃任务，保留原因；不再阻塞同一工单的后续任务。
+func (s *Store) FailTask(ctx context.Context, t Task, reason string) error {
+	return s.finishOutboxRow(ctx, t.OutboxID, t.Attempts, `UPDATE outbox SET status = 'failed', locked_until = NULL, last_error = $3, updated_at = now()`+outboxLeaseHeld,
+		reason)
+}
+
 const outboxLeaseHeld = ` WHERE id = $1 AND attempts = $2 AND status = 'pending'`
 
 // CompleteNotification 标记通知已投递。
 func (s *Store) CompleteNotification(ctx context.Context, n Notification) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET status = 'done', locked_until = NULL, last_error = '', updated_at = now()`+outboxLeaseHeld)
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET status = 'done', locked_until = NULL, last_error = '', updated_at = now()`+outboxLeaseHeld)
 }
 
 // RetryNotification 记一次失败并保存原因，在 retryAt 之后允许重新领取。
 func (s *Store) RetryNotification(ctx context.Context, n Notification, reason string, retryAt time.Time) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
 		reason, retryAt)
 }
 
 // ReleaseNotification 释放租约，在 retryAt 之后允许重新领取，不计失败。
 func (s *Store) ReleaseNotification(ctx context.Context, n Notification, reason string, retryAt time.Time) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET locked_until = NULL, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET locked_until = NULL, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
 		reason, retryAt)
 }
 
 // FailNotification 放弃投递（超过重试上限），保留失败原因；不再阻塞同一工单的后续通知。
 func (s *Store) FailNotification(ctx context.Context, n Notification, reason string) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET status = 'failed', locked_until = NULL, last_error = $3, updated_at = now()`+outboxLeaseHeld,
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET status = 'failed', locked_until = NULL, last_error = $3, updated_at = now()`+outboxLeaseHeld,
 		reason)
 }
 
-func (s *Store) finishOutbox(ctx context.Context, n Notification, query string, args ...any) error {
-	res, err := s.db.ExecContext(ctx, query, append([]any{n.OutboxID, n.Attempts}, args...)...)
+func (s *Store) finishOutboxRow(ctx context.Context, id int64, attempts int, query string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, query, append([]any{id, attempts}, args...)...)
 	if err != nil {
-		return fmt.Errorf("store: update outbox %d: %w", n.OutboxID, err)
+		return fmt.Errorf("store: update outbox %d: %w", id, err)
 	}
 	if c, err := res.RowsAffected(); err == nil && c == 0 {
-		return fmt.Errorf("%w: outbox %d attempt %d", ErrLeaseLost, n.OutboxID, n.Attempts)
+		return fmt.Errorf("%w: outbox %d attempt %d", ErrLeaseLost, id, attempts)
 	}
 	return nil
 }

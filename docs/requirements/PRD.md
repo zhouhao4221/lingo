@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.12 | 2026-11-18 | haiqing | 工单提交与后台确认落地：Go 方法 `CreateTicket`、`ForwardTicket`、`AnswerTicket`、`MergeTicket`、`RejectTicket` 与公开错误 `ErrInvalidInput` / `ErrForbidden` / `ErrConflict`；项目在 `Run` 启动或首次调用时同步入库（不停用配置中删掉的项目与仓库，以当前 Config 为准校验，避免滚动发布时旧实例停掉新项目）；建 Issue 经 outbox 执行，重试时按隐藏标记查重，用户文本中的灵问标记被去掉，Issue 正文不含提交人身份；建单被放弃时工单变为 `abnormal`，可再次转出 |
 | v1.11 | 2026-11-18 | haiqing | Webhook 回流规则补充：新增事件 `ticket.scheduled`（排期）；Issue 关闭但尚无修复 PR 时等待 30 秒再判定；重开清除修复记录；标签全名带 `LabelPrefix`（如 `lingo/review/need-info`） |
 | v1.9 | 2026-11-18 | haiqing | 细化 Gitea 对接（含启动自检；调研见 [gitea-integration.md](../architecture/gitea-integration.md)）：按仓库 Issue 表单模板提单、评论往来与对外回复规则、工单状态机、PR 合并识别修复、按 tag 区间提交关联版本、上线信号、Webhook 自动注册与对账；Gitea 最低 1.22 |
 
@@ -936,6 +937,8 @@ flowchart LR
 | `l.Ask` / `l.CreateTicket` / `l.GetTicket` / `l.ReplyTicket` / `l.Review` / `l.SearchKnowledge` / `l.ListReleases` 等 | Go | 不走 HTTP 直接调用，签名待设计 |
 | `l.Run(ctx)` | Go | 后台 worker：outbox 投递、Gitea 初始化（标签、Webhook）与对账补偿、知识库生成 |
 | `l.SetAutoForward(ctx, user, project, type, on)` / `l.ResetAutoForward(ctx, user, project, type)` | Go | 运行时覆盖 / 恢复自动转出开关（admin） |
+| `l.CreateTicket(ctx, user, TicketInput)` | Go | 提交工单，按开关自动转出或进入待确认 |
+| `l.ForwardTicket` / `l.AnswerTicket` / `l.MergeTicket` / `l.RejectTicket` | Go | 后台处理待确认工单（reviewer / admin），发出 `triage.resolved` |
 | `l.GetTicket` / `l.ListTriage` / `l.TriageSummary` / `l.ListEvents` | Go | 查询工单、待确认列表、待确认统计、变更流（均接收 `lingo.User` 做数据隔离） |
 | 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2（`/ticket-types`、`/attachments`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
 | `l.MarkDeployed(ctx, repo, tag, env)` | Go | 接入方部署完成后告知灵问某仓库版本已上线（`repo` 为 `owner/name`） |

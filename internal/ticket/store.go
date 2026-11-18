@@ -13,6 +13,8 @@ type Store interface {
 	InTx(ctx context.Context, fn func(Tx) error) error
 	// HasIssue 报告仓库（"owner/name"，不区分大小写）的 Issue 是否是某个工单的主 Issue（不加锁）。
 	HasIssue(ctx context.Context, repo string, number int64) (bool, error)
+	// Get 读取工单（不加锁），含修复版本与上线时间；不存在返回 ErrNotFound。
+	Get(ctx context.Context, id int64) (*Ticket, error)
 }
 
 // Tx 是事务内的工单操作。Lock* 以 SELECT … FOR UPDATE 锁定工单，同一工单的并发更新串行执行。
@@ -21,8 +23,27 @@ type Tx interface {
 	LockByIssue(ctx context.Context, repo string, number int64) (*Ticket, error)
 	// LockByID 查找并锁定工单；不存在返回 ErrNotFound。
 	LockByID(ctx context.Context, id int64) (*Ticket, error)
-	// Update 保存 Status、IssueNumber、GiteaUpdatedAt、FixedPR、FixedCommit、Milestone、DueDate，并刷新 updated_at。
+	// Update 保存可变字段（RepoID、Type、Title、Status、IssueNumber、MergedInto、TriageSince、GiteaUpdatedAt、
+	// FixedPR、FixedCommit、Milestone、DueDate），并刷新 updated_at。
 	Update(ctx context.Context, t *Ticket) error
+	// Insert 新建工单，回填 ID、CreatedAt、UpdatedAt。
+	Insert(ctx context.Context, t *Ticket) error
+	// Project 按 key 查找已启用的项目；不存在返回 ErrNotFound。
+	Project(ctx context.Context, key string) (*Project, error)
+	// Repo 在项目内按 "owner/name"（不区分大小写）查找已启用的仓库；不属于该项目返回 ErrNotFound。
+	Repo(ctx context.Context, projectID int64, name string) (*RepoRef, error)
+	// AutoForward 返回项目 + 类型的运行时覆盖值；没有覆盖时 ok 为 false。
+	AutoForward(ctx context.Context, projectID int64, typ string) (on, ok bool, err error)
+	// SetAutoForward 写入（on 非空）或删除（on 为空）运行时覆盖值。
+	SetAutoForward(ctx context.Context, projectID int64, typ string, on *bool, by string) error
+	// ConversationOwner 返回会话的提交人；不存在返回 ErrNotFound。
+	ConversationOwner(ctx context.Context, id int64) (string, error)
+	// AddComment 写一条工单评论（用户补充或后台答复）。
+	AddComment(ctx context.Context, c Comment) error
+	// AddTriage 写一条后台处理记录（triage_actions）。
+	AddTriage(ctx context.Context, a Triage) error
+	// Enqueue 写一条 Gitea 写操作任务；Key 已存在时忽略（同一操作只入队一次）。
+	Enqueue(ctx context.Context, t Task) error
 	// AddHistory 写一条 ticket_events 审计记录。
 	AddHistory(ctx context.Context, h History) error
 	// SaveGiteaComment 按 GiteaID 新增或更新来自 Gitea 的评论，返回更新前的记录（新增时为 nil）。
@@ -45,9 +66,44 @@ type History struct {
 // Comment 是工单评论（ticket_comments）。
 type Comment struct {
 	TicketID   int64
-	GiteaID    int64
+	GiteaID    int64  // 来自 Gitea 的评论 ID
+	Source     string // user | staff | gitea；SaveGiteaComment 固定为 gitea
+	AuthorID   string // 接入方用户 ID；来自 Gitea 时为空
 	AuthorName string
 	Body       string
 	Public     bool
 	At         time.Time
+}
+
+// Project 是已同步入库的项目。
+type Project struct {
+	ID          int64
+	Key         string
+	DefaultRepo *RepoRef // 未设置时为空
+}
+
+// RepoRef 是项目下的仓库。
+type RepoRef struct {
+	ID   int64
+	Name string // "owner/name"
+}
+
+// Triage 是一条后台处理记录。
+type Triage struct {
+	TicketID int64
+	ActorID  string
+	Action   string // forward | answer | merge | reject
+	Note     string
+	TargetID int64 // merge 的目标工单
+}
+
+// 任务操作。
+const OpCreateIssue = "create_issue"
+
+// Task 是 Gitea 写操作任务（outbox kind=gitea）。
+type Task struct {
+	Key      string // 幂等键，如 "create_issue:ticket:42"
+	TicketID int64
+	Op       string
+	Payload  map[string]any
 }

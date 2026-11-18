@@ -3,6 +3,7 @@ package ticket
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -16,10 +17,19 @@ type memStore struct {
 	comments map[int64]Comment
 	history  []History
 	events   []notify.Event
+
+	projects map[string]*Project
+	repos    map[int64][]RepoRef // project → repos
+	auto     map[string]bool     // "project:type"
+	notes    []Comment
+	triages  []Triage
+	tasks    map[string]Task
 }
 
 func newMem(ts ...Ticket) *memStore {
-	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}}
+	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{},
+		projects: map[string]*Project{"demo": {ID: 1, Key: "demo", DefaultRepo: &RepoRef{ID: 10, Name: "demo/api"}}, "empty": {ID: 2, Key: "empty"}},
+		repos:    map[int64][]RepoRef{1: {{ID: 10, Name: "demo/api"}, {ID: 11, Name: "demo/web"}}}}
 	for _, t := range ts {
 		m.tickets[t.ID] = &t
 	}
@@ -31,13 +41,85 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 	for id, t := range m.tickets {
 		saved[id] = *t
 	}
-	nh, ne := len(m.history), len(m.events)
+	nh, ne, nn, nt := len(m.history), len(m.events), len(m.notes), len(m.triages)
 	if err := fn(m); err != nil {
-		for id, t := range saved {
-			*m.tickets[id] = t
+		for id := range m.tickets {
+			if t, ok := saved[id]; ok {
+				*m.tickets[id] = t
+			} else {
+				delete(m.tickets, id)
+			}
 		}
-		m.history, m.events = m.history[:nh], m.events[:ne]
+		m.history, m.events, m.notes, m.triages = m.history[:nh], m.events[:ne], m.notes[:nn], m.triages[:nt]
 		return err
+	}
+	return nil
+}
+
+func (m *memStore) Get(_ context.Context, id int64) (*Ticket, error) {
+	if t, ok := m.tickets[id]; ok {
+		c := *t
+		return &c, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memStore) Insert(_ context.Context, t *Ticket) error {
+	t.ID = int64(len(m.tickets) + 1)
+	c := *t
+	m.tickets[t.ID] = &c
+	return nil
+}
+
+func (m *memStore) Project(_ context.Context, key string) (*Project, error) {
+	if p, ok := m.projects[key]; ok {
+		return p, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memStore) Repo(_ context.Context, pid int64, name string) (*RepoRef, error) {
+	for _, r := range m.repos[pid] {
+		if strings.EqualFold(r.Name, name) {
+			return &r, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memStore) AutoForward(_ context.Context, pid int64, typ string) (bool, bool, error) {
+	on, ok := m.auto[fmt.Sprint(pid)+":"+typ]
+	return on, ok, nil
+}
+
+func (m *memStore) SetAutoForward(_ context.Context, pid int64, typ string, on *bool, _ string) error {
+	k := fmt.Sprint(pid) + ":" + typ
+	if on == nil {
+		delete(m.auto, k)
+	} else {
+		m.auto[k] = *on
+	}
+	return nil
+}
+
+func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {
+	if id == 1 {
+		return "u1", nil
+	}
+	return "", ErrNotFound
+}
+
+func (m *memStore) AddComment(_ context.Context, c Comment) error {
+	m.notes = append(m.notes, c)
+	return nil
+}
+func (m *memStore) AddTriage(_ context.Context, a Triage) error {
+	m.triages = append(m.triages, a)
+	return nil
+}
+func (m *memStore) Enqueue(_ context.Context, t Task) error {
+	if _, ok := m.tasks[t.Key]; !ok {
+		m.tasks[t.Key] = t
 	}
 	return nil
 }

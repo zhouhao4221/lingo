@@ -12,6 +12,7 @@ import (
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/notify"
+	"github.com/zhouhao4221/lingo/internal/project"
 	"github.com/zhouhao4221/lingo/internal/store"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 	"github.com/zhouhao4221/lingo/internal/webhook"
@@ -44,6 +45,10 @@ type Lingo struct {
 	store   *store.Store
 	webhook http.Handler
 	worker  *worker.Worker
+	tickets *ticket.Service
+
+	projectsMu     sync.Mutex
+	projectsSynced bool // Config.Projects 已同步入库
 
 	botMu       sync.Mutex
 	bot         string    // 机器人账号 login，首次成功获取后缓存
@@ -69,6 +74,9 @@ func New(cfg Config) (*Lingo, error) {
 	case cfg.Gitea.AutoRegisterWebhook && cfg.Gitea.WebhookSecret == "":
 		return nil, errors.New("lingo: Config.Gitea.WebhookSecret is required when AutoRegisterWebhook is set")
 	}
+	if err := project.Validate(projectSpecs(cfg.Projects)); err != nil {
+		return nil, fmt.Errorf("lingo: Config.Projects: %w", err)
+	}
 	l := &Lingo{cfg: cfg, log: cfg.Logger}
 	if l.log == nil {
 		l.log = slog.Default()
@@ -86,6 +94,14 @@ func New(cfg Config) (*Lingo, error) {
 	}
 	if l.webhook, err = l.newWebhookHandler(); err != nil {
 		return nil, err
+	}
+	if l.tickets, err = ticket.NewService(ticket.ServiceOptions{
+		Store:       l.store,
+		AutoForward: l.defaultAutoForward,
+		IssueURL:    l.issueURL,
+		Declared:    l.declared,
+	}); err != nil {
+		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	if l.worker, err = l.newWorker(); err != nil {
 		return nil, err
@@ -108,13 +124,16 @@ func (l *Lingo) labelPrefix() string {
 	return "lingo"
 }
 
+func (l *Lingo) issueURL(repo string, n int64) string {
+	return ticket.IssueURL(l.cfg.Gitea.BaseURL, repo, n)
+}
+
 func (l *Lingo) newWorker() (*worker.Worker, error) {
-	base := l.cfg.Gitea.BaseURL
 	tickets, err := ticket.NewSync(ticket.SyncOptions{
 		Store:         l.store,
 		NeedInfoLabel: l.labelPrefix() + "/review/need-info",
 		PendingMerges: l.store.HasPendingMerges,
-		IssueURL:      func(repo string, n int64) string { return ticket.IssueURL(base, repo, n) },
+		IssueURL:      l.issueURL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
@@ -126,6 +145,12 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		BotLogin:   l.botLogin,
 		ReplyMode:  l.replyMode(),
 		Logger:     l.log,
+
+		Tasks:       l.store,
+		Issues:      l.gitea,
+		Drafts:      l.tickets,
+		Repos:       l.repoConfig,
+		LabelPrefix: l.labelPrefix(),
 	}
 	if n := l.cfg.Notifier; n != nil {
 		o.Notifications = l.store
@@ -203,22 +228,6 @@ func (l *Lingo) MCPHandler() http.Handler { return notImplemented() }
 // 并立即返回，由 Run 中的 worker 处理。未配置 Config.Gitea.WebhookSecret 时拒绝所有投递（503）。
 func (l *Lingo) WebhookHandler() http.Handler { return l.webhook }
 
-// SetAutoForward 在运行时覆盖项目 project 下工单类型 t 是否自动转出（仅 admin），存入数据库并优先于
-// Project.AutoForward；u 为操作人，用于权限校验与留痕。
-func (l *Lingo) SetAutoForward(ctx context.Context, u User, project string, t TicketType, on bool) error {
-	return errNotImplemented
-}
-
-// ResetAutoForward 删除运行时覆盖，恢复为 Project.AutoForward 的默认值（仅 admin）。
-func (l *Lingo) ResetAutoForward(ctx context.Context, u User, project string, t TicketType) error {
-	return errNotImplemented
-}
-
-// GetTicket 返回工单 id；无权访问时与不存在一样返回 ErrNotFound（见数据隔离）。
-func (l *Lingo) GetTicket(ctx context.Context, u User, id int64) (Ticket, error) {
-	return Ticket{}, errNotImplemented
-}
-
 // ListTriage 列出 u 可见项目中的待确认工单（仅 reviewer / admin）。
 func (l *Lingo) ListTriage(ctx context.Context, u User, f TriageFilter) ([]Ticket, error) {
 	return nil, errNotImplemented
@@ -246,6 +255,10 @@ func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
 // Gitea 初始化与对账补偿、知识库生成待实现。
 func (l *Lingo) Run(ctx context.Context) error {
 	l.botLogin() // 机器人账号获取由 botLogin 统一负责（New 时已发起）
+	if err := l.ensureProjects(ctx); err != nil {
+		// 不阻断启动：各方法调用时会再次尝试同步
+		l.log.Error("lingo: sync projects failed", "err", err)
+	}
 	return l.worker.Run(ctx)
 }
 
