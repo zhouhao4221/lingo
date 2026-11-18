@@ -15,7 +15,8 @@
 
 ```sh
 go build ./... && go vet ./...       # 构建与静态检查
-go test ./...                        # 测试
+go test ./...                        # 单元测试
+cd tests && LINGO_TEST_DATABASE_URL=postgres://... go test ./...   # 集成测试（独立 module，需 PostgreSQL）
 go run ./examples/server             # 最小接入示例（需自行引入 PostgreSQL 驱动并实现 Model）
 ```
 
