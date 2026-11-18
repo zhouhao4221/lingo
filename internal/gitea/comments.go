@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -69,7 +70,7 @@ func IssueIndexFromURL(issueURL string) int64 {
 	if err != nil {
 		return 0
 	}
-	p := u.Path
+	p := strings.TrimRight(u.Path, "/")
 	for i := len(p) - 1; i >= 0; i-- {
 		if p[i] == '/' {
 			n, err := strconv.ParseInt(p[i+1:], 10, 64)

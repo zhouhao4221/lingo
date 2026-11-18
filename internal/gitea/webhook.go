@@ -61,6 +61,7 @@ const DefaultMaxPayloadBytes = 5 << 20
 
 // Webhook 读取与验签错误。
 var (
+	ErrEmptySecret      = errors.New("gitea: webhook secret is empty")
 	ErrMissingSignature = errors.New("gitea: webhook signature missing")
 	ErrBadSignature     = errors.New("gitea: webhook signature mismatch")
 	ErrPayloadTooLarge  = errors.New("gitea: webhook payload too large")
@@ -105,7 +106,11 @@ func ReadDelivery(r *http.Request, secret string, maxBytes int64) (*Delivery, er
 }
 
 // VerifySignature 校验 X-Gitea-Signature（也接受 GitHub 兼容的 "sha256=" 前缀写法），常量时间比较。
+// secret 为空时一律拒绝：空密钥的 HMAC 任何人都能算出来。
 func VerifySignature(secret string, body []byte, signature string) error {
+	if secret == "" {
+		return ErrEmptySecret
+	}
 	if signature == "" {
 		return ErrMissingSignature
 	}

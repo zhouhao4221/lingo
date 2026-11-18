@@ -6,10 +6,11 @@ import (
 	"strconv"
 )
 
-// LingoHookEvents 是灵问需要订阅的 Webhook 事件。
+// LingoHookEvents 是灵问需要订阅的 Webhook 事件。PR 上的评论以 pull_request_comment 投递
+// （载荷同 IssueCommentPayload，IsPull 为真），需要单独订阅。
 var LingoHookEvents = []string{
 	"issues", "issue_comment", "issue_assign", "issue_label", "issue_milestone",
-	"pull_request", "release", "create", "status", "workflow_run",
+	"pull_request", "pull_request_comment", "release", "create", "status", "workflow_run",
 }
 
 // CreateHookOption 是创建 Webhook 的参数。

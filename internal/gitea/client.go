@@ -3,6 +3,8 @@ package gitea
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultTimeout 是未提供 HTTPClient 时单次请求的超时时间。
@@ -81,8 +84,24 @@ func (e *APIError) Is(target error) bool {
 	return target == ErrNotFound && e.StatusCode == http.StatusNotFound
 }
 
-// IsRetryable 判断错误是否值得由 outbox 重试：网络错误、超时、429 与 5xx 重试；
-// 其余 4xx（参数、权限、不存在）重试无意义。
+// DecodeError 表示请求已成功（2xx）但响应体无法解析。写操作此时多半已在 Gitea 生效，不应重试。
+type DecodeError struct {
+	Method, Path string
+	Err          error
+}
+
+func (e *DecodeError) Error() string {
+	return fmt.Sprintf("gitea: decode %s %s: %v", e.Method, e.Path, e.Err)
+}
+
+func (e *DecodeError) Unwrap() error { return e.Err }
+
+// IsRetryable 判断错误是否值得由 outbox 重试：
+//   - 429、5xx、连接失败、连接中断、超时：重试
+//   - 其余 4xx、证书错误、域名不存在、配置错误、2xx 响应解析失败（DecodeError）：不重试
+//
+// 注意：连接中断或超时发生在请求已发出之后时，写操作可能已经生效。对非幂等写操作
+// （CreateIssue、CreateComment 等）重试前，调用方必须先按隐藏标记查重，见 PRD 3.2.2。
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -91,11 +110,34 @@ func IsRetryable(err error) bool {
 	if errors.As(err, &ae) {
 		return ae.StatusCode == http.StatusTooManyRequests || ae.StatusCode >= 500
 	}
-	if errors.Is(err, context.Canceled) {
+	var de *DecodeError
+	if errors.As(err, &de) || errors.Is(err, context.Canceled) {
 		return false
 	}
+	// 证书问题与域名不存在属于配置错误，重试也不会成功
+	var (
+		unknownCA x509.UnknownAuthorityError
+		hostErr   x509.HostnameError
+		certErr   x509.CertificateInvalidError
+		verifyErr *tls.CertificateVerificationError
+		dnsErr    *net.DNSError
+	)
+	switch {
+	case errors.As(err, &unknownCA), errors.As(err, &hostErr), errors.As(err, &certErr), errors.As(err, &verifyErr):
+		return false
+	case errors.As(err, &dnsErr):
+		return !dnsErr.IsNotFound
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// 只认真正的网络操作错误（连接被拒、重置等）与超时；*url.Error 本身也实现 net.Error，不能据此判断
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
 	var ne net.Error
-	return errors.As(err, &ne) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF)
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // ListOptions 是分页参数；Page 从 1 开始，Limit 为 0 时使用服务端默认值
@@ -155,8 +197,29 @@ func ListAll[T any](ctx context.Context, limit int, fetch func(ctx context.Conte
 	}
 }
 
-// esc 对单个路径段转义。
+// esc 对单个路径段转义（"/" 也会被转义）。
 func esc(s string) string { return url.PathEscape(s) }
+
+// escRef 转义可能含 "/" 的分支或 tag 名，保留 "/"，用于 Gitea 的通配路由（compare/*、commits/<ref:*>/statuses）。
+func escRef(ref string) string {
+	parts := strings.Split(ref, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
+// truncateUTF8 把 s 截到最多 n 字节且不切断多字节字符，并替换无效的 UTF-8 序列。
+func truncateUTF8(s string, n int) string {
+	s = strings.ToValidUTF8(s, string(utf8.RuneError))
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 func repoPath(owner, repo string) string {
 	return "/repos/" + esc(owner) + "/" + esc(repo)
@@ -215,7 +278,7 @@ func (c *Client) send(req *http.Request, out any) (*Response, error) {
 		return r, nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return r, fmt.Errorf("gitea: decode %s %s: %w", req.Method, req.URL.Path, err)
+		return r, &DecodeError{Method: req.Method, Path: req.URL.Path, Err: err}
 	}
 	return r, nil
 }
@@ -229,10 +292,7 @@ func newAPIError(req *http.Request, resp *http.Response) error {
 	if json.Unmarshal(b, &m) == nil && m.Message != "" {
 		e.Message = m.Message
 	} else {
-		e.Message = strings.TrimSpace(string(b))
-		if len(e.Message) > 200 {
-			e.Message = e.Message[:200]
-		}
+		e.Message = truncateUTF8(strings.TrimSpace(string(b)), 200)
 	}
 	return e
 }

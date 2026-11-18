@@ -79,8 +79,13 @@ func TestRenderFormBlanks(t *testing.T) {
 func TestMissingRequired(t *testing.T) {
 	tpl := loadBugTemplate(t)
 	miss := MissingRequired(tpl, FormValues{"version": {"1.0"}, "steps": {"  "}})
-	if len(miss) != 1 || miss[0].ID != "steps" || miss[0].Label() != "复现步骤" {
+	if len(miss) != 2 || miss[0].ID != "steps" || miss[0].Label() != "复现步骤" || miss[1].ID != "confirm" {
 		t.Errorf("missing = %+v", miss)
+	}
+	// 勾选必选项后 checkboxes 不再缺失
+	miss = MissingRequired(tpl, FormValues{"version": {"1.0"}, "steps": {"x"}, "confirm": {"已搜索过类似问题"}})
+	if len(miss) != 0 {
+		t.Errorf("missing after filling = %+v", miss)
 	}
 	if f := tpl.Fields[4]; !f.Multiple() || len(f.Options()) != 3 {
 		t.Errorf("dropdown helpers: multiple=%v options=%v", f.Multiple(), f.Options())

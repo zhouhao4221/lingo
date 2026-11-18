@@ -27,8 +27,8 @@ type CreateIssueOption struct {
 type EditIssueOption struct {
 	Title        *string    `json:"title,omitempty"`
 	Body         *string    `json:"body,omitempty"`
-	State        *string    `json:"state,omitempty"` // StateOpen | StateClosed
-	Assignees    []string   `json:"assignees,omitempty"`
+	State        *string    `json:"state,omitempty"`     // StateOpen | StateClosed
+	Assignees    *[]string  `json:"assignees,omitempty"` // 指向空切片表示清空指派人
 	Milestone    *int64     `json:"milestone,omitempty"`
 	DueDate      *time.Time `json:"due_date,omitempty"`
 	UnsetDueDate bool       `json:"unset_due_date,omitempty"`

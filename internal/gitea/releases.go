@@ -31,7 +31,7 @@ func (c *Client) ListReleases(ctx context.Context, owner, repo string, o ListRel
 // GetReleaseByTag 返回 tag 对应的 Release。
 func (c *Client) GetReleaseByTag(ctx context.Context, owner, repo, tag string) (*Release, error) {
 	var r Release
-	_, err := c.do(ctx, "GET", repoPath(owner, repo)+"/releases/tags/"+esc(tag), nil, nil, &r)
+	_, err := c.do(ctx, "GET", repoPath(owner, repo)+"/releases/tags/"+escRef(tag), nil, nil, &r)
 	return &r, err
 }
 
@@ -47,7 +47,7 @@ func (c *Client) ListTags(ctx context.Context, owner, repo string, o ListOptions
 // Compare 返回 base...head 之间的提交，用于找出两个版本 tag 之间包含的修复。
 func (c *Client) Compare(ctx context.Context, owner, repo, base, head string) (*Compare, error) {
 	var cp Compare
-	_, err := c.do(ctx, "GET", repoPath(owner, repo)+"/compare/"+esc(base)+"..."+esc(head), nil, nil, &cp)
+	_, err := c.do(ctx, "GET", repoPath(owner, repo)+"/compare/"+escRef(base)+"..."+escRef(head), nil, nil, &cp)
 	return &cp, err
 }
 
@@ -70,6 +70,6 @@ func (c *Client) ListCommitStatuses(ctx context.Context, owner, repo, ref string
 	q := url.Values{}
 	o.apply(q)
 	var ss []*CommitStatus
-	resp, err := c.do(ctx, "GET", repoPath(owner, repo)+"/commits/"+esc(ref)+"/statuses", q, nil, &ss)
+	resp, err := c.do(ctx, "GET", repoPath(owner, repo)+"/commits/"+escRef(ref)+"/statuses", q, nil, &ss)
 	return ss, resp, err
 }

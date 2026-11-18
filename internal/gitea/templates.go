@@ -101,6 +101,19 @@ func (f *IssueFormField) Options() []string {
 	return out
 }
 
+// RequiredOptions 返回 checkboxes 中标记 required 的选项标题。
+func (f *IssueFormField) RequiredOptions() []string {
+	raw, _ := f.Attributes["options"].([]any)
+	var out []string
+	for _, o := range raw {
+		if m, ok := o.(map[string]any); ok && isTrue(m["required"]) {
+			s, _ := m["label"].(string)
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // IsInput 报告字段是否需要用户填写（markdown 只是说明文字）。
 func (f *IssueFormField) IsInput() bool { return f.Type != FieldMarkdown }
 
@@ -224,9 +237,19 @@ func RenderForm(t *IssueTemplate, v FormValues) string {
 }
 
 // MissingRequired 返回必填但未填写的字段（供问答 Agent 追问）。
+// checkboxes 的必填在各选项上（options[].required），任一必选项未勾选即视为缺失。
 func MissingRequired(t *IssueTemplate, v FormValues) []*IssueFormField {
 	var out []*IssueFormField
 	for _, f := range t.Fields {
+		if f.Type == FieldCheckboxes {
+			for _, opt := range f.RequiredOptions() {
+				if !contains(v[f.ID], opt) {
+					out = append(out, f)
+					break
+				}
+			}
+			continue
+		}
 		if !f.IsInput() || !f.Required() {
 			continue
 		}
@@ -244,10 +267,15 @@ func MissingRequired(t *IssueTemplate, v FormValues) []*IssueFormField {
 	return out
 }
 
-// minQuotes 返回足以包住 value 的代码块围栏：至少三个反引号，且比 value 中行首最长的反引号串多一个。
+// minQuotes 返回足以包住 value 的代码块围栏：至少三个反引号，且比 value 中任一行行首（允许缩进至多
+// 3 个空格，按 CommonMark 这样的行仍能关闭代码块）最长的反引号串多一个。
+// Gitea 只检查整个值的开头，这里有意更严格，避免值中的围栏提前关闭代码块；对不含围栏的值两者结果一致。
 func minQuotes(value string) string {
 	n := 3
 	for _, line := range strings.Split(value, "\n") {
+		for i := 0; i < 3 && strings.HasPrefix(line, " "); i++ {
+			line = line[1:]
+		}
 		k := 0
 		for k < len(line) && line[k] == '`' {
 			k++
