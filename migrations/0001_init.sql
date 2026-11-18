@@ -34,8 +34,11 @@
 --                action, payload, created_at；Notifier 推送与 ListEvents 变更流共用，outbox 引用 event_id
 -- outbox         异步任务：id, kind(gitea|notify), payload, status, attempts, next_attempt_at, created_at
 --                Gitea 写操作与 Notifier 回调均经 outbox 投递
--- webhook_deliveries Webhook 去重：delivery_id(唯一), event, event_type, dedup_key(唯一，业务键：评论 id+updated_at、
---                Issue id+action+updated_at、Release id+action；手动重投会换 delivery_id), received_at
+-- webhook_deliveries Webhook 投递：delivery_id(唯一), event, event_type, kind, dedup_key(唯一，业务键，见 internal/webhook),
+--                repo, issue_number, from_bot, payload(bytea，原始载荷字节；不用 jsonb，因其拒收 NUL 字符转义),
+--                parse_error, received_at, processed_at(可空，worker 处理后写入), attempts, last_error；
+--                手动重投会换 delivery_id，由 dedup_key 挡住；kind=invalid 为验签通过但无法解析的投递
+-- webhook_pings  连通记录：repo(唯一), last_ping_at；push / 测试投递只更新这里，不进投递表
 -- sync_cursors   对账游标：repo_id, kind(issues|comments|releases|deployments), since；唯一键 (repo_id, kind)
 -- kb_entries     知识库问答：id, project_id, repo_id(可空), question, answer, source_ticket_id, source_conversation_id,
 --                status(pending|approved), tags, embedding, created_at
