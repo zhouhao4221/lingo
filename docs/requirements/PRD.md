@@ -672,7 +672,7 @@ flowchart LR
 - REST / MCP 请求身份由 `Authenticate` 解析
 - 对 Gitea 的写操作经 outbox + worker 异步执行，可重试；Issue 创建失败不影响工单入库
 - Webhook 必须校验共享密钥签名：`X-Gitea-Signature` = `hex(HMAC-SHA256(WebhookSecret, 原始请求体))`，常量时间比较；按 `X-Gitea-Event-Type` 分发
-- 去重两层：`X-Gitea-Delivery` 唯一约束；Gitea 手动重投会生成新的 delivery ID、对账数据也没有 delivery ID，因此再按业务键幂等：评论 `comment.id + 动作 + updated_at`（编辑另加正文摘要）；Issue `issue.id + 动作 + updated_at`，标签 / 指派 / 里程碑事件另加当前标签 id / 指派人 / 里程碑 id，避免同一秒内的不同变化被误判为重复；PR `pr.id + 动作 + updated_at`；Release 无更新时间，用 `release.id + 动作 + 内容摘要`；状态用 `status.id`，工作流运行用 `run.id + attempt`（实现见 `internal/webhook`）
+- 去重两层：`X-Gitea-Delivery` 唯一约束；Gitea 手动重投会生成新的 delivery ID、对账数据也没有 delivery ID，因此再按业务键幂等：一次性事件（Issue 创建 / 删除、评论创建 / 删除、PR 打开 / 合并、Release 发布 / 删除）用 `对象 id + 动作`，对象之后被编辑也能由对账重建同一个键；可重复事件用 `对象 id + 动作 + updated_at`，标签 / 指派 / 里程碑另加当前标签 id / 指派人 / 里程碑 id，编辑另加内容摘要；缺少 updated_at 时与 Release 更新一样只按 delivery 去重。状态类事件只是触发器，worker 以 Gitea 当前状态为准；Issue 正文中的 `lingo:ticket` 标记只在机器人创建的 Issue 上采信，且须与库中的 Issue 关联核对；push / 测试投递不进投递表，只记录仓库最近一次连通时间（实现见 `internal/webhook`）
 - Webhook 只验签、去重、落库后立即返回 2xx（Gitea 默认投递超时 5 秒），业务处理交给 worker
 - Gitea 投递失败不自动重试，因此定时增量对账为必需：按仓库保存 `since` 游标，拉取 `GET /issues?state=all&labels=lingo&since=` 与仓库级 `GET /issues/comments?since=`，必要时用 `GET /issues/{index}/timeline` 回放
 - 机器人 token 最小 scope：`write:issue`、`read:repository`、`read:user`；自动注册 Webhook 另需 `write:repository`

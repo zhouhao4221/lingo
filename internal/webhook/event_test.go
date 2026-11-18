@@ -25,7 +25,7 @@ func mustParse(t *testing.T, eventType, body string, o ParseOptions) *Event {
 
 func issueBody(action, labels, extra string) string {
 	return `{"action":"` + action + `","number":12,"issue":{"id":100,"number":12,"title":"导出失败",
-	  "body":"### 现象\n\n导出失败\n\n<!-- lingo:ticket=42 -->","state":"open","labels":[` + labels + `],
+	  "body":"### 现象\n\n导出失败\n\n<!-- lingo:ticket=42 -->","state":"open","user":{"login":"lingo-bot"},"labels":[` + labels + `],
 	  "updated_at":"2026-11-18T08:00:00+08:00"` + extra + `},` + repoJSON + `,"sender":{"login":"Dev-Agent"}}`
 }
 
@@ -53,14 +53,18 @@ func TestParseIssueEvents(t *testing.T) {
 		if c.want == Ignored {
 			continue
 		}
-		if e.Repo != "demo/api" || e.IssueNumber != 12 || e.TicketID != 42 || e.Sender != "Dev-Agent" || e.FromBot {
+		if e.Repo != "demo/api" || e.IssueNumber != 12 || e.MarkerTicketID != 42 || e.Sender != "Dev-Agent" || e.FromBot {
 			t.Errorf("%s: event = %+v", c.action, e)
 		}
 		if !e.At.Equal(time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)) {
 			t.Errorf("%s: At = %v", c.action, e.At)
 		}
-		if !strings.HasPrefix(e.DedupKey, "issue:100:"+string(c.want)+":2026-11-18T00:00:00Z") {
-			t.Errorf("%s: DedupKey = %q", c.action, e.DedupKey)
+		wantKey := "issue:100:" + string(c.want)
+		if c.want != IssueOpened && c.want != IssueDeleted {
+			wantKey += ":2026-11-18T00:00:00Z"
+		}
+		if !strings.HasPrefix(e.DedupKey, wantKey) || (c.want == IssueOpened && e.DedupKey != wantKey) {
+			t.Errorf("%s: DedupKey = %q, want prefix %q", c.action, e.DedupKey, wantKey)
 		}
 	}
 }
@@ -83,14 +87,14 @@ func TestIssueDedupKeyDistinguishesSameSecondChanges(t *testing.T) {
 }
 
 func commentBody(action, body, eventExtra string) string {
-	return `{"action":"` + action + `","issue":{"id":100,"number":12,"body":"x <!-- lingo:ticket=42 -->"},
+	return `{"action":"` + action + `","issue":{"id":100,"number":12,"user":{"login":"lingo-bot"},"body":"x <!-- lingo:ticket=42 -->"},
 	  "comment":{"id":99,"body":"` + body + `","updated_at":"2026-11-18T01:00:00Z","issue_url":"https://g/api/v1/repos/demo/api/issues/12"},
 	  ` + repoJSON + `,"sender":{"login":"dev-agent"}` + eventExtra + `}`
 }
 
 func TestParseCommentPublicity(t *testing.T) {
-	pub := mustParse(t, gitea.EventIssueComment, commentBody("created", "/reply 已修复", ""), ParseOptions{})
-	if pub.Kind != CommentCreated || !pub.Public || pub.TicketID != 42 || pub.Comment.ID != 99 || pub.IsPull {
+	pub := mustParse(t, gitea.EventIssueComment, commentBody("created", "/reply 已修复", ""), ParseOptions{BotLogin: "lingo-bot"})
+	if pub.Kind != CommentCreated || !pub.Public || pub.MarkerTicketID != 42 || pub.Comment.ID != 99 || pub.IsPull {
 		t.Errorf("public comment = %+v", pub)
 	}
 	internal := mustParse(t, gitea.EventIssueComment, commentBody("created", "先看下日志", ""), ParseOptions{})
@@ -101,7 +105,7 @@ func TestParseCommentPublicity(t *testing.T) {
 	if !all.Public {
 		t.Error("ReplyAll should make every comment public")
 	}
-	if pub.DedupKey != "comment:99:comment.created:2026-11-18T01:00:00Z" {
+	if pub.DedupKey != "comment:99:comment.created" {
 		t.Errorf("DedupKey = %q", pub.DedupKey)
 	}
 	del := mustParse(t, gitea.EventIssueComment, commentBody("deleted", "/reply 已修复", ""), ParseOptions{})
@@ -164,10 +168,13 @@ func TestParseRelease(t *testing.T) {
 	if pub.Kind != ReleasePublished || pub.Release.TagName != "v1.3.0" || pub.Repo != "demo/api" {
 		t.Fatalf("release = %+v", pub)
 	}
-	u1 := mustParse(t, gitea.EventRelease, releaseBody("updated", "修复导出"), ParseOptions{})
-	u2 := mustParse(t, gitea.EventRelease, releaseBody("updated", "修复导出 #12"), ParseOptions{})
-	if u1.Kind != ReleaseUpdated || u1.DedupKey == u2.DedupKey || u1.DedupKey == pub.DedupKey {
-		t.Errorf("update keys: %q %q %q", pub.DedupKey, u1.DedupKey, u2.DedupKey)
+	if pub.DedupKey != "release:5:release.published" {
+		t.Errorf("published key = %q", pub.DedupKey)
+	}
+	// 更新无法与重投区分，只按 delivery 去重
+	u := mustParse(t, gitea.EventRelease, releaseBody("updated", "修复导出"), ParseOptions{})
+	if u.Kind != ReleaseUpdated || u.DedupKey != "delivery:d-1" {
+		t.Errorf("updated key = %q", u.DedupKey)
 	}
 }
 
@@ -193,7 +200,7 @@ func TestParseOtherEvents(t *testing.T) {
 		t.Errorf("in_progress = %s", k)
 	}
 	ping := mustParse(t, gitea.EventPush, `{"ref":"refs/heads/main",`+repoJSON+`}`, ParseOptions{})
-	if ping.Kind != Ping || ping.Repo != "demo/api" || ping.DedupKey != "delivery:d-1" {
+	if ping.Kind != Ping || ping.Repo != "demo/api" {
 		t.Errorf("ping = %+v", ping)
 	}
 	if k := mustParse(t, "wiki", `{}`, ParseOptions{}).Kind; k != Ignored {
@@ -213,5 +220,38 @@ func TestParseErrors(t *testing.T) {
 		if _, err := Parse(delivery(c.eventType, c.body), ParseOptions{}); err == nil {
 			t.Errorf("%s %s: want error", c.eventType, c.body)
 		}
+	}
+}
+
+func TestMarkerOnlyTrustedOnBotIssues(t *testing.T) {
+	forged := strings.Replace(issueBody("edited", "", ""), `"user":{"login":"lingo-bot"}`, `"user":{"login":"mallory"}`, 1)
+	if e := mustParse(t, gitea.EventIssues, forged, ParseOptions{BotLogin: "lingo-bot"}); e.MarkerTicketID != 0 {
+		t.Errorf("marker on non-bot issue trusted: %d", e.MarkerTicketID)
+	}
+	if e := mustParse(t, gitea.EventIssues, issueBody("edited", "", ""), ParseOptions{}); e.MarkerTicketID != 0 {
+		t.Errorf("marker trusted without bot login: %d", e.MarkerTicketID)
+	}
+}
+
+func TestCreateKeyStableAcrossEdits(t *testing.T) {
+	// 评论创建后被编辑：对账拿到的是新的 updated_at，重建的创建事件键必须与原来一致
+	a := mustParse(t, gitea.EventIssueComment, commentBody("created", "x", ""), ParseOptions{})
+	b := mustParse(t, gitea.EventIssueComment, strings.Replace(commentBody("created", "x 已编辑", ""), "2026-11-18T01:00:00Z", "2026-11-18T05:00:00Z", 1), ParseOptions{})
+	if a.DedupKey != b.DedupKey {
+		t.Errorf("create keys differ: %q vs %q", a.DedupKey, b.DedupKey)
+	}
+	e1 := mustParse(t, gitea.EventIssueComment, commentBody("edited", "v1", ""), ParseOptions{})
+	e2 := mustParse(t, gitea.EventIssueComment, commentBody("edited", "v2", ""), ParseOptions{})
+	if e1.DedupKey == e2.DedupKey {
+		t.Error("different edits share key")
+	}
+}
+
+func TestZeroUpdatedAtFallsBackToDelivery(t *testing.T) {
+	body := strings.Replace(issueBody("closed", "", ""), `,
+	  "updated_at":"2026-11-18T08:00:00+08:00"`, "", 1)
+	e := mustParse(t, gitea.EventIssues, body, ParseOptions{})
+	if e.DedupKey != "delivery:d-1" {
+		t.Errorf("DedupKey = %q, want delivery fallback", e.DedupKey)
 	}
 }

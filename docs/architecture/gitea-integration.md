@@ -171,7 +171,7 @@ Gitea **没有** GitHub 那样的 Deployments / Environments API，“发版”�
 
 - **请求头**：`X-Gitea-Event`、`X-Gitea-Event-Type`、`X-Gitea-Delivery`（每次投递的 UUID）、`X-Gitea-Signature`；同时带 GitHub 兼容头 `X-Hub-Signature-256: sha256=...` 和 Gogs 兼容头。
 - **验签**：`X-Gitea-Signature` = `hex(HMAC-SHA256(secret, 原始请求体))`。必须先读原始字节验签再反序列化，用 `hmac.Equal` 做常量时间比较。配置了 `authorization_header` 时再校验 `Authorization` 头。
-- **去重**：两层。① `X-Gitea-Delivery` 落库唯一约束，挡住同一次投递的重复请求；② 手动“重新投递”会生成**新的** delivery UUID（`ReplayHookTask` 新建 hook task），对账拉回的数据也没有 delivery ID，所以还要按业务键幂等：评论 `comment.id + 动作 + updated_at`（编辑另加正文摘要）；Issue `issue.id + 动作 + updated_at`，标签 / 指派 / 里程碑事件另加当前标签 id / 指派人 / 里程碑 id，避免同一秒内的不同变化被误判为重复；PR `pr.id + 动作 + updated_at`；Release 无更新时间，用 `release.id + 动作 + 内容摘要`；状态用 `status.id`，工作流运行用 `run.id + attempt`。
+- **去重**：两层。① `X-Gitea-Delivery` 落库唯一约束，挡住同一次投递的重复请求；② 手动“重新投递”会生成**新的** delivery UUID（`ReplayHookTask` 新建 hook task），对账拉回的数据也没有 delivery ID，所以还要按业务键幂等：一次性事件（Issue 创建 / 删除、评论创建 / 删除、PR 打开 / 合并、Release 发布 / 删除）用 `对象 id + 动作`，对象之后被编辑也能由对账重建同一个键；可重复事件用 `对象 id + 动作 + updated_at`，标签 / 指派 / 里程碑另加当前标签 id / 指派人 / 里程碑 id，编辑另加内容摘要；缺少 updated_at 时与 Release 更新一样只按 delivery 去重。状态类事件只是触发器，worker 以 Gitea 当前状态为准；Issue 正文中的 `lingo:ticket` 标记只在机器人创建的 Issue 上采信，且须与库中的 Issue 关联核对；push / 测试投递不进投递表，只记录仓库最近一次连通时间。
 - **快速返回**：只做验签、去重、落库，立刻返回 2xx，业务处理交给 worker（Gitea 默认投递超时 `[webhook] DELIVER_TIMEOUT` 为 5 秒）。
 - **不保证送达**：Gitea 投递失败只记录在 hook 历史里，**不会自动重试**。所以第 1 节的定时增量对账是必需的：
   - `GET /repos/{o}/{r}/issues?state=all&labels=lingo&since=<上次对账时间>&type=issues`

@@ -26,9 +26,20 @@ func TicketMarker(ticketID int64) string {
 	return fmt.Sprintf("<!-- lingo:ticket=%d -->", ticketID)
 }
 
-// TicketMarkerQuery 返回用于 SearchIssues 查重的关键词。
+// TicketMarkerQuery 返回用于 SearchIssues 查重的关键词。搜索是关键词匹配，"lingo:ticket=5" 也会命中
+// "lingo:ticket=50"；调用方必须再用 HasTicketMarker 逐个确认，且只认机器人创建的 Issue。
 func TicketMarkerQuery(ticketID int64) string {
 	return fmt.Sprintf("lingo:ticket=%d", ticketID)
+}
+
+// HasTicketMarker 报告正文中是否恰好含有 ticketID 的标记（精确匹配）。
+func HasTicketMarker(body string, ticketID int64) bool {
+	for _, m := range ticketMarkerRe.FindAllStringSubmatch(body, -1) {
+		if id, _ := strconv.ParseInt(m[1], 10, 64); id == ticketID {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseTicketMarker 从 Issue 正文中取出工单 ID；没有标记时返回 0。
@@ -67,7 +78,7 @@ func PublicReplyText(body string) string {
 	s := strings.ReplaceAll(body, PublicMarker, "")
 	t := strings.TrimLeft(s, " \t\r\n")
 	if hasReplyCommand(t) {
-		t = t[len(ReplyCommand):]
+		t = strings.TrimLeft(t[len(ReplyCommand):], " \t\r\n")
 		t = strings.TrimPrefix(t, ":")
 		t = strings.TrimPrefix(t, "：")
 		s = t

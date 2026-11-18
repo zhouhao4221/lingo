@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
 )
@@ -21,10 +22,23 @@ type memStore struct {
 	byID    map[string]bool
 	byKey   map[string]bool
 	records []Record
+	pings   map[string]time.Time
 	err     error
 }
 
-func newMemStore() *memStore { return &memStore{byID: map[string]bool{}, byKey: map[string]bool{}} }
+func newMemStore() *memStore {
+	return &memStore{byID: map[string]bool{}, byKey: map[string]bool{}, pings: map[string]time.Time{}}
+}
+
+func (s *memStore) RecordPing(_ context.Context, repo string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.pings[repo] = at
+	return nil
+}
 
 func (s *memStore) SaveDelivery(_ context.Context, r Record) (bool, error) {
 	s.mu.Lock()
@@ -140,9 +154,6 @@ func TestHandlerRejects(t *testing.T) {
 	if w := post(h, "", gitea.EventIssues, body, true); w.Code != 400 {
 		t.Errorf("missing delivery id: %d", w.Code)
 	}
-	if w := post(h, "d-1", gitea.EventIssues, `{"action":"opened"}`, true); w.Code != 400 {
-		t.Errorf("unparsable: %d", w.Code)
-	}
 	if len(st.records) != 0 {
 		t.Errorf("rejected requests stored: %+v", st.records)
 	}
@@ -177,12 +188,28 @@ func TestHandlerIgnoredNotStored(t *testing.T) {
 	}
 }
 
-func TestHandlerStoresPing(t *testing.T) {
+func TestHandlerPingNotStoredAsDelivery(t *testing.T) {
 	st := newMemStore()
 	h := newTestHandler(t, st, nil)
-	post(h, "d-9", gitea.EventPush, `{"ref":"refs/heads/main",`+repoJSON+`}`, true)
-	if len(st.records) != 1 || st.records[0].Kind != Ping || st.records[0].Repo != "demo/api" {
-		t.Errorf("ping records = %+v", st.records)
+	for i, id := range []string{"d-8", "d-9"} {
+		if w := post(h, id, gitea.EventPush, `{"ref":"refs/heads/main",`+repoJSON+`}`, true); w.Code != 200 || w.Body.String() != "pong" {
+			t.Errorf("push %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+	if len(st.records) != 0 || st.pings["demo/api"].IsZero() {
+		t.Errorf("records = %+v, pings = %+v", st.records, st.pings)
+	}
+}
+
+func TestHandlerStoresUnparsableAsInvalid(t *testing.T) {
+	st := newMemStore()
+	h := newTestHandler(t, st, nil)
+	if w := post(h, "d-1", gitea.EventRelease, `{"action":"published"}`, true); w.Code != 200 {
+		t.Fatalf("unparsable: %d %s", w.Code, w.Body)
+	}
+	if len(st.records) != 1 || st.records[0].Kind != Invalid || st.records[0].ParseError == "" ||
+		string(st.records[0].Payload) != `{"action":"published"}` {
+		t.Errorf("records = %+v", st.records)
 	}
 }
 

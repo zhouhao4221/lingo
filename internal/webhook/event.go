@@ -46,8 +46,12 @@ const (
 	StatusChanged        Kind = "status.changed"
 	WorkflowRunCompleted Kind = "workflow_run.completed"
 
-	Ping    Kind = "ping"    // TestHook 发出的测试投递，启动自检用来确认连通
+	// Ping 是 push 投递：TestHook 的测试投递与真实 push 无法区分，Handler 不把它写入投递表，
+	// 只经 Store.RecordPing 记录仓库最近一次收到投递的时间，供启动自检确认连通。
+	Ping    Kind = "ping"
 	Ignored Kind = "ignored" // 灵问不处理的事件或动作
+	// Invalid 是验签通过但载荷无法解析的投递：照常落库（便于排查与 Gitea 版本升级后重放），不丢弃。
+	Invalid Kind = "invalid"
 )
 
 // Event 是归一后的 Webhook 事件。
@@ -65,9 +69,12 @@ type Event struct {
 	FromBot     bool   // 触发人是灵问机器人自己：只作确认，不再通知，防回环
 	At          time.Time
 
-	TicketID int64            // Issue 正文中 lingo:ticket 标记的工单 ID，0 表示不是灵问建的 Issue
-	Refs     []gitea.IssueRef // PR 标题与正文中的 Issue 引用（含 Fixes 等关闭关键词）
-	Public   bool             // 评论按 ReplyMode 判定为面向提交人
+	// MarkerTicketID 是 Issue 正文中 lingo:ticket 标记的工单 ID，只在 Issue 由机器人创建时采信，否则为 0。
+	// 正文可被有权限的用户编辑，标记只是提示：工单与 Issue 的对应以数据库中保存的 repo + issue number 为准，
+	// worker 必须核对后才能使用。
+	MarkerTicketID int64
+	Refs           []gitea.IssueRef // PR 标题与正文中的 Issue 引用（含 Fixes 等关闭关键词）
+	Public         bool             // 评论按 ReplyMode 判定为面向提交人
 
 	Issue       *gitea.Issue
 	Comment     *gitea.Comment
@@ -102,7 +109,7 @@ func Parse(d *gitea.Delivery, o ParseOptions) (*Event, error) {
 	var err error
 	switch d.EventType {
 	case gitea.EventIssues, gitea.EventIssueAssign, gitea.EventIssueLabel, gitea.EventIssueMilestone:
-		err = parseIssue(e, d.Body)
+		err = parseIssue(e, d.Body, o)
 	case gitea.EventIssueComment, gitea.EventPullComment:
 		err = parseComment(e, d.Body, o)
 	case gitea.EventPullRequest:
@@ -153,7 +160,7 @@ var issueKinds = map[string]Kind{
 	gitea.ActionDemilestoned: IssueDemilestoned,
 }
 
-func parseIssue(e *Event, body []byte) error {
+func parseIssue(e *Event, body []byte, o ParseOptions) error {
 	var p gitea.IssuePayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return err
@@ -164,7 +171,7 @@ func parseIssue(e *Event, body []byte) error {
 	e.Action, e.Issue, e.Changes = p.Action, p.Issue, p.Changes
 	e.Repo, e.Sender = repoName(p.Repository), login(p.Sender)
 	e.IssueNumber = p.Issue.Number
-	e.TicketID = gitea.ParseTicketMarker(p.Issue.Body)
+	e.MarkerTicketID = markerTicket(p.Issue, o.BotLogin)
 	e.At = p.Issue.UpdatedAt
 	k, ok := issueKinds[p.Action]
 	if !ok {
@@ -186,8 +193,23 @@ func parseIssue(e *Event, body []byte) error {
 	case IssueEdited:
 		detail = digest(p.Issue.Title, p.Issue.Body)
 	}
-	e.DedupKey = key("issue", p.Issue.ID, string(k), stamp(p.Issue.UpdatedAt), detail)
+	switch {
+	case k == IssueOpened || k == IssueDeleted:
+		// 一次性事件：对象 + 动作即唯一，对账时也能按同样的键重建
+		e.DedupKey = key("issue", p.Issue.ID, string(k))
+	case !p.Issue.UpdatedAt.IsZero():
+		// 状态类事件只是触发器：worker 处理时以 Gitea 当前状态为准，同一秒内重复的相同变化被合并不影响结果
+		e.DedupKey = key("issue", p.Issue.ID, string(k), stamp(p.Issue.UpdatedAt), detail)
+	}
 	return nil
+}
+
+// markerTicket 只采信机器人自己创建的 Issue 上的工单标记。
+func markerTicket(is *gitea.Issue, bot string) int64 {
+	if is == nil || bot == "" || is.User == nil || !strings.EqualFold(is.User.Login, bot) {
+		return 0
+	}
+	return gitea.ParseTicketMarker(is.Body)
 }
 
 func parseComment(e *Event, body []byte, o ParseOptions) error {
@@ -201,7 +223,7 @@ func parseComment(e *Event, body []byte, o ParseOptions) error {
 	e.Action, e.Issue, e.Comment, e.PullRequest, e.Changes = p.Action, p.Issue, p.Comment, p.PullRequest, p.Changes
 	e.Repo, e.Sender = repoName(p.Repository), login(p.Sender)
 	e.IssueNumber, e.IsPull = p.Issue.Number, p.IsPull || e.EventType == gitea.EventPullComment
-	e.TicketID = gitea.ParseTicketMarker(p.Issue.Body)
+	e.MarkerTicketID = markerTicket(p.Issue, o.BotLogin)
 	e.At = p.Comment.UpdatedAt
 	switch p.Action {
 	case gitea.ActionCreated:
@@ -215,11 +237,13 @@ func parseComment(e *Event, body []byte, o ParseOptions) error {
 		return nil
 	}
 	e.Public = o.ReplyMode == ReplyAll || gitea.IsPublicReply(p.Comment.Body)
-	detail := ""
-	if e.Kind == CommentEdited {
-		detail = digest(p.Comment.Body)
+	switch {
+	case e.Kind != CommentEdited:
+		// 创建与删除各只发生一次
+		e.DedupKey = key("comment", p.Comment.ID, string(e.Kind))
+	case !p.Comment.UpdatedAt.IsZero():
+		e.DedupKey = key("comment", p.Comment.ID, string(e.Kind), stamp(p.Comment.UpdatedAt), digest(p.Comment.Body))
 	}
-	e.DedupKey = key("comment", p.Comment.ID, string(e.Kind), stamp(p.Comment.UpdatedAt), detail)
 	return nil
 }
 
@@ -253,11 +277,16 @@ func parsePull(e *Event, body []byte) error {
 		e.Kind = Ignored
 		return nil
 	}
-	detail := ""
-	if e.Kind == PullEdited {
-		detail = digest(pr.Title, pr.Body)
+	switch {
+	case e.Kind == PullOpened || e.Kind == PullMerged:
+		e.DedupKey = key("pull", pr.ID, string(e.Kind))
+	case !pr.UpdatedAt.IsZero():
+		detail := ""
+		if e.Kind == PullEdited {
+			detail = digest(pr.Title, pr.Body)
+		}
+		e.DedupKey = key("pull", pr.ID, string(e.Kind), stamp(pr.UpdatedAt), detail)
 	}
-	e.DedupKey = key("pull", pr.ID, string(e.Kind), stamp(pr.UpdatedAt), detail)
 	return nil
 }
 
@@ -286,8 +315,11 @@ func parseRelease(e *Event, body []byte) error {
 		e.Kind = Ignored
 		return nil
 	}
-	// Release 没有 updated_at，用内容摘要区分多次更新
-	e.DedupKey = key("release", r.ID, string(e.Kind), digest(r.TagName, r.Name, r.Body, strconv.FormatBool(r.Draft), strconv.FormatBool(r.Prerelease)))
+	// 发布与删除只发生一次；Release 没有 updated_at，多次更新无法可靠区分（改回旧内容与重投一模一样），
+	// 因此 updated 只按 delivery 去重，由 worker 按 release.id 幂等更新版本记录。
+	if e.Kind != ReleaseUpdated {
+		e.DedupKey = key("release", r.ID, string(e.Kind))
+	}
 	return nil
 }
 

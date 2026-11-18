@@ -18,6 +18,7 @@ type Record struct {
 	EventType   string // X-Gitea-Event-Type
 	Kind        Kind
 	DedupKey    string
+	ParseError  string // Kind 为 Invalid 时的解析错误
 	Repo        string
 	IssueNumber int64
 	FromBot     bool
@@ -28,7 +29,10 @@ type Record struct {
 // Store 保存投递记录，由 store 包基于 webhook_deliveries 表实现。
 type Store interface {
 	// SaveDelivery 原子写入一条投递；DeliveryID 或 DedupKey 已存在时不写入并返回 inserted=false。
+	// Payload 是原始字节，应存为 bytea（jsonb 拒收含 NUL 字符 U+0000 转义的字符串）。
 	SaveDelivery(ctx context.Context, r Record) (inserted bool, err error)
+	// RecordPing 记录仓库（"owner/name"）最近一次收到 push / 测试投递的时间（按仓库覆盖写），供启动自检确认连通。
+	RecordPing(ctx context.Context, repo string, at time.Time) error
 }
 
 // Options 是 Handler 配置。
@@ -74,7 +78,8 @@ func NewHandler(o Options) (*Handler, error) {
 
 // ServeHTTP 的响应：
 //   - 200 已落库，或重复投递（同一 delivery / 业务键已处理过）
-//   - 400 载荷无法解析；401 签名或 Authorization 不符；405 非 POST；413 请求体过大
+//   - 200 验签通过但载荷无法解析（以 Kind=Invalid 落库，避免丢失）
+//   - 400 缺少 delivery ID；401 签名或 Authorization 不符；405 非 POST；413 请求体过大
 //   - 500 落库失败（Gitea 不会自动重投，靠定时对账补齐）
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -92,7 +97,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	d, err := gitea.ReadDelivery(r, h.o.Secret, h.o.MaxBytes)
 	switch {
 	case errors.Is(err, gitea.ErrPayloadTooLarge):
-		log.Warn("webhook rejected: payload too large")
+		// Gitea 不会重投，事件只能靠对账补齐，按错误级别记录
+		log.Error("webhook rejected: payload too large", "max_bytes", h.o.MaxBytes)
 		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 		return
 	case errors.Is(err, gitea.ErrMissingSignature), errors.Is(err, gitea.ErrBadSignature):
@@ -109,25 +115,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing "+gitea.HeaderDelivery, http.StatusBadRequest)
 		return
 	}
-	e, err := Parse(d, ParseOptions{BotLogin: h.o.BotLogin(), ReplyMode: h.o.ReplyMode})
-	if err != nil {
-		log.Warn("webhook rejected: unparsable payload", "err", err)
-		http.Error(w, "unparsable payload", http.StatusBadRequest)
-		return
+	ctx, cancel := context.WithTimeout(r.Context(), h.o.SaveTimeout)
+	defer cancel()
+	e, perr := Parse(d, ParseOptions{BotLogin: h.o.BotLogin(), ReplyMode: h.o.ReplyMode})
+	if perr != nil {
+		log.Error("webhook payload unparsable, stored as invalid", "err", perr)
+		e = &Event{Kind: Invalid, DedupKey: "delivery:" + d.ID}
 	}
-	if e.Kind == Ignored {
+	switch e.Kind {
+	case Ignored:
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ignored"))
 		return
+	case Ping:
+		if err := h.o.Store.RecordPing(ctx, e.Repo, d.ReceivedAt); err != nil {
+			log.Error("webhook ping save failed", "err", err)
+			http.Error(w, "store failed", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("pong"))
+		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), h.o.SaveTimeout)
-	defer cancel()
+	parseErr := ""
+	if perr != nil {
+		parseErr = perr.Error()
+	}
 	inserted, err := h.o.Store.SaveDelivery(ctx, Record{
 		DeliveryID:  d.ID,
 		Event:       d.Event,
 		EventType:   d.EventType,
 		Kind:        e.Kind,
 		DedupKey:    e.DedupKey,
+		ParseError:  parseErr,
 		Repo:        e.Repo,
 		IssueNumber: e.IssueNumber,
 		FromBot:     e.FromBot,

@@ -16,6 +16,9 @@ func TestTicketMarkerRoundTrip(t *testing.T) {
 	if id := ParseTicketMarker("no marker"); id != 0 {
 		t.Errorf("no marker = %d", id)
 	}
+	if !HasTicketMarker(body, 42) || HasTicketMarker("x "+TicketMarker(420), 42) {
+		t.Error("HasTicketMarker must match exactly")
+	}
 	if q := TicketMarkerQuery(42); q != "lingo:ticket=42" {
 		t.Errorf("query = %q", q)
 	}
@@ -30,6 +33,7 @@ func TestPublicReply(t *testing.T) {
 		{"/reply 已修复，请升级到 v1.3", true, "已修复，请升级到 v1.3"},
 		{"  \n/reply: 请提供日志", true, "请提供日志"},
 		{"/reply：请提供日志", true, "请提供日志"},
+		{"/reply ：已修复", true, "已修复"},
 		{"/reply", true, ""},
 		{"已定位原因\n\n" + PublicMarker, true, "已定位原因"},
 		{"/replying to the reviewer", false, "/replying to the reviewer"},
