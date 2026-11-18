@@ -8,15 +8,27 @@ import (
 
 // Store 是基于 *sql.DB 的仓储实现，可并发使用。
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	notify bool // Emit 时是否写通知 outbox
 }
 
+// Option 是 New 的可选配置。
+type Option func(*Store)
+
+// WithNotify 让 Emit 在写入对外事件的同时写通知 outbox（接入方配置了 Notifier 时使用）；
+// 未启用时事件只进 events 表，供 ListEvents 拉取。
+func WithNotify() Option { return func(s *Store) { s.notify = true } }
+
 // New 创建 Store；db 由接入方提供并负责关闭。
-func New(db *sql.DB) (*Store, error) {
+func New(db *sql.DB, opts ...Option) (*Store, error) {
 	if db == nil {
 		return nil, errors.New("store: db is required")
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	for _, o := range opts {
+		o(s)
+	}
+	return s, nil
 }
 
 // Ping 检查数据库连通性。
