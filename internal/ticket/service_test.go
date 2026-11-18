@@ -192,6 +192,57 @@ func TestVisibility(t *testing.T) {
 	}
 }
 
+func TestMergeLocksBothAndRejectsCycles(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, nil)
+	ctx := context.Background()
+	a, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "a"})
+	b, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "b"})
+	if _, err := s.Merge(ctx, reviewer, b.ID, a.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Merge(ctx, reviewer, a.ID, b.ID, ""); !errors.Is(err, ErrConflict) {
+		t.Errorf("reverse merge: %v", err)
+	}
+	if _, err := s.Merge(ctx, reviewer, a.ID, 999, ""); !errors.Is(err, ErrInvalid) {
+		t.Errorf("missing target: %v", err)
+	}
+}
+
+func TestForwardRevalidatesRepo(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, nil)
+	ctx := context.Background()
+	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Repo: "demo/web", Type: TypeBug, Body: "x"})
+	m.repos[1] = m.repos[1][:1] // demo/web 已从项目移除
+	f, err := s.Forward(ctx, reviewer, tk.ID, ForwardInput{})
+	if err != nil || f.Repo != "demo/api" {
+		t.Errorf("forward = %+v %v", f, err)
+	}
+}
+
+func TestSummarizeStable(t *testing.T) {
+	f := map[string][]string{"version": {"1.2"}, "steps": {"click save"}, "a": {""}}
+	for range 20 {
+		if got := summarize("", f); got != "click save" {
+			t.Fatalf("summarize = %q", got)
+		}
+	}
+}
+
+func TestIssueFailedMarksAbnormal(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, map[string]bool{TypeBug: true})
+	ctx := context.Background()
+	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x"})
+	if err := s.IssueFailed(ctx, tk.ID, "403"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.tickets[tk.ID]; got.Status != StatusAbnormal || m.events[len(m.events)-1].PrevStatus != string(StatusSubmitted) {
+		t.Errorf("ticket = %+v", got)
+	}
+}
+
 func TestIssueCreated(t *testing.T) {
 	m := newMem()
 	s := newService(t, m, map[string]bool{TypeBug: true})

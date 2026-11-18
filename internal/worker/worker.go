@@ -78,9 +78,10 @@ type Options struct {
 
 // Worker 消费 Webhook 投递与通知 outbox；多实例运行安全（领取用 SKIP LOCKED + 租约）。
 type Worker struct {
-	o      Options
-	log    *slog.Logger
-	labels labelCache
+	o         Options
+	log       *slog.Logger
+	labels    labelCache
+	templates templateCache
 }
 
 // New 校验配置并创建 Worker。

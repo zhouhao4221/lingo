@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -39,6 +40,7 @@ type IssueWriter interface {
 type Drafts interface {
 	Draft(ctx context.Context, id int64) (*ticket.Ticket, error)
 	IssueCreated(ctx context.Context, id, number int64, via string) (bool, error)
+	IssueFailed(ctx context.Context, id int64, reason string) error
 }
 
 // RepoConfig 是仓库在 lingo.Repo 中的建单配置。
@@ -94,6 +96,14 @@ func (w *Worker) handleTask(ctx context.Context, t store.Task) {
 		w.finishTask(t, w.o.Tasks.ReleaseTask(fctx, t, de.Reason, de.Until))
 	case errors.As(err, &pe) || t.Failures+1 >= w.o.MaxAttempts:
 		log.Error("task abandoned", "err", err)
+		if t.Op == ticket.OpCreateIssue && t.TicketID != 0 {
+			// 工单不能停在 submitted 无人知晓：标记 abnormal 并通知，由后台人员排查
+			if ferr := w.o.Drafts.IssueFailed(fctx, t.TicketID, err.Error()); ferr != nil {
+				log.Error("mark ticket abnormal failed", "err", ferr)
+				w.finishTask(t, w.o.Tasks.RetryTask(fctx, t, ferr.Error(), w.o.Now().Add(backoff(t.Failures+1))))
+				return
+			}
+		}
 		w.finishTask(t, w.o.Tasks.FailTask(fctx, t, err.Error()))
 	default:
 		retryAt := w.o.Now().Add(backoff(t.Failures + 1))
@@ -156,14 +166,17 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	owner, name, _ := strings.Cut(t.Repo, "/")
 
 	// 幂等：上次可能已建好 Issue 但没来得及保存（进程崩溃、超时），按隐藏标记查重
-	existing, _, err := w.o.Issues.ListIssues(ctx, owner, name, gitea.ListIssuesOptions{
-		ListOptions: gitea.ListOptions{Limit: 50}, State: gitea.StateAll, Labels: []string{w.o.LabelPrefix},
-		Query: gitea.TicketMarkerQuery(id)})
+	// 关键词搜索会命中 ticket=50 等前缀相同的标记，翻完全部结果；只认正文最后一个标记（灵问追加的那个，
+	// 用户文本中的标记在建单时已去掉）。搜索索引有延迟，刚建好的 Issue 可能暂时搜不到，Webhook 的标记补记兜底。
+	existing, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Issue, *gitea.Response, error) {
+		return w.o.Issues.ListIssues(ctx, owner, name, gitea.ListIssuesOptions{ListOptions: o, State: gitea.StateAll,
+			Labels: []string{w.o.LabelPrefix}, Query: gitea.TicketMarkerQuery(id)})
+	})
 	if err != nil {
 		return giteaErr("search existing issue", err)
 	}
 	for _, is := range existing {
-		if is.User != nil && strings.EqualFold(is.User.Login, bot) && gitea.HasTicketMarker(is.Body, id) {
+		if is.User != nil && strings.EqualFold(is.User.Login, bot) && gitea.ParseTicketMarker(is.Body) == id {
 			_, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup")
 			return err
 		}
@@ -194,6 +207,10 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		is, err = w.o.Issues.CreateIssue(ctx, owner, name, opt)
 	}
 	if err != nil {
+		if !gitea.IsRetryable(err) {
+			w.labels.forget(owner, name) // 标签可能已被删除重建，缓存的 ID 失效
+			w.templates.forget(owner, name)
+		}
 		return giteaErr("create issue", err)
 	}
 	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create"); err != nil {
@@ -206,7 +223,7 @@ var typeColors = map[string]string{ticket.TypeConsult: "#1d76db", ticket.TypeBug
 
 // template 按 Repo.Templates 的文件名、再按模板标签匹配工单类型的 Issue 模板；没有时返回 nil（用内置结构）。
 func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg RepoConfig) (*gitea.IssueTemplate, error) {
-	ts, err := w.o.Issues.ListIssueTemplates(ctx, owner, name)
+	ts, err := w.templates.get(ctx, w.o.Issues, owner, name, w.o.Now())
 	if err != nil {
 		if gitea.IsRetryable(err) {
 			return nil, fmt.Errorf("list issue templates: %w", err)
@@ -237,22 +254,35 @@ func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg Repo
 // 末尾附项目、版本、提交环境、确认人与隐藏标记。不写入提交人姓名、邮箱等身份信息（PRD 3.2.0.6）。
 func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, forwardedBy, note string) string {
 	var b strings.Builder
-	switch {
-	case tmpl != nil && tmpl.IsForm() && len(t.Fields) > 0:
-		b.WriteString(gitea.RenderForm(tmpl, gitea.FormValues(t.Fields)))
-		if t.Body != "" {
-			b.WriteString("### 补充说明\n\n" + t.Body + "\n\n")
+	fields := map[string][]string{}
+	for k, vs := range t.Fields {
+		for _, v := range vs {
+			fields[k] = append(fields[k], stripMarkers(v))
 		}
-	default:
-		b.WriteString("### 描述\n\n" + t.Body + "\n\n")
-		ids := make([]string, 0, len(t.Fields))
-		for id := range t.Fields {
+	}
+	body := stripMarkers(t.Body)
+	used := map[string]bool{}
+	if tmpl != nil && tmpl.IsForm() && len(fields) > 0 {
+		b.WriteString(gitea.RenderForm(tmpl, gitea.FormValues(fields)))
+		for _, f := range tmpl.Fields {
+			used[f.ID] = true
+		}
+		if body != "" {
+			b.WriteString("### 补充说明\n\n" + body + "\n\n")
+		}
+	} else {
+		b.WriteString("### 描述\n\n" + body + "\n\n")
+	}
+	// 模板中没有的字段（内置结构，或模板改版后旧字段 ID）照原样附上，不丢用户填写的内容
+	ids := make([]string, 0, len(fields))
+	for id := range fields {
+		if !used[id] {
 			ids = append(ids, id)
 		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			b.WriteString("### " + id + "\n\n" + strings.Join(t.Fields[id], "\n") + "\n\n")
-		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		b.WriteString("### " + id + "\n\n" + strings.Join(fields[id], "\n") + "\n\n")
 	}
 	b.WriteString("---\n\n")
 	b.WriteString("- 项目：" + t.ProjectKey + "\n")
@@ -265,18 +295,64 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, forwardedBy, note st
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if v := strings.TrimSpace(t.Context[k]); v != "" {
-			b.WriteString("- " + k + "：" + v + "\n")
+		if v := strings.TrimSpace(stripMarkers(t.Context[k])); v != "" {
+			b.WriteString("- " + stripMarkers(k) + "：" + v + "\n")
 		}
 	}
 	if forwardedBy != "" {
 		b.WriteString("- 由 " + forwardedBy + " 确认转出\n")
 	}
-	if note = strings.TrimSpace(note); note != "" {
+	if note = strings.TrimSpace(stripMarkers(note)); note != "" {
 		b.WriteString("\n> " + strings.ReplaceAll(note, "\n", "\n> ") + "\n")
 	}
 	b.WriteString("\n" + gitea.TicketMarker(t.ID) + "\n")
 	return b.String()
+}
+
+// markerRe 匹配灵问的隐藏标记（lingo:ticket、lingo:public 等）。
+var markerRe = regexp.MustCompile(`<!--\s*lingo:[^>]*-->`)
+
+// stripMarkers 去掉用户文本中的灵问标记，防止伪造工单关联或对外标记。
+func stripMarkers(s string) string { return markerRe.ReplaceAllString(s, "") }
+
+// templateCache 按仓库缓存 Issue 模板 5 分钟，避免每建一个 Issue 都重新解析全部模板。
+type templateCache struct {
+	mu     sync.Mutex
+	byRepo map[string]cachedTemplates
+}
+
+type cachedTemplates struct {
+	at time.Time
+	ts []*gitea.IssueTemplate
+}
+
+const templateTTL = 5 * time.Minute
+
+func (c *templateCache) get(ctx context.Context, g IssueWriter, owner, name string, now time.Time) ([]*gitea.IssueTemplate, error) {
+	key := strings.ToLower(owner + "/" + name)
+	c.mu.Lock()
+	if e, ok := c.byRepo[key]; ok && now.Sub(e.at) < templateTTL {
+		c.mu.Unlock()
+		return e.ts, nil
+	}
+	c.mu.Unlock()
+	ts, err := g.ListIssueTemplates(ctx, owner, name)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.byRepo == nil {
+		c.byRepo = map[string]cachedTemplates{}
+	}
+	c.byRepo[key] = cachedTemplates{at: now, ts: ts}
+	return ts, nil
+}
+
+func (c *templateCache) forget(owner, name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byRepo, strings.ToLower(owner+"/"+name))
 }
 
 type labelSpec struct {
@@ -288,6 +364,12 @@ type labelSpec struct {
 type labelCache struct {
 	mu     sync.Mutex
 	byRepo map[string]map[string]int64
+}
+
+func (c *labelCache) forget(owner, name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.byRepo, strings.ToLower(owner+"/"+name))
 }
 
 func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name string, want []labelSpec) ([]int64, error) {

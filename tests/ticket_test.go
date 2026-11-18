@@ -23,6 +23,7 @@ type giteaServer struct {
 	issues    []map[string]any
 	templates string
 	created   []map[string]any // POST /issues 的请求体
+	createErr int              // 非 0 时 POST /issues 返回该状态码
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +46,8 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(g.templates))
 	case p == "/repos/demo/api/issues" && r.Method == "GET":
 		_ = json.NewEncoder(w).Encode(g.issues)
+	case p == "/repos/demo/api/issues" && r.Method == "POST" && g.createErr != 0:
+		http.Error(w, `{"message":"forbidden"}`, g.createErr)
 	case p == "/repos/demo/api/issues" && r.Method == "POST":
 		b, _ := io.ReadAll(r.Body)
 		var req map[string]any
@@ -178,6 +181,25 @@ func TestCreateIssueDedupByMarker(t *testing.T) {
 	got := waitTicket(t, l, alice, tk.ID, "open")
 	if !strings.HasSuffix(got.IssueURL, "/issues/77") || len(g.created) != 0 {
 		t.Errorf("dedup failed: %+v created %d", got, len(g.created))
+	}
+}
+
+func TestCreateIssuePermanentFailureMarksAbnormal(t *testing.T) {
+	g := &giteaServer{templates: "[]", createErr: http.StatusForbidden}
+	rec := &recorder{}
+	l, db, _ := newTicketLingo(t, g, rec, map[lingo.TicketType]bool{lingo.TicketBug: true})
+	tk, err := l.CreateTicket(context.Background(), alice, lingo.TicketInput{Type: lingo.TicketBug, Content: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runLingo(t, l)
+	waitTicket(t, l, alice, tk.ID, "abnormal")
+	var status string
+	if err := db.QueryRow("SELECT status FROM outbox WHERE kind = 'gitea'").Scan(&status); err != nil || status != "failed" {
+		t.Errorf("task status = %s %v", status, err)
+	}
+	if evs := rec.waitFor(t, 2); evs[1].Status != "abnormal" || evs[1].PrevStatus != "submitted" {
+		t.Errorf("events = %+v", evs)
 	}
 }
 

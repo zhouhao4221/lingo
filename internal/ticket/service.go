@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,20 @@ import (
 	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/notify"
 )
+
+type sourceKey struct{}
+
+// WithSource 标记调用入口（api | mcp | go），写入审计记录；未标记时为 go。
+func WithSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, sourceKey{}, source)
+}
+
+func sourceOf(ctx context.Context) string {
+	if s, ok := ctx.Value(sourceKey{}).(string); ok && s != "" {
+		return s
+	}
+	return "go"
+}
 
 // ServiceOptions 是 Service 的配置。
 type ServiceOptions struct {
@@ -75,7 +90,7 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		in.Title = summarize(in.Body, in.Fields)
 	}
 	if in.Source == "" {
-		in.Source = "go"
+		in.Source = sourceOf(ctx)
 	}
 	var t *Ticket
 	err := s.o.Store.InTx(ctx, func(tx Tx) error {
@@ -128,6 +143,16 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 
 // setRepo 按“指定仓库 → 项目默认仓库”确定工单仓库。
 func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, repo string) error {
+	if repo == "" && t.Repo != "" {
+		// 已选的仓库须仍启用且仍属于该项目（配置可能已调整），否则退回默认仓库
+		if r, err := tx.Repo(ctx, proj.ID, t.Repo); err == nil {
+			t.RepoID, t.Repo = r.ID, r.Name
+			return nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		t.RepoID, t.Repo = 0, ""
+	}
 	if repo != "" {
 		r, err := tx.Repo(ctx, proj.ID, repo)
 		if errors.Is(err, ErrNotFound) {
@@ -154,8 +179,13 @@ func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note stri
 func summarize(body string, fields map[string][]string) string {
 	src := body
 	if src == "" {
-		for _, vs := range fields {
-			if len(vs) > 0 && strings.TrimSpace(vs[0]) != "" {
+		ids := make([]string, 0, len(fields))
+		for id := range fields {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids) // map 无序：按字段 ID 排序，标题才稳定
+		for _, id := range ids {
+			if vs := fields[id]; len(vs) > 0 && strings.TrimSpace(vs[0]) != "" {
 				src = vs[0]
 				break
 			}
@@ -245,14 +275,10 @@ func (s *Service) Merge(ctx context.Context, p auth.Principal, id, target int64,
 	if target == id || target <= 0 {
 		return nil, fmt.Errorf("%w: invalid merge target", ErrInvalid)
 	}
-	return s.triage(ctx, p, id, "merge", func(tx Tx, t *Ticket) (string, error) {
-		// 目标工单只读校验即可：合并只写源工单，不需要锁目标（避免两张工单互相合并时死锁）
-		dst, err := s.o.Store.Get(ctx, target)
-		if errors.Is(err, ErrNotFound) || (err == nil && dst.ProjectID != t.ProjectID) {
+	return s.triageWith(ctx, p, id, target, "merge", func(tx Tx, t, dst *Ticket) (string, error) {
+		// 目标在同一事务中按 ID 顺序加锁：两张工单互相合并时只有一个能成功
+		if dst == nil || dst.ProjectID != t.ProjectID {
 			return "", fmt.Errorf("%w: merge target %d not found in project", ErrInvalid, target)
-		}
-		if err != nil {
-			return "", err
 		}
 		if dst.Status == StatusMerged || dst.Status == StatusRejected {
 			return "", fmt.Errorf("%w: merge target %d is %s", ErrConflict, target, dst.Status)
@@ -265,14 +291,41 @@ func (s *Service) Merge(ctx context.Context, p auth.Principal, id, target int64,
 // triage 是四种后台处理的公共流程：鉴权、锁定待确认工单、执行 apply、留痕并发出 ticket.status 与 triage.resolved。
 func (s *Service) triage(ctx context.Context, p auth.Principal, id int64, action string,
 	apply func(tx Tx, t *Ticket) (body string, err error)) (*Ticket, error) {
+	return s.triageWith(ctx, p, id, 0, action, func(tx Tx, t, _ *Ticket) (string, error) { return apply(tx, t) })
+}
+
+// triageWith 同 triage，另在同一事务内按 ID 顺序锁定关联工单 other（不存在时传给 apply 的为 nil）。
+func (s *Service) triageWith(ctx context.Context, p auth.Principal, id, other int64, action string,
+	apply func(tx Tx, t, other *Ticket) (body string, err error)) (*Ticket, error) {
 	if !p.Staff() {
 		return nil, fmt.Errorf("%w: triage requires reviewer or admin", ErrForbidden)
 	}
 	var t *Ticket
 	err := s.o.Store.InTx(ctx, func(tx Tx) error {
+		var o *Ticket
+		lockOther := func() error {
+			if other == 0 {
+				return nil
+			}
+			var err error
+			if o, err = tx.LockByID(ctx, other); errors.Is(err, ErrNotFound) {
+				o, err = nil, nil
+			}
+			return err
+		}
+		if other != 0 && other < id {
+			if err := lockOther(); err != nil {
+				return err
+			}
+		}
 		var err error
 		if t, err = tx.LockByID(ctx, id); err != nil {
 			return err
+		}
+		if other > id {
+			if err := lockOther(); err != nil {
+				return err
+			}
 		}
 		if !p.InProject(t.ProjectKey) {
 			return ErrNotFound
@@ -281,7 +334,7 @@ func (s *Service) triage(ctx context.Context, p auth.Principal, id int64, action
 			return fmt.Errorf("%w: ticket %d is %s, not pending_triage", ErrConflict, id, t.Status)
 		}
 		prev := t.Status
-		body, err := apply(tx, t)
+		body, err := apply(tx, t, o)
 		if err != nil {
 			return err
 		}
@@ -289,7 +342,7 @@ func (s *Service) triage(ctx context.Context, p auth.Principal, id int64, action
 		if err := tx.Update(ctx, t); err != nil {
 			return err
 		}
-		if err := tx.AddHistory(ctx, History{TicketID: t.ID, ActorID: p.ID, Source: "go", Kind: "triage." + action,
+		if err := tx.AddHistory(ctx, History{TicketID: t.ID, ActorID: p.ID, Source: sourceOf(ctx), Kind: "triage." + action,
 			Payload: map[string]any{"status": string(t.Status), "prev_status": string(prev)}}); err != nil {
 			return err
 		}
@@ -377,6 +430,32 @@ func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via 
 		return tx.Emit(ctx, s.event(t, notify.TicketStatus, StatusSubmitted, "", ""))
 	})
 	return linked, err
+}
+
+// IssueFailed 在建 Issue 被放弃（仓库不可写、配置错误等重试无用的情况）时把工单标记为 abnormal 并通知，
+// 后台人员据此排查；工单已关联 Issue 或不再待建时不变。
+func (s *Service) IssueFailed(ctx context.Context, id int64, reason string) error {
+	return s.o.Store.InTx(ctx, func(tx Tx) error {
+		t, err := tx.LockByID(ctx, id)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if t.IssueNumber != 0 || t.Status != StatusSubmitted {
+			return nil
+		}
+		t.Status = StatusAbnormal
+		if err := tx.Update(ctx, t); err != nil {
+			return err
+		}
+		if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "system", Kind: "issue.create_failed",
+			Payload: map[string]any{"repo": t.Repo, "reason": reason}}); err != nil {
+			return err
+		}
+		return tx.Emit(ctx, s.event(t, notify.TicketStatus, StatusSubmitted, "", ""))
+	})
 }
 
 func (s *Service) event(t *Ticket, kind notify.Kind, prev Status, actor, body string) notify.Event {
