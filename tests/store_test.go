@@ -200,6 +200,40 @@ func TestLeaseFencing(t *testing.T) {
 	}
 }
 
+func TestReleaseDoesNotCountFailure(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	r := rec("d1", "k1", "demo/api", 1)
+	r.Kind = webhook.PullMerged
+	if _, err := s.SaveDelivery(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.HasPendingMerges(ctx, time.Now().Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("pending merges = %v %v", ok, err)
+	}
+	a, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
+	if err := s.ReleaseDelivery(ctx, a[0], "deferred", time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
+	if len(b) != 1 || b[0].Attempts != 2 || b[0].Failures != 0 {
+		t.Fatalf("after release = %+v", b)
+	}
+	if err := s.RetryDelivery(ctx, b[0], "boom", time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
+	if len(c) != 1 || c[0].Attempts != 3 || c[0].Failures != 1 {
+		t.Fatalf("after retry = %+v", c)
+	}
+	if err := s.CompleteDelivery(ctx, c[0]); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.HasPendingMerges(ctx, time.Now().Add(time.Minute)); ok {
+		t.Error("completed merge still pending")
+	}
+}
+
 func TestClaimZeroLeaseUsesDefault(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

@@ -113,6 +113,7 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 	sync, err := ticket.NewSync(ticket.SyncOptions{
 		Store:         l.store,
 		NeedInfoLabel: l.labelPrefix() + "/review/need-info",
+		PendingMerges: l.store.HasPendingMerges,
 		IssueURL:      func(repo string, n int64) string { return ticket.IssueURL(base, repo, n) },
 	})
 	if err != nil {

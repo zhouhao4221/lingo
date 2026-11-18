@@ -18,42 +18,56 @@ const botRetry = 30 * time.Second
 
 // ProcessWebhooks 领取并处理一批 Webhook 投递，返回领取到的条数。
 func (w *Worker) ProcessWebhooks(ctx context.Context) (int, error) {
+	claimed := time.Now()
 	ds, err := w.o.Deliveries.ClaimDeliveries(ctx, w.o.BatchSize, w.o.Lease)
 	if err != nil {
 		return 0, err
 	}
-	for _, d := range ds {
-		if ctx.Err() != nil {
+	budget := w.batchBudget(claimed)
+	for i, d := range ds {
+		switch {
+		case ctx.Err() != nil:
 			// 退出中：释放尚未开始的条目，交给其他实例或下次启动
-			w.finishDelivery(d, w.o.Deliveries.RetryDelivery(context.WithoutCancel(ctx), d, "worker shutting down", w.o.Now()))
-			continue
+			w.releaseDelivery(ctx, d, "worker shutting down")
+		case i > 0 && time.Now().After(budget):
+			w.releaseDelivery(ctx, d, "lease budget exhausted")
+		default:
+			w.handleDelivery(ctx, d)
 		}
-		w.handleDelivery(ctx, d)
 	}
 	return len(ds), nil
 }
 
+func (w *Worker) releaseDelivery(ctx context.Context, d store.Delivery, reason string) {
+	fctx, cancel := finishContext(ctx)
+	defer cancel()
+	w.finishDelivery(d, w.o.Deliveries.ReleaseDelivery(fctx, d, reason, w.o.Now()))
+}
+
 func (w *Worker) handleDelivery(ctx context.Context, d store.Delivery) {
 	tctx, cancel := w.taskContext(ctx)
-	defer cancel()
-	log := w.log.With("delivery", d.DeliveryID, "kind", d.Kind, "attempt", d.Attempts)
 	err := w.processDelivery(tctx, d)
+	cancel()
+	fctx, fcancel := finishContext(ctx)
+	defer fcancel()
+	log := w.log.With("delivery", d.DeliveryID, "kind", d.Kind, "attempt", d.Attempts, "failures", d.Failures)
 	var de *ticket.DeferError
 	var pe *permanentError
 	switch {
 	case err == nil:
-		w.finishDelivery(d, w.o.Deliveries.CompleteDelivery(tctx, d))
-	case errors.As(err, &pe) || d.Attempts >= w.o.MaxAttempts:
+		w.finishDelivery(d, w.o.Deliveries.CompleteDelivery(fctx, d))
+	case errors.As(err, &de):
+		// 推迟不是失败，不消耗重试次数
+		log.Debug("webhook delivery deferred", "until", de.Until, "reason", de.Reason)
+		w.finishDelivery(d, w.o.Deliveries.ReleaseDelivery(fctx, d, de.Reason, de.Until))
+	case errors.As(err, &pe) || d.Failures+1 >= w.o.MaxAttempts:
 		// 放弃后由定时对账补齐其影响
 		log.Error("webhook delivery abandoned", "err", err)
-		w.finishDelivery(d, w.o.Deliveries.AbandonDelivery(tctx, d, err.Error()))
-	case errors.As(err, &de):
-		log.Debug("webhook delivery deferred", "until", de.Until, "reason", de.Reason)
-		w.finishDelivery(d, w.o.Deliveries.RetryDelivery(tctx, d, de.Reason, de.Until))
+		w.finishDelivery(d, w.o.Deliveries.AbandonDelivery(fctx, d, err.Error()))
 	default:
-		retryAt := w.o.Now().Add(backoff(d.Attempts))
+		retryAt := w.o.Now().Add(backoff(d.Failures + 1))
 		log.Warn("webhook delivery failed, will retry", "err", err, "retry_at", retryAt)
-		w.finishDelivery(d, w.o.Deliveries.RetryDelivery(tctx, d, err.Error(), retryAt))
+		w.finishDelivery(d, w.o.Deliveries.RetryDelivery(fctx, d, err.Error(), retryAt))
 	}
 }
 
@@ -86,7 +100,7 @@ func (w *Worker) processDelivery(ctx context.Context, d store.Delivery) error {
 		webhook.IssueAssigned, webhook.IssueUnassigned, webhook.IssueLabeled, webhook.IssueMilestoned, webhook.IssueDemilestoned:
 		return w.applyIssue(ctx, ev, d.ReceivedAt)
 	case webhook.CommentCreated, webhook.CommentEdited, webhook.CommentDeleted:
-		return w.applyComment(ctx, ev)
+		return w.applyComment(ctx, ev, d.ReceivedAt)
 	case webhook.PullOpened, webhook.PullEdited, webhook.PullReopened, webhook.PullClosed, webhook.PullMerged:
 		return w.applyPull(ctx, ev)
 	}
@@ -120,7 +134,8 @@ func (w *Worker) applyIssue(ctx context.Context, ev *webhook.Event, received tim
 		is, err := w.o.Gitea.GetIssue(ctx, owner, name, ev.IssueNumber)
 		switch {
 		case errors.Is(err, gitea.ErrNotFound):
-			change = ticket.IssueDeleted // Issue 已删除或仓库不可访问
+			// Issue 已删除或仓库不可访问；载荷里的旧快照不再可信
+			change, cur = ticket.IssueDeleted, ticket.IssueState{}
 		case err != nil && gitea.IsRetryable(err):
 			return fmt.Errorf("get issue %s#%d: %w", ev.Repo, ev.IssueNumber, err)
 		case err != nil:
@@ -153,7 +168,7 @@ func snapshot(is *gitea.Issue) ticket.IssueState {
 	return s
 }
 
-func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event) error {
+func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received time.Time) error {
 	if ev.IsPull {
 		return nil // PR 上的评论不属于工单 Issue
 	}
@@ -167,7 +182,7 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event) error {
 		u.Body = gitea.PublicReplyText(c.Body)
 	}
 	if u.Change == ticket.CommentDeleted {
-		u.At = ev.At
+		u.At = received // 载荷中只有评论最后编辑的时间
 	}
 	return w.o.Tickets.ApplyComment(ctx, u)
 }

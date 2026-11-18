@@ -19,6 +19,7 @@ type DeliveryStore interface {
 	ClaimDeliveries(ctx context.Context, limit int, lease time.Duration) ([]store.Delivery, error)
 	CompleteDelivery(ctx context.Context, d store.Delivery) error
 	RetryDelivery(ctx context.Context, d store.Delivery, reason string, retryAt time.Time) error
+	ReleaseDelivery(ctx context.Context, d store.Delivery, reason string, retryAt time.Time) error
 	AbandonDelivery(ctx context.Context, d store.Delivery, reason string) error
 }
 
@@ -27,6 +28,7 @@ type NotificationStore interface {
 	ClaimNotifications(ctx context.Context, limit int, lease time.Duration) ([]store.Notification, error)
 	CompleteNotification(ctx context.Context, n store.Notification) error
 	RetryNotification(ctx context.Context, n store.Notification, reason string, retryAt time.Time) error
+	ReleaseNotification(ctx context.Context, n store.Notification, reason string, retryAt time.Time) error
 	FailNotification(ctx context.Context, n store.Notification, reason string) error
 }
 
@@ -59,9 +61,10 @@ type Options struct {
 	Logger       *slog.Logger
 	PollInterval time.Duration // 队列为空时的轮询间隔，默认 1 秒
 	BatchSize    int           // 每次领取条数，默认 20
-	MaxAttempts  int           // 单条最多尝试次数，超过后放弃，默认 10
+	MaxAttempts  int           // 单条最多失败次数（推迟与释放不计），达到后放弃，默认 10
 	Lease        time.Duration // 领取租约，默认 store.DefaultLease
-	// TaskTimeout 是单条投递或通知的处理时限，默认 1 分钟；应小于 Lease。
+	// TaskTimeout 是单条投递或通知的处理时限，默认 1 分钟，最长 Lease 的一半。一批条目共用一个租约，
+	// 剩余租约不足以再处理一条时，其余条目释放回队列，避免租约过期后被其他实例重复处理。
 	TaskTimeout time.Duration
 	Now         func() time.Time
 }
@@ -103,6 +106,7 @@ func New(o Options) (*Worker, error) {
 	if o.TaskTimeout <= 0 {
 		o.TaskTimeout = time.Minute
 	}
+	o.TaskTimeout = min(o.TaskTimeout, o.Lease/2)
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -156,7 +160,20 @@ func (e *permanentError) Unwrap() error { return e.err }
 
 func permanent(err error) error { return &permanentError{err: err} }
 
+// finishTimeout 是写回处理结果的时限，与任务本身的时限分开，任务耗尽时限后结果仍能保存。
+const finishTimeout = 10 * time.Second
+
 // taskContext 让单条任务在 ctx 取消后仍能处理完（优雅退出），但不超过 TaskTimeout。
 func (w *Worker) taskContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), w.o.TaskTimeout)
+}
+
+// finishContext 用于写回处理结果：不受 ctx 取消与任务超时影响。
+func finishContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+}
+
+// batchBudget 返回一批条目在租约内还能开始处理新条目的截止时间；每批的第一条总会处理。
+func (w *Worker) batchBudget(claimed time.Time) time.Time {
+	return claimed.Add(w.o.Lease - w.o.TaskTimeout - finishTimeout)
 }

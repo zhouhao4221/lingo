@@ -75,7 +75,8 @@ func (s *Store) LastPing(ctx context.Context, repo string) (at time.Time, ok boo
 type Delivery struct {
 	ID int64
 	webhook.Record
-	Attempts int // 含本次领取；同时是本次租约的令牌，Complete / Retry / Abandon 必须匹配
+	Attempts int // 含本次领取；同时是本次租约的令牌，Complete / Retry / Release / Abandon 必须匹配
+	Failures int // 此前失败的次数（推迟与释放不计）
 }
 
 // DefaultLease 是 ClaimDeliveries 的默认租约时长。
@@ -109,7 +110,7 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int, lease time.Durat
 		    LIMIT $1
 		    FOR UPDATE SKIP LOCKED)
 		RETURNING d.id, d.delivery_id, d.event, d.event_type, d.kind, d.dedup_key, d.repo, d.issue_number,
-		          d.from_bot, d.payload, d.parse_error, d.received_at, d.attempts`,
+		          d.from_bot, d.payload, d.parse_error, d.received_at, d.attempts, d.failures`,
 		limit, lease.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("store: claim deliveries: %w", err)
@@ -121,7 +122,7 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int, lease time.Durat
 		var kind string
 		var issue sql.NullInt64
 		if err := rows.Scan(&d.ID, &d.DeliveryID, &d.Event, &d.EventType, &kind, &d.DedupKey, &d.Repo, &issue,
-			&d.FromBot, &d.Payload, &d.ParseError, &d.ReceivedAt, &d.Attempts); err != nil {
+			&d.FromBot, &d.Payload, &d.ParseError, &d.ReceivedAt, &d.Attempts, &d.Failures); err != nil {
 			return nil, err
 		}
 		d.Kind, d.IssueNumber = webhook.Kind(kind), issue.Int64
@@ -142,10 +143,27 @@ func (s *Store) CompleteDelivery(ctx context.Context, d Delivery) error {
 	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = ''`+leaseHeld)
 }
 
-// RetryDelivery 记录失败原因，并在 retryAt 之后允许重新领取。
+// RetryDelivery 记一次失败并保存原因，在 retryAt 之后允许重新领取。
 func (s *Store) RetryDelivery(ctx context.Context, d Delivery, reason string, retryAt time.Time) error {
+	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4`+leaseHeld,
+		reason, retryAt)
+}
+
+// ReleaseDelivery 释放租约，在 retryAt 之后允许重新领取，不计失败：用于推迟处理与退出时归还未开始的条目。
+func (s *Store) ReleaseDelivery(ctx context.Context, d Delivery, reason string, retryAt time.Time) error {
 	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET locked_until = NULL, last_error = $3, next_attempt_at = $4`+leaseHeld,
 		reason, retryAt)
+}
+
+// HasPendingMerges 报告是否有在 before 之前收到、尚未处理完的 PR 合并投递。
+func (s *Store) HasPendingMerges(ctx context.Context, before time.Time) (bool, error) {
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM webhook_deliveries
+		WHERE processed_at IS NULL AND kind = $1 AND received_at <= $2)`, string(webhook.PullMerged), before).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("store: pending merges: %w", err)
+	}
+	return ok, nil
 }
 
 // AbandonDelivery 放弃投递：标记为已处理并保留失败原因，不再重试，也不再阻塞同一 Issue 的后续投递

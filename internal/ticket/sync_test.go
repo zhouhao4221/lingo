@@ -198,6 +198,35 @@ func TestApplyIssueClosedWithoutFixWaitsForPull(t *testing.T) {
 	}
 }
 
+func TestApplyIssueClosedWaitsForQueuedMerge(t *testing.T) {
+	m := newMem(base(StatusInProgress))
+	pending := true
+	var asked time.Time
+	s, _ := NewSync(SyncOptions{Store: m, Now: func() time.Time { return t0.Add(time.Hour) },
+		PendingMerges: func(_ context.Context, before time.Time) (bool, error) { asked = before; return pending, nil }})
+	u := issue(IssueClosed, IssueState{State: "closed"})
+	var de *DeferError
+	if err := s.ApplyIssue(context.Background(), u); !errors.As(err, &de) || !asked.Equal(t0.Add(30*time.Second)) {
+		t.Fatalf("err = %v, asked %v", err, asked)
+	}
+	pending = false
+	if err := s.ApplyIssue(context.Background(), u); err != nil || m.tickets[1].Status != StatusClosed {
+		t.Errorf("after queue drained: %v %s", err, m.tickets[1].Status)
+	}
+}
+
+func TestApplyIssueDeletedIgnoresStaleness(t *testing.T) {
+	tk := base(StatusInProgress)
+	tk.GiteaUpdatedAt = t0.Add(time.Minute)
+	m := newMem(tk)
+	if err := newSync(t, m, t0.Add(time.Hour)).ApplyIssue(context.Background(), issue(IssueDeleted, IssueState{UpdatedAt: t0})); err != nil {
+		t.Fatal(err)
+	}
+	if m.tickets[1].Status != StatusAbnormal {
+		t.Errorf("status = %s", m.tickets[1].Status)
+	}
+}
+
 func TestApplyIssueStaleOnlyRecorded(t *testing.T) {
 	tk := base(StatusInProgress)
 	tk.GiteaUpdatedAt = t0.Add(time.Minute)

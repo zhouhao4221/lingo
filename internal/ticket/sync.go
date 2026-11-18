@@ -116,7 +116,10 @@ type SyncOptions struct {
 	// 常先于 pull_request merged 到达，等待期内推迟处理，避免先把工单误判为“关闭未修复”并通知提交人。
 	// 0 表示默认 30 秒，负数不等待。
 	CloseGrace time.Duration
-	Now        func() time.Time // 测试用，默认 time.Now
+	// PendingMerges 报告是否还有在 before 之前收到、尚未处理的 PR 合并事件；可空。worker 积压时等待期已过，
+	// 但合并事件可能仍在队列中，此时继续推迟关闭的判定。
+	PendingMerges func(ctx context.Context, before time.Time) (bool, error)
+	Now           func() time.Time // 测试用，默认 time.Now
 }
 
 // Sync 把 Gitea 侧的变化同步到工单：推进状态、记录审计、写对外事件。各方法幂等，可安全重放。
@@ -178,12 +181,13 @@ func (s *Sync) linkByMarker(ctx context.Context, tx Tx, u IssueUpdate) error {
 
 func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate) error {
 	cur := u.Current
-	stale := !cur.UpdatedAt.IsZero() && !t.GiteaUpdatedAt.IsZero() && cur.UpdatedAt.Before(t.GiteaUpdatedAt)
+	// 删除是终态，不受乱序判断影响（Issue 已无法读取，快照只能来自旧载荷）
+	stale := u.Change != IssueDeleted && !cur.UpdatedAt.IsZero() && !t.GiteaUpdatedAt.IsZero() && cur.UpdatedAt.Before(t.GiteaUpdatedAt)
 	prev, prevMilestone := t.Status, t.Milestone
 	if !stale {
-		if u.Change == IssueClosed && cur.State != "open" && !t.Status.fixed() && t.FixedPR == 0 && t.Status.active() {
-			if wait := u.ReceivedAt.Add(s.o.CloseGrace); s.o.CloseGrace > 0 && s.o.Now().Before(wait) {
-				return &DeferError{Until: wait, Reason: "issue closed without merged fix, waiting for pull request event"}
+		if u.Change == IssueClosed && cur.State != "open" && t.FixedPR == 0 && t.Status.active() {
+			if err := s.awaitFix(ctx, u); err != nil {
+				return err
 			}
 		}
 		s.transitIssue(t, u)
@@ -216,6 +220,28 @@ func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate) 
 		if err := tx.Emit(ctx, s.event(t, notify.TicketSchedule, "", body)); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// awaitFix 在 Issue 关闭而工单尚无修复 PR 时决定是否推迟判定，等待可能随后到达或仍在队列中的 PR 合并事件。
+func (s *Sync) awaitFix(ctx context.Context, u IssueUpdate) error {
+	if s.o.CloseGrace < 0 {
+		return nil
+	}
+	deadline := u.ReceivedAt.Add(s.o.CloseGrace)
+	if now := s.o.Now(); now.Before(deadline) {
+		return &DeferError{Until: deadline, Reason: "issue closed without merged fix, waiting for pull request event"}
+	}
+	if s.o.PendingMerges == nil {
+		return nil
+	}
+	pending, err := s.o.PendingMerges(ctx, deadline)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return &DeferError{Until: s.o.Now().Add(5 * time.Second), Reason: "pull request merge events still queued"}
 	}
 	return nil
 }

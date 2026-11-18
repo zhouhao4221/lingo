@@ -670,11 +670,11 @@ flowchart LR
 
 回流处理细则（`internal/ticket`、`internal/worker`）：
 - 指派、标签、里程碑、关闭 / 重开等状态类事件只是触发器：worker 先 `GET /issues/{index}` 读取当前状态再判定，返回 404 时按 Issue 已删除处理（`abnormal`）；与灵问工单无关的 Issue 直接跳过，不调用 Gitea
-- PR 合并经关闭关键词自动关闭 Issue 时，`issues` closed 常先于 `pull_request` merged 到达：Issue 关闭而工单尚无修复 PR 时，等待 30 秒再判定，避免先把工单误判为 `closed` 并通知提交人
+- PR 合并经关闭关键词自动关闭 Issue 时，`issues` closed 常先于 `pull_request` merged 到达：Issue 关闭而工单尚无修复 PR 时，等待 30 秒、且队列中没有更早收到的未处理 PR 合并投递后再判定，避免先把工单误判为 `closed` 并通知提交人
 - 只有带关闭关键词（`Fixes #N` 等）的 PR 合并才记为 `fixed`；仅提及的 PR 打开时工单进入 `in_progress`
 - `need_info` 由带前缀的标签全名判定，如 `lingo/review/need-info`；标签移除后回到 `in_progress`
 - 评论保存到 `ticket_comments`（内部评论 `public=false`），对外评论首次出现时发 `ticket.comment`，编辑不重复通知；机器人自己的评论跳过
-- 投递处理失败按 10 秒起翻倍（最长 1 小时）重试，最多 10 次后放弃，由对账补齐
+- 投递与通知处理失败按 10 秒起翻倍（最长 1 小时）重试，失败 10 次后放弃（推迟处理与退出释放不计），由对账补齐；Notifier 中的 panic 按失败处理
 
 **业务规则**：
 - 工单类型：`consult`（咨询）/ `bug` / `feature`（需求），对应 Gitea 标签

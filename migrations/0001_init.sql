@@ -271,7 +271,8 @@ CREATE TABLE outbox (
     event_id        bigint      REFERENCES events (id) ON DELETE CASCADE,
     payload         jsonb       NOT NULL DEFAULT '{}',
     status          text        NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'failed')),
-    attempts        integer     NOT NULL DEFAULT 0,
+    attempts        integer     NOT NULL DEFAULT 0, -- 领取次数，兼作租约令牌
+    failures        integer     NOT NULL DEFAULT 0, -- 失败次数（推迟、释放不计），与重试上限比较
     next_attempt_at timestamptz NOT NULL DEFAULT now(),
     locked_until    timestamptz, -- 租约：处理中的任务在此之前不会被其他实例领取
     last_error      text        NOT NULL DEFAULT '',
@@ -279,6 +280,8 @@ CREATE TABLE outbox (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX outbox_due_idx ON outbox (next_attempt_at) WHERE status = 'pending';
+-- 通知按工单顺序领取时检查同一工单是否有更早的未完成通知
+CREATE INDEX outbox_notify_pending_idx ON outbox (event_id) WHERE kind = 'notify' AND status = 'pending';
 
 -- Webhook 投递：验签后落库，worker 处理；去重见 internal/webhook
 CREATE TABLE webhook_deliveries (
@@ -295,7 +298,8 @@ CREATE TABLE webhook_deliveries (
     parse_error     text        NOT NULL DEFAULT '', -- kind = 'invalid' 时的解析错误
     received_at     timestamptz NOT NULL DEFAULT now(),
     processed_at    timestamptz,
-    attempts        integer     NOT NULL DEFAULT 0,
+    attempts        integer     NOT NULL DEFAULT 0, -- 领取次数，兼作租约令牌
+    failures        integer     NOT NULL DEFAULT 0, -- 失败次数（推迟、释放不计），与重试上限比较
     next_attempt_at timestamptz NOT NULL DEFAULT now(),
     locked_until    timestamptz,
     last_error      text        NOT NULL DEFAULT ''
@@ -303,6 +307,8 @@ CREATE TABLE webhook_deliveries (
 CREATE INDEX webhook_deliveries_pending_idx ON webhook_deliveries (next_attempt_at, id) WHERE processed_at IS NULL;
 -- 同一 Issue 的投递按顺序处理：领取时检查是否有更早的未完成投递
 CREATE INDEX webhook_deliveries_issue_pending_idx ON webhook_deliveries (repo, issue_number, id) WHERE processed_at IS NULL;
+-- Issue 关闭时检查是否还有未处理的 PR 合并投递
+CREATE INDEX webhook_deliveries_merge_pending_idx ON webhook_deliveries (received_at) WHERE processed_at IS NULL AND kind = 'pull.merged';
 
 -- 连通记录：push / 测试投递只更新这里，不进投递表
 CREATE TABLE webhook_pings (
