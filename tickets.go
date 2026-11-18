@@ -147,6 +147,24 @@ func (l *Lingo) defaultAutoForward(projectKey, typ string) bool {
 	return false
 }
 
+// declared 报告项目（repo 为空时）或项目下的仓库是否在 Config.Projects 中声明。
+func (l *Lingo) declared(projectKey, repo string) bool {
+	for _, p := range l.cfg.Projects {
+		if p.Key != projectKey {
+			continue
+		}
+		if repo == "" {
+			return true
+		}
+		for _, r := range p.Repos {
+			if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (l *Lingo) repoConfig(repo string) worker.RepoConfig {
 	for _, p := range l.cfg.Projects {
 		for _, r := range p.Repos {

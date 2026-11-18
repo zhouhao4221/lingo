@@ -34,7 +34,10 @@ type ServiceOptions struct {
 	// AutoForward 返回代码中声明的默认值（lingo.Project.AutoForward），运行时覆盖优先；为空时一律手动确认。
 	AutoForward func(projectKey, typ string) bool
 	IssueURL    func(repo string, number int64) string
-	Now         func() time.Time
+	// Declared 报告项目（repo 为空时）或项目下的仓库是否在当前 Config 中声明；为空时不限。数据库里的项目与仓库
+	// 不会因配置删除而停用（见 store.SyncProjects），以此保证只用当前声明的。
+	Declared func(projectKey, repo string) bool
+	Now      func() time.Time
 }
 
 // Service 是工单的提交、后台确认与查询；所有方法在领域层执行访问控制（PRD 3.2.0.6）。
@@ -53,6 +56,9 @@ func NewService(o ServiceOptions) (*Service, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.Declared == nil {
+		o.Declared = func(string, string) bool { return true }
+	}
 	return &Service{o: o}, nil
 }
 
@@ -70,7 +76,30 @@ type NewTicket struct {
 	Source       string // api | mcp | go
 }
 
-const maxTitleRunes = 80
+const (
+	maxSummaryRunes = 80
+	// MaxTitleRunes 是工单标题上限；Gitea Issue 标题上限 255，留出模板标题前缀的余量。
+	MaxTitleRunes = 200
+)
+
+// clip 把 s 截到最多 n 个字符。
+func clip(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n-1]) + "…"
+}
+
+func hasValue(fields map[string][]string) bool {
+	for _, vs := range fields {
+		for _, v := range vs {
+			if strings.TrimSpace(v) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // Create 提交工单：按项目 + 类型的开关自动转出（submitted，入队建 Issue）或进入待确认（pending_triage）。
 func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*Ticket, error) {
@@ -79,11 +108,11 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		return nil, fmt.Errorf("%w: caller has no user id or role", ErrForbidden)
 	case !ValidType(in.Type):
 		return nil, fmt.Errorf("%w: type %q", ErrInvalid, in.Type)
-	case !p.InProject(in.Project):
+	case !p.InProject(in.Project) || !s.o.Declared(in.Project, ""):
 		return nil, fmt.Errorf("%w: project %q", ErrNotFound, in.Project)
 	}
-	in.Title, in.Body = strings.TrimSpace(in.Title), strings.TrimSpace(in.Body)
-	if in.Body == "" && len(in.Fields) == 0 {
+	in.Title, in.Body = clip(strings.TrimSpace(in.Title), MaxTitleRunes), strings.TrimSpace(in.Body)
+	if in.Body == "" && !hasValue(in.Fields) {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
 	}
 	if in.Title == "" {
@@ -97,6 +126,15 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		proj, err := tx.Project(ctx, in.Project)
 		if err != nil {
 			return err
+		}
+		if in.Conversation != 0 {
+			owner, err := tx.ConversationOwner(ctx, in.Conversation)
+			if errors.Is(err, ErrNotFound) || (err == nil && owner != p.ID) {
+				return fmt.Errorf("%w: conversation %d", ErrInvalid, in.Conversation)
+			}
+			if err != nil {
+				return err
+			}
 		}
 		t = &Ticket{ProjectID: proj.ID, ProjectKey: proj.Key, Type: in.Type, Title: in.Title, Body: in.Body,
 			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email,
@@ -133,7 +171,7 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		if !on {
 			return tx.Emit(ctx, s.event(t, notify.TriageRequired, "", p.ID, ""))
 		}
-		return enqueueCreate(ctx, tx, t, "", "")
+		return enqueueCreate(ctx, tx, t, "", "", time.Time{})
 	})
 	if err != nil {
 		return nil, err
@@ -143,9 +181,12 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 
 // setRepo 按“指定仓库 → 项目默认仓库”确定工单仓库。
 func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, repo string) error {
+	if repo != "" && !s.o.Declared(proj.Key, repo) {
+		return fmt.Errorf("%w: repo %q is not in project %q", ErrInvalid, repo, proj.Key)
+	}
 	if repo == "" && t.Repo != "" {
-		// 已选的仓库须仍启用且仍属于该项目（配置可能已调整），否则退回默认仓库
-		if r, err := tx.Repo(ctx, proj.ID, t.Repo); err == nil {
+		// 已选的仓库须仍声明在该项目下（配置可能已调整），否则退回默认仓库
+		if r, err := tx.Repo(ctx, proj.ID, t.Repo); err == nil && s.o.Declared(proj.Key, r.Name) {
 			t.RepoID, t.Repo = r.ID, r.Name
 			return nil
 		} else if !errors.Is(err, ErrNotFound) {
@@ -164,14 +205,18 @@ func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, 
 		t.RepoID, t.Repo = r.ID, r.Name
 		return nil
 	}
-	if t.RepoID == 0 && proj.DefaultRepo != nil {
+	if t.RepoID == 0 && proj.DefaultRepo != nil && s.o.Declared(proj.Key, proj.DefaultRepo.Name) {
 		t.RepoID, t.Repo = proj.DefaultRepo.ID, proj.DefaultRepo.Name
 	}
 	return nil
 }
 
-func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string) error {
-	return tx.Enqueue(ctx, Task{Key: OpCreateIssue + ":ticket:" + strconv.FormatInt(t.ID, 10), TicketID: t.ID, Op: OpCreateIssue,
+func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, retry time.Time) error {
+	key := OpCreateIssue + ":ticket:" + strconv.FormatInt(t.ID, 10)
+	if !retry.IsZero() {
+		key += ":retry:" + strconv.FormatInt(retry.UnixNano(), 10) // 上次建单已放弃，重新入队需要新键
+	}
+	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue,
 		Payload: map[string]any{"forwarded_by": forwardedBy, "note": note}})
 }
 
@@ -193,10 +238,7 @@ func summarize(body string, fields map[string][]string) string {
 	}
 	for _, line := range strings.Split(src, "\n") {
 		if line = strings.TrimSpace(strings.TrimLeft(line, "#>-* ")); line != "" {
-			if utf8.RuneCountInString(line) > maxTitleRunes {
-				line = string([]rune(line)[:maxTitleRunes-1]) + "…"
-			}
-			return line
+			return clip(line, maxSummaryRunes)
 		}
 	}
 	return "未命名工单"
@@ -210,13 +252,17 @@ type ForwardInput struct {
 	Note  string // 补充说明，写入 Issue
 }
 
-// Forward 把待确认工单转出到 Gitea（reviewer / admin）。
+// Forward 把待确认工单转出到 Gitea（reviewer / admin）；建 Issue 失败而变为 abnormal 的工单也可再次转出。
 func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in ForwardInput) (*Ticket, error) {
 	if in.Type != "" && !ValidType(in.Type) {
 		return nil, fmt.Errorf("%w: type %q", ErrInvalid, in.Type)
 	}
 	return s.triage(ctx, p, id, "forward", func(tx Tx, t *Ticket) (string, error) {
-		if in.Title = strings.TrimSpace(in.Title); in.Title != "" {
+		retry := time.Time{}
+		if t.Status == StatusAbnormal {
+			retry = s.o.Now()
+		}
+		if in.Title = clip(strings.TrimSpace(in.Title), MaxTitleRunes); in.Title != "" {
 			t.Title = in.Title
 		}
 		if in.Type != "" {
@@ -240,7 +286,7 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 		if name == "" {
 			name = p.ID
 		}
-		return "", enqueueCreate(ctx, tx, t, name, in.Note)
+		return "", enqueueCreate(ctx, tx, t, name, in.Note, retry)
 	})
 }
 
@@ -330,7 +376,8 @@ func (s *Service) triageWith(ctx context.Context, p auth.Principal, id, other in
 		if !p.InProject(t.ProjectKey) {
 			return ErrNotFound
 		}
-		if t.Status != StatusPendingTriage {
+		refwd := action == "forward" && t.Status == StatusAbnormal && t.IssueNumber == 0
+		if t.Status != StatusPendingTriage && !refwd {
 			return fmt.Errorf("%w: ticket %d is %s, not pending_triage", ErrConflict, id, t.Status)
 		}
 		prev := t.Status

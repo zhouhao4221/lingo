@@ -3,6 +3,7 @@ package ticket
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,6 +241,39 @@ func TestIssueFailedMarksAbnormal(t *testing.T) {
 	}
 	if got := m.tickets[tk.ID]; got.Status != StatusAbnormal || m.events[len(m.events)-1].PrevStatus != string(StatusSubmitted) {
 		t.Errorf("ticket = %+v", got)
+	}
+}
+
+func TestReforwardAfterIssueFailed(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, map[string]bool{TypeBug: true})
+	ctx := context.Background()
+	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x"})
+	_ = s.IssueFailed(ctx, tk.ID, "403")
+	f, err := s.Forward(ctx, reviewer, tk.ID, ForwardInput{})
+	if err != nil || f.Status != StatusSubmitted || len(m.tasks) != 2 {
+		t.Errorf("re-forward: %+v %v tasks %d", f, err, len(m.tasks))
+	}
+	if _, err := s.Answer(ctx, reviewer, tk.ID, "x"); !errors.Is(err, ErrConflict) {
+		t.Errorf("answer submitted ticket: %v", err)
+	}
+}
+
+func TestCreateConversationAndEmptyFields(t *testing.T) {
+	s := newService(t, newMem(), nil)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x", Conversation: 1}); err != nil {
+		t.Errorf("own conversation: %v", err)
+	}
+	if _, err := s.Create(ctx, bob, NewTicket{Project: "demo", Type: TypeBug, Body: "x", Conversation: 1}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("other's conversation: %v", err)
+	}
+	if _, err := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Fields: map[string][]string{"a": {" "}}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("blank fields: %v", err)
+	}
+	long := strings.Repeat("长", 300)
+	if tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Title: long, Body: "x"}); len([]rune(tk.Title)) != MaxTitleRunes {
+		t.Errorf("title runes = %d", len([]rune(tk.Title)))
 	}
 }
 

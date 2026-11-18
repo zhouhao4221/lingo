@@ -102,6 +102,13 @@ func (m *memStore) SetAutoForward(_ context.Context, pid int64, typ string, on *
 	return nil
 }
 
+func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {
+	if id == 1 {
+		return "u1", nil
+	}
+	return "", ErrNotFound
+}
+
 func (m *memStore) AddComment(_ context.Context, c Comment) error {
 	m.notes = append(m.notes, c)
 	return nil

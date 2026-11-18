@@ -36,6 +36,8 @@ type Tx interface {
 	AutoForward(ctx context.Context, projectID int64, typ string) (on, ok bool, err error)
 	// SetAutoForward 写入（on 非空）或删除（on 为空）运行时覆盖值。
 	SetAutoForward(ctx context.Context, projectID int64, typ string, on *bool, by string) error
+	// ConversationOwner 返回会话的提交人；不存在返回 ErrNotFound。
+	ConversationOwner(ctx context.Context, id int64) (string, error)
 	// AddComment 写一条工单评论（用户补充或后台答复）。
 	AddComment(ctx context.Context, c Comment) error
 	// AddTriage 写一条后台处理记录（triage_actions）。

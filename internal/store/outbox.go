@@ -157,29 +157,25 @@ const outboxLeaseHeld = ` WHERE id = $1 AND attempts = $2 AND status = 'pending'
 
 // CompleteNotification 标记通知已投递。
 func (s *Store) CompleteNotification(ctx context.Context, n Notification) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET status = 'done', locked_until = NULL, last_error = '', updated_at = now()`+outboxLeaseHeld)
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET status = 'done', locked_until = NULL, last_error = '', updated_at = now()`+outboxLeaseHeld)
 }
 
 // RetryNotification 记一次失败并保存原因，在 retryAt 之后允许重新领取。
 func (s *Store) RetryNotification(ctx context.Context, n Notification, reason string, retryAt time.Time) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
 		reason, retryAt)
 }
 
 // ReleaseNotification 释放租约，在 retryAt 之后允许重新领取，不计失败。
 func (s *Store) ReleaseNotification(ctx context.Context, n Notification, reason string, retryAt time.Time) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET locked_until = NULL, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET locked_until = NULL, last_error = $3, next_attempt_at = $4, updated_at = now()`+outboxLeaseHeld,
 		reason, retryAt)
 }
 
 // FailNotification 放弃投递（超过重试上限），保留失败原因；不再阻塞同一工单的后续通知。
 func (s *Store) FailNotification(ctx context.Context, n Notification, reason string) error {
-	return s.finishOutbox(ctx, n, `UPDATE outbox SET status = 'failed', locked_until = NULL, last_error = $3, updated_at = now()`+outboxLeaseHeld,
+	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, `UPDATE outbox SET status = 'failed', locked_until = NULL, last_error = $3, updated_at = now()`+outboxLeaseHeld,
 		reason)
-}
-
-func (s *Store) finishOutbox(ctx context.Context, n Notification, query string, args ...any) error {
-	return s.finishOutboxRow(ctx, n.OutboxID, n.Attempts, query, args...)
 }
 
 func (s *Store) finishOutboxRow(ctx context.Context, id int64, attempts int, query string, args ...any) error {

@@ -99,6 +99,7 @@ func New(cfg Config) (*Lingo, error) {
 		Store:       l.store,
 		AutoForward: l.defaultAutoForward,
 		IssueURL:    l.issueURL,
+		Declared:    l.declared,
 	}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}

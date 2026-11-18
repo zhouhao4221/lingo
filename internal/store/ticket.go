@@ -235,6 +235,18 @@ func (x *ticketTx) SetAutoForward(ctx context.Context, projectID int64, typ stri
 	return nil
 }
 
+func (x *ticketTx) ConversationOwner(ctx context.Context, id int64) (string, error) {
+	var owner string
+	err := x.tx.QueryRowContext(ctx, "SELECT user_id FROM conversations WHERE id = $1", id).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ticket.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: conversation %d: %w", id, err)
+	}
+	return owner, nil
+}
+
 func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) error {
 	at := c.At
 	if at.IsZero() {

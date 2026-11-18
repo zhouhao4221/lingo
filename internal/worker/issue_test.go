@@ -8,6 +8,12 @@ import (
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
+func TestStripMarkersNested(t *testing.T) {
+	if got := stripMarkers("a <!-<!-- lingo:x -->- lingo:public --> b"); strings.Contains(got, "lingo:") {
+		t.Errorf("nested marker survived: %q", got)
+	}
+}
+
 func TestIssueBodyStripsMarkersAndKeepsUnknownFields(t *testing.T) {
 	tmpl := &gitea.IssueTemplate{Fields: []*gitea.IssueFormField{{Type: gitea.FieldInput, ID: "what", Attributes: map[string]any{"label": "现象"}}}}
 	tk := &ticket.Ticket{ID: 8, ProjectKey: "demo", Body: "补充 <!-- lingo:ticket=7 --> 说明",

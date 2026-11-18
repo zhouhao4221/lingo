@@ -169,12 +169,15 @@ func TestCreateTicketAutoForwardCreatesIssue(t *testing.T) {
 
 func TestCreateIssueDedupByMarker(t *testing.T) {
 	g := &giteaServer{templates: "[]"}
-	l, _, _ := newTicketLingo(t, g, nil, map[lingo.TicketType]bool{lingo.TicketBug: true})
+	l, db, _ := newTicketLingo(t, g, nil, map[lingo.TicketType]bool{lingo.TicketBug: true})
 	tk, err := l.CreateTicket(context.Background(), alice, lingo.TicketInput{Type: lingo.TicketBug, Content: "崩溃"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 模拟上次已建好 Issue 但没保存：Gitea 中已有带标记的机器人 Issue
+	// 模拟上次已建好 Issue 但没保存：任务此前被领取过，Gitea 中已有带标记的机器人 Issue
+	if _, err := db.Exec("UPDATE outbox SET attempts = 1 WHERE kind = 'gitea'"); err != nil {
+		t.Fatal(err)
+	}
 	g.issues = []map[string]any{{"id": 7, "number": 77, "state": "open", "user": map[string]any{"login": "lingo-bot"},
 		"body": "x\n<!-- lingo:ticket=" + jsonNum(tk.ID) + " -->"}}
 	runLingo(t, l)

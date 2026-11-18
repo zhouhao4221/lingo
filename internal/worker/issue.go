@@ -131,7 +131,7 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 		if err := json.Unmarshal(t.Payload, &p); err != nil {
 			return permanent(fmt.Errorf("task payload: %w", err))
 		}
-		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note)
+		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note, t.Attempts > 1)
 	}
 	return permanent(fmt.Errorf("unknown task op %q", t.Op))
 }
@@ -145,7 +145,8 @@ func giteaErr(what string, err error) error {
 	return permanent(err)
 }
 
-func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string) error {
+// createIssue 建 Issue；retried 为真表示任务此前被领取过（可能已建好 Issue 但未保存），需先查重。
+func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string, retried bool) error {
 	t, err := w.o.Drafts.Draft(ctx, id)
 	if errors.Is(err, ticket.ErrNotFound) {
 		return nil
@@ -168,24 +169,28 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	// 幂等：上次可能已建好 Issue 但没来得及保存（进程崩溃、超时），按隐藏标记查重
 	// 关键词搜索会命中 ticket=50 等前缀相同的标记，翻完全部结果；只认正文最后一个标记（灵问追加的那个，
 	// 用户文本中的标记在建单时已去掉）。搜索索引有延迟，刚建好的 Issue 可能暂时搜不到，Webhook 的标记补记兜底。
-	existing, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Issue, *gitea.Response, error) {
-		return w.o.Issues.ListIssues(ctx, owner, name, gitea.ListIssuesOptions{ListOptions: o, State: gitea.StateAll,
-			Labels: []string{w.o.LabelPrefix}, Query: gitea.TicketMarkerQuery(id)})
-	})
-	if err != nil {
-		return giteaErr("search existing issue", err)
-	}
-	for _, is := range existing {
-		if is.User != nil && strings.EqualFold(is.User.Login, bot) && gitea.ParseTicketMarker(is.Body) == id {
-			_, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup")
-			return err
+	// 不按来源标签过滤：研发可能已去掉标签。首次执行不可能有先前的 Issue，跳过查重。
+	if retried {
+		existing, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Issue, *gitea.Response, error) {
+			return w.o.Issues.ListIssues(ctx, owner, name, gitea.ListIssuesOptions{ListOptions: o, State: gitea.StateAll,
+				Query: gitea.TicketMarkerQuery(id)})
+		})
+		if err != nil {
+			return giteaErr("search existing issue", err)
+		}
+		for _, is := range existing {
+			if is.User != nil && strings.EqualFold(is.User.Login, bot) && gitea.ParseTicketMarker(is.Body) == id {
+				_, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup")
+				return err
+			}
 		}
 	}
 
-	labels, err := w.labels.ensure(ctx, w.o.Issues, owner, name, []labelSpec{
+	wantLabels := []labelSpec{
 		{Name: w.o.LabelPrefix, Color: "#6f42c1", Description: "由灵问创建"},
 		{Name: w.o.LabelPrefix + "/type/" + t.Type, Color: typeColors[t.Type], Exclusive: true},
-	})
+	}
+	labels, err := w.labels.ensure(ctx, w.o.Issues, owner, name, wantLabels)
 	if err != nil {
 		return err
 	}
@@ -198,19 +203,22 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if tmpl != nil && tmpl.Title != "" && !strings.HasPrefix(t.Title, tmpl.Title) {
 		opt.Title = tmpl.Title + t.Title
 	}
+	opt.Title = clipRunes(opt.Title, maxIssueTitle)
 	is, err := w.o.Issues.CreateIssue(ctx, owner, name, opt)
 	var ae *gitea.APIError
-	if errors.As(err, &ae) && ae.StatusCode == http.StatusUnprocessableEntity && len(opt.Assignees) > 0 {
-		// 指派人不存在或无权限时 Gitea 返回 422：不指派再建一次，不让配置错误挡住建单
-		w.log.Warn("create issue with assignees rejected, retrying without", "repo", t.Repo, "assignees", opt.Assignees, "err", err)
+	if errors.As(err, &ae) && ae.StatusCode == http.StatusUnprocessableEntity {
+		// 422 常见于缓存的标签 ID 已失效（标签被删除重建）或指派人不存在：刷新标签、不指派再建一次，
+		// 不让这类配置变化挡住建单
+		w.log.Warn("create issue rejected, retrying with fresh labels and no assignees", "repo", t.Repo, "err", err)
+		w.labels.forget(owner, name)
+		w.templates.forget(owner, name)
+		if opt.Labels, err = w.labels.ensure(ctx, w.o.Issues, owner, name, wantLabels); err != nil {
+			return err
+		}
 		opt.Assignees = nil
 		is, err = w.o.Issues.CreateIssue(ctx, owner, name, opt)
 	}
 	if err != nil {
-		if !gitea.IsRetryable(err) {
-			w.labels.forget(owner, name) // 标签可能已被删除重建，缓存的 ID 失效
-			w.templates.forget(owner, name)
-		}
 		return giteaErr("create issue", err)
 	}
 	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create"); err != nil {
@@ -312,8 +320,27 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, forwardedBy, note st
 // markerRe 匹配灵问的隐藏标记（lingo:ticket、lingo:public 等）。
 var markerRe = regexp.MustCompile(`<!--\s*lingo:[^>]*-->`)
 
-// stripMarkers 去掉用户文本中的灵问标记，防止伪造工单关联或对外标记。
-func stripMarkers(s string) string { return markerRe.ReplaceAllString(s, "") }
+// stripMarkers 去掉用户文本中的灵问标记，防止伪造工单关联或对外标记；反复替换直到不变，
+// 嵌套构造（去掉内层后外层拼成新标记）也会被清除。
+func stripMarkers(s string) string {
+	for {
+		next := markerRe.ReplaceAllString(s, "")
+		if next == s {
+			return s
+		}
+		s = next
+	}
+}
+
+// maxIssueTitle 是 Gitea Issue 标题上限（字符）。
+const maxIssueTitle = 255
+
+func clipRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
 
 // templateCache 按仓库缓存 Issue 模板 5 分钟，避免每建一个 Issue 都重新解析全部模板。
 type templateCache struct {
