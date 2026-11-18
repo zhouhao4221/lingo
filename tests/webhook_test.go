@@ -92,3 +92,17 @@ func TestWebhookHandlerWithoutSecretRejects(t *testing.T) {
 		t.Errorf("stored without secret: %d", n)
 	}
 }
+
+func TestNewRejectsAutoRegisterWithoutSecret(t *testing.T) {
+	db := testDB(t, false)
+	_, err := lingo.New(lingo.Config{
+		DB:           db,
+		Model:        nopModel{},
+		Gitea:        lingo.GiteaConfig{BaseURL: "http://g", Token: "t", AutoRegisterWebhook: true, WebhookURL: "http://app/wh"},
+		Projects:     []lingo.Project{{Key: "demo"}},
+		Authenticate: func(*http.Request) (lingo.User, error) { return lingo.User{}, nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "WebhookSecret") {
+		t.Errorf("err = %v", err)
+	}
+}

@@ -69,17 +69,30 @@ func (s *Store) LastPing(ctx context.Context, repo string) (at time.Time, ok boo
 }
 
 // Delivery 是 worker 领取到的一条待处理投递。
+//
+// Record.FromBot 是接收时的判定，机器人账号当时可能尚未获取；worker 必须用 webhook.Parse 按当前的
+// 机器人账号重新解析 Payload，不能直接信任该字段。
 type Delivery struct {
 	ID int64
 	webhook.Record
-	Attempts int // 含本次领取
+	Attempts int // 含本次领取；同时是本次租约的令牌，Complete / Retry / Abandon 必须匹配
 }
 
-// ClaimDeliveries 领取最多 limit 条到期的未处理投递，租约 lease 内其他实例不会再领取。
+// DefaultLease 是 ClaimDeliveries 的默认租约时长。
+const DefaultLease = 5 * time.Minute
+
+// ErrLeaseLost 表示租约已失效：投递在租约过期后被其他 worker 重新领取（attempts 已变化）或已处理完成，
+// 本次处理结果不再写入。
+var ErrLeaseLost = errors.New("store: delivery lease lost")
+
+// ClaimDeliveries 领取最多 limit 条到期的未处理投递，租约 lease（≤0 时为 DefaultLease）内其他实例不会再领取。
 // 同一 Issue 的投递按顺序处理：存在更早的未完成投递时，后面的投递暂不领取。结果按 ID 升序。
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int, lease time.Duration) ([]Delivery, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	if lease <= 0 {
+		lease = DefaultLease
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		UPDATE webhook_deliveries d
@@ -121,31 +134,35 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int, lease time.Durat
 	return out, nil
 }
 
+// 收尾操作只在租约仍属于本次领取（attempts 未变且未处理完成）时生效，否则返回 ErrLeaseLost。
+const leaseHeld = ` WHERE id = $1 AND attempts = $2 AND processed_at IS NULL`
+
 // CompleteDelivery 标记投递处理完成。
-func (s *Store) CompleteDelivery(ctx context.Context, id int64) error {
-	return s.finishDelivery(ctx, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = '' WHERE id = $1`, id)
+func (s *Store) CompleteDelivery(ctx context.Context, d Delivery) error {
+	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = ''`+leaseHeld)
 }
 
 // RetryDelivery 记录失败原因，并在 retryAt 之后允许重新领取。
-func (s *Store) RetryDelivery(ctx context.Context, id int64, reason string, retryAt time.Time) error {
-	return s.finishDelivery(ctx, `UPDATE webhook_deliveries SET locked_until = NULL, last_error = $2, next_attempt_at = $3 WHERE id = $1`,
-		id, reason, retryAt)
+func (s *Store) RetryDelivery(ctx context.Context, d Delivery, reason string, retryAt time.Time) error {
+	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET locked_until = NULL, last_error = $3, next_attempt_at = $4`+leaseHeld,
+		reason, retryAt)
 }
 
 // AbandonDelivery 放弃投递：标记为已处理并保留失败原因，不再重试，也不再阻塞同一 Issue 的后续投递
 // （由对账补齐其影响）。
-func (s *Store) AbandonDelivery(ctx context.Context, id int64, reason string) error {
-	return s.finishDelivery(ctx, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = $2 WHERE id = $1`,
-		id, reason)
+func (s *Store) AbandonDelivery(ctx context.Context, d Delivery, reason string) error {
+	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = $3`+leaseHeld,
+		reason)
 }
 
-func (s *Store) finishDelivery(ctx context.Context, query string, id int64, args ...any) error {
-	res, err := s.db.ExecContext(ctx, query, append([]any{id}, args...)...)
+func (s *Store) finishDelivery(ctx context.Context, d Delivery, query string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, query, append([]any{d.ID, d.Attempts}, args...)...)
 	if err != nil {
-		return fmt.Errorf("store: update delivery %d: %w", id, err)
+		return fmt.Errorf("store: update delivery %d: %w", d.ID, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("store: delivery %d not found", id)
+	// 驱动无法报告影响行数时按成功处理，避免把已生效的更新误报为失败
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("%w: delivery %d attempt %d", ErrLeaseLost, d.ID, d.Attempts)
 	}
 	return nil
 }

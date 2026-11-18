@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -77,13 +79,13 @@ func TestClaimDeliveriesOrderAndLease(t *testing.T) {
 	if again, _ := s.ClaimDeliveries(ctx, 10, time.Minute); len(again) != 0 {
 		t.Errorf("claimed again within lease: %s", ids(again))
 	}
-	if err := s.CompleteDelivery(ctx, first[0].ID); err != nil {
+	if err := s.CompleteDelivery(ctx, first[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RetryDelivery(ctx, first[1].ID, "gitea down", time.Now().Add(time.Hour)); err != nil {
+	if err := s.RetryDelivery(ctx, first[1], "gitea down", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AbandonDelivery(ctx, first[2].ID, "bad payload"); err != nil {
+	if err := s.AbandonDelivery(ctx, first[2], "bad payload"); err != nil {
 		t.Fatal(err)
 	}
 	second, err := s.ClaimDeliveries(ctx, 10, time.Minute)
@@ -94,8 +96,8 @@ func TestClaimDeliveriesOrderAndLease(t *testing.T) {
 	if got := ids(second); got != "[d2]" {
 		t.Errorf("second claim = %s", got)
 	}
-	if err := s.CompleteDelivery(ctx, 999999); err == nil {
-		t.Error("completing unknown delivery should fail")
+	if err := s.CompleteDelivery(ctx, store.Delivery{ID: 999999, Attempts: 1}); !errors.Is(err, store.ErrLeaseLost) {
+		t.Errorf("completing unknown delivery: %v", err)
 	}
 }
 
@@ -158,5 +160,64 @@ func TestRecordPingOnlyMovesForward(t *testing.T) {
 	got, ok, err := s.LastPing(ctx, "demo/api")
 	if err != nil || !ok || !got.Equal(t1) {
 		t.Errorf("LastPing = %v %v %v", got, ok, err)
+	}
+}
+
+func TestLeaseFencing(t *testing.T) {
+	db := testDB(t, true)
+	s, _ := store.New(db)
+	ctx := context.Background()
+	if _, err := s.SaveDelivery(ctx, rec("d1", "k1", "demo/api", 1)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
+	if len(a) != 1 {
+		t.Fatalf("claim A = %d", len(a))
+	}
+	expireLeases(t, db)
+	b, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
+	if len(b) != 1 || b[0].Attempts != 2 {
+		t.Fatalf("claim B = %+v", b)
+	}
+	// A 的租约已失效：它的收尾不能影响 B 正在处理的投递
+	for name, err := range map[string]error{
+		"complete": s.CompleteDelivery(ctx, a[0]),
+		"retry":    s.RetryDelivery(ctx, a[0], "late", time.Now()),
+		"abandon":  s.AbandonDelivery(ctx, a[0], "late"),
+	} {
+		if !errors.Is(err, store.ErrLeaseLost) {
+			t.Errorf("stale %s: err = %v", name, err)
+		}
+	}
+	if again, _ := s.ClaimDeliveries(ctx, 1, time.Minute); len(again) != 0 {
+		t.Error("stale retry released B's lease")
+	}
+	if err := s.CompleteDelivery(ctx, b[0]); err != nil {
+		t.Errorf("B complete: %v", err)
+	}
+	if err := s.CompleteDelivery(ctx, b[0]); !errors.Is(err, store.ErrLeaseLost) {
+		t.Errorf("double complete: %v", err)
+	}
+}
+
+func TestClaimZeroLeaseUsesDefault(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.SaveDelivery(ctx, rec("d1", "k1", "demo/api", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if ds, _ := s.ClaimDeliveries(ctx, 1, 0); len(ds) != 1 {
+		t.Fatalf("claim = %d", len(ds))
+	}
+	if ds, _ := s.ClaimDeliveries(ctx, 1, 0); len(ds) != 0 {
+		t.Error("zero lease allowed immediate re-claim")
+	}
+}
+
+// expireLeases 让所有租约立即过期，模拟 worker 卡住超过租约时长。
+func expireLeases(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE webhook_deliveries SET locked_until = now() - interval '1 second' WHERE locked_until IS NOT NULL"); err != nil {
+		t.Fatal(err)
 	}
 }

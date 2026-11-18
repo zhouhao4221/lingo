@@ -1,0 +1,2 @@
+# 迁移文件按 LF 签出，保证各平台构建出的二进制内嵌内容一致（Migrate 按内容校验）
+migrations/*.sql text eol=lf

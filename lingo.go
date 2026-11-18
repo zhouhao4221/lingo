@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
@@ -42,10 +41,10 @@ type Lingo struct {
 	store   *store.Store
 	webhook http.Handler
 
-	bot         atomic.Pointer[string] // 机器人账号 login，首次成功获取后缓存
-	botFetching atomic.Bool
 	botMu       sync.Mutex
-	botTried    time.Time
+	bot         string    // 机器人账号 login，首次成功获取后缓存
+	botFetching bool      // 后台获取进行中
+	botTried    time.Time // 最近一次发起获取的时间，失败后每分钟最多重试一次
 }
 
 // New 校验配置并创建实例；不执行数据库迁移。
@@ -63,6 +62,8 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, errors.New("lingo: at least one Project is required")
 	case cfg.Gitea.AutoRegisterWebhook && cfg.Gitea.WebhookURL == "":
 		return nil, errors.New("lingo: Config.Gitea.WebhookURL is required when AutoRegisterWebhook is set")
+	case cfg.Gitea.AutoRegisterWebhook && cfg.Gitea.WebhookSecret == "":
+		return nil, errors.New("lingo: Config.Gitea.WebhookSecret is required when AutoRegisterWebhook is set")
 	}
 	l := &Lingo{cfg: cfg, log: cfg.Logger}
 	if l.log == nil {
@@ -78,6 +79,7 @@ func New(cfg Config) (*Lingo, error) {
 	if l.webhook, err = l.newWebhookHandler(); err != nil {
 		return nil, err
 	}
+	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
 	return l, nil
 }
 
@@ -106,38 +108,31 @@ func (l *Lingo) newWebhookHandler() (http.Handler, error) {
 	return h, nil
 }
 
-// botLogin 返回机器人账号 login。尚未获取时在后台获取（每分钟最多尝试一次）并立即返回空串，
-// 不阻塞 Webhook 请求；Handler 与 Run 分进程部署时同样可用。
+// botLogin 返回机器人账号 login。尚未获取时在后台发起获取（同一时间只有一个，失败后每分钟最多重试一次）
+// 并立即返回空串，不阻塞 Webhook 请求；Handler 与 Run 分进程部署时同样可用。
+// 接收时未识别的机器人事件，由 worker 按当时的账号重新解析判定。
 func (l *Lingo) botLogin() string {
-	if p := l.bot.Load(); p != nil {
-		return *p
-	}
 	l.botMu.Lock()
-	due := time.Since(l.botTried) >= time.Minute
-	if due {
-		l.botTried = time.Now()
+	defer l.botMu.Unlock()
+	if l.bot == "" && !l.botFetching && time.Since(l.botTried) >= time.Minute {
+		l.botFetching, l.botTried = true, time.Now()
+		go l.fetchBotLogin()
 	}
-	l.botMu.Unlock()
-	if due && l.botFetching.CompareAndSwap(false, true) {
-		go func() {
-			defer l.botFetching.Store(false)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			l.fetchBotLogin(ctx) //nolint:errcheck // 已记录日志，下次调用会重试
-		}()
-	}
-	return ""
+	return l.bot
 }
 
-func (l *Lingo) fetchBotLogin(ctx context.Context) error {
+func (l *Lingo) fetchBotLogin() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	u, err := l.gitea.GetCurrentUser(ctx)
+	l.botMu.Lock()
+	defer l.botMu.Unlock()
+	l.botFetching = false
 	if err != nil {
-		l.log.Warn("lingo: fetch Gitea bot account failed", "err", err)
-		return err
+		l.log.Warn("lingo: fetch Gitea bot account failed, will retry", "err", err)
+		return
 	}
-	login := u.Login
-	l.bot.Store(&login)
-	return nil
+	l.bot = u.Login
 }
 
 // Handler 返回 REST JSON 接口（提问、工单、评审、知识库、版本），路径为相对路径，
@@ -191,17 +186,7 @@ func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
 
 // Run 运行后台任务（outbox 投递、Gitea 初始化与对账补偿、知识库生成），直到 ctx 取消；多实例运行安全。
 func (l *Lingo) Run(ctx context.Context) error {
-	// 启动时获取机器人账号，失败按退避重试；用于识别机器人自己触发的事件
-	for wait := time.Second; l.bot.Load() == nil; wait = min(wait*2, time.Minute) {
-		if l.fetchBotLogin(ctx) == nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(wait):
-		}
-	}
+	l.botLogin() // 机器人账号获取由 botLogin 统一负责（New 时已发起）
 	<-ctx.Done()
 	return nil
 }
