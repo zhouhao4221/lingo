@@ -7,18 +7,35 @@
 --                ticket_id, created_at, updated_at
 -- messages       会话消息：id, conversation_id, role(user|assistant), content, sources, feedback, created_at
 -- tickets        工单：id, user_id, user_name, user_email（提交人快照）, conversation_id, project_id, repo_id,
---                type(consult|bug|feature), title, body, status, gitea_issue_number, reported_version, fixed_release_id,
---                created_at, updated_at
+--                type(consult|bug|feature), title, body,
+--                status(pending_triage|answered|merged|rejected|submitted|open|in_progress|need_info|fixed|released|
+--                deployed|closed|abnormal), merged_into_ticket_id, context(jsonb：页面 URL、浏览器、版本等),
+--                gitea_issue_number, gitea_updated_at（乱序判断）, reported_version, milestone, due_date,
+--                fixed_pr, fixed_commit, fixed_release_id, deployed_at, created_at, updated_at
+-- attachments    附件：id, user_id, ticket_id(可空), comment_id(可空), filename, content_type, size, sha256, data(bytea),
+--                forwarded, gitea_attachment_uuid, created_at；未关联工单的 24 小时后清理；访问按 user_id / 工单归属校验
+-- （tickets 另含 triage_reminded_at：最近一次待确认提醒时间，按 Config.TriageRemindAfter 重复提醒）
+-- triage_actions 后台确认记录：id, ticket_id, actor_id, action(forward|answer|merge|reject), note, target_ticket_id, created_at
+-- project_settings 运行时设置：project_id, ticket_type, auto_forward, updated_by, updated_at；唯一键 (project_id, ticket_type)
+-- ticket_issues  工单拆到多个仓库时的附加 Issue：id, ticket_id, repo_id, gitea_issue_number, state, fixed_pr, fixed_commit；
+--                唯一键 (repo_id, gitea_issue_number)；全部修复发布 / 上线后工单才算 released / deployed
 -- releases       版本记录（同步自 Gitea Release）：id, repo_id, tag, name, body, prerelease, published_at,
 --                gitea_release_id, synced_at；唯一键 (repo_id, tag)
--- release_tickets 版本关联工单：release_id, ticket_id, ref；由版本说明中的 Issue 引用解析生成
+-- release_tickets 版本关联工单：release_id, ticket_id, ref(commit|引用原文)；以 tag 区间提交匹配 fixed_commit / fixed_pr 为主，
+--                版本说明中的 Issue 引用补漏
+-- deployments    上线记录：id, release_id, env, source(workflow|status|manual), ref, deployed_at；
+--                唯一键 (release_id, env)
 -- data_requests  业务数据请求审计：id, user_id, conversation_id, tool_name, params_digest,
 --                status(ok|denied|failed), latency_ms, idempotency_key, created_at；不保存业务数据原文
 --                唯一键 (user_id, tool_name, idempotency_key)，write 类工具防重复提交
 -- ticket_events  工单事件：id, ticket_id, actor_id, source(api|mcp|go|gitea), kind, payload, created_at
 -- reviews        需求评审：id, ticket_id, reviewer_id, verdict(approve|reject|need_info), comment, created_at
+-- events         对外事件：id(bigserial，即 Event.ID), kind, project_id, ticket_id, user_id, actor_id, status, prev_status,
+--                action, payload, created_at；Notifier 推送与 ListEvents 变更流共用，outbox 引用 event_id
 -- outbox         异步任务：id, kind(gitea|notify), payload, status, attempts, next_attempt_at, created_at
 --                Gitea 写操作与 Notifier 回调均经 outbox 投递
--- webhook_deliveries Webhook 去重：delivery_id, event, received_at
+-- webhook_deliveries Webhook 去重：delivery_id(唯一), event, event_type, dedup_key(唯一，业务键：评论 id+updated_at、
+--                Issue id+action+updated_at、Release id+action；手动重投会换 delivery_id), received_at
+-- sync_cursors   对账游标：repo_id, kind(issues|comments|releases|deployments), since；唯一键 (repo_id, kind)
 -- kb_entries     知识库问答：id, project_id, repo_id(可空), question, answer, source_ticket_id, source_conversation_id,
 --                status(pending|approved), tags, embedding, created_at
