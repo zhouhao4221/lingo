@@ -809,7 +809,7 @@ flowchart LR
 
 ### 5.1 数据模型
 
-> 草案见 `migrations/0001_init.sql`；不含租户字段，用户 ID 均为接入方用户 ID（文本）
+> 表结构见 `migrations/0001_init.sql`（未发布前可修改）；不含租户字段，用户 ID 均为接入方用户 ID（文本）；迁移记录表 `lingo_schema_migrations` 保存每个迁移的 sha256，已执行的迁移被修改时 `Migrate` 报错
 
 | 实体 | 描述 | 关键字段 |
 |-----|-----|---------|
@@ -822,6 +822,7 @@ flowchart LR
 | events | 对外事件（Notifier 推送与变更流共用） | id(递增), kind, project_id, ticket_id, user_id, actor_id, status, prev_status, action, payload, created_at |
 | triage_actions | 后台确认记录 | ticket_id, actor_id, action(forward/answer/merge/reject), note, target_ticket_id, created_at |
 | project_settings | 运行时设置（自动转出覆盖值） | project_id, ticket_type, auto_forward, updated_by, updated_at |
+| ticket_comments | 工单评论：用户补充、后台答复、研发对外回复 | ticket_id, author_id, author_name, source(user/staff/gitea), body, public, gitea_comment_id(唯一) |
 | ticket_issues | 工单拆到多个仓库时的附加 Issue | ticket_id, repo_id, gitea_issue_number, state, fixed_pr, fixed_commit |
 | deployments | 上线记录 | release_id, env, source(workflow/status/manual), ref, deployed_at |
 | sync_cursors | 对账游标 | repo_id, kind(issues/comments/releases), since |
@@ -831,7 +832,8 @@ flowchart LR
 | ticket_events | 工单事件 | ticket_id, source, kind, payload |
 | reviews | 需求评审 | ticket_id, reviewer_id(接入方用户 ID), verdict(approve/reject/need_info), comment |
 | outbox | 异步任务 outbox（原 notifications）：Gitea 写操作、Notifier 投递 | 字段待确认（至少含 payload, status, attempts） |
-| webhook_deliveries | Webhook 投递（去重 + 待 worker 处理） | delivery_id(唯一), event, event_type, kind, dedup_key(唯一，业务键), repo, issue_number, from_bot, payload, received_at, processed_at, attempts, last_error |
+| webhook_deliveries | Webhook 投递（去重 + 待 worker 处理） | delivery_id(唯一), event, event_type, kind, dedup_key(唯一，业务键), repo, issue_number, from_bot, payload(bytea), parse_error, received_at, processed_at, attempts, next_attempt_at, locked_until, last_error |
+| webhook_pings | Webhook 连通记录（push / 测试投递） | repo(唯一), last_ping_at |
 | kb_entries | 知识库问答 | project_id, repo_id(可空), question, answer, source_ticket_id, tags, embedding |
 
 ### 5.2 数据采集

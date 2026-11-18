@@ -80,4 +80,5 @@ docs/                需求（requirements/）、架构（architecture/）、Pro
 ## 测试规范
 
 - 单元测试：与源文件同目录 `*_test.go`，运行 `go test ./...`
-- 集成测试：`tests/`（依赖 PostgreSQL / Gitea mock）
+- 集成测试：`tests/`，独立 Go module（PostgreSQL 驱动 pgx 只作为这里的测试依赖，不进入主 module）；需设置 `LINGO_TEST_DATABASE_URL`，每个测试在临时 schema 中运行，未设置时跳过
+  - 运行：`cd tests && LINGO_TEST_DATABASE_URL=postgres://user:pass@127.0.0.1:5432/db?sslmode=disable go test ./...`
