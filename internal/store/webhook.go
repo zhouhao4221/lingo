@@ -155,11 +155,19 @@ func (s *Store) ReleaseDelivery(ctx context.Context, d Delivery, reason string, 
 		reason, retryAt)
 }
 
-// HasPendingMerges 报告是否有在 before 之前收到、尚未处理完的 PR 合并投递。
-func (s *Store) HasPendingMerges(ctx context.Context, before time.Time) (bool, error) {
+// HasPendingMerges 报告与仓库 repo（"owner/name"）同项目的仓库中，是否有在 before 之前收到、尚未处理且未失败过的
+// PR 合并投递。只看未失败过的：反复失败的合并投递不应无限期拖住其他工单的关闭判定。repo 不属于任何项目时只看它自己。
+func (s *Store) HasPendingMerges(ctx context.Context, repo string, before time.Time) (bool, error) {
 	var ok bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM webhook_deliveries
-		WHERE processed_at IS NULL AND kind = $1 AND received_at <= $2)`, string(webhook.PullMerged), before).Scan(&ok)
+	// kind 用字面量而非参数，使泛化执行计划也能命中部分索引 webhook_deliveries_merge_pending_idx
+	err := s.db.QueryRowContext(ctx, `
+		WITH project_repos AS (
+		    SELECT lower(r.owner || '/' || r.name) AS name FROM repos r
+		    WHERE r.project_id = (SELECT project_id FROM repos WHERE lower(owner || '/' || name) = lower($1))
+		    UNION SELECT lower($1))
+		SELECT EXISTS (SELECT 1 FROM webhook_deliveries
+		    WHERE processed_at IS NULL AND kind = 'pull.merged' AND failures = 0 AND received_at <= $2
+		      AND repo IN (SELECT name FROM project_repos))`, repo, before).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("store: pending merges: %w", err)
 	}

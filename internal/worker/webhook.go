@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,12 +191,21 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 func (w *Worker) applyPull(ctx context.Context, ev *webhook.Event) error {
 	u := ticket.PullUpdate{Change: ticket.PullChange(ev.Kind), Repo: ev.Repo, Number: ev.IssueNumber, Sender: ev.Sender,
 		DeliveryID: ev.DeliveryID, MergeCommit: ev.PullRequest.MergeCommitSHA}
+	// "#5" 与 "owner/repo#5" 可能指同一 Issue（仓库名不区分大小写）：补全仓库后合并，任一带关闭关键词即算关闭
+	seen := map[string]int{}
 	for _, r := range ev.Refs {
 		repo := ev.Repo
 		if r.Owner != "" {
 			repo = r.Owner + "/" + r.Repo
 		}
-		u.Refs = append(u.Refs, ticket.IssueRef{Repo: repo, Number: r.Index, Closes: r.Action == gitea.RefCloses})
+		k := strings.ToLower(repo) + "#" + strconv.FormatInt(r.Index, 10)
+		closes := r.Action == gitea.RefCloses
+		if i, ok := seen[k]; ok {
+			u.Refs[i].Closes = u.Refs[i].Closes || closes
+			continue
+		}
+		seen[k] = len(u.Refs)
+		u.Refs = append(u.Refs, ticket.IssueRef{Repo: repo, Number: r.Index, Closes: closes})
 	}
 	if len(u.Refs) == 0 {
 		return nil

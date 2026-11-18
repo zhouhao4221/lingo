@@ -203,7 +203,13 @@ func TestApplyIssueClosedWaitsForQueuedMerge(t *testing.T) {
 	pending := true
 	var asked time.Time
 	s, _ := NewSync(SyncOptions{Store: m, Now: func() time.Time { return t0.Add(time.Hour) },
-		PendingMerges: func(_ context.Context, before time.Time) (bool, error) { asked = before; return pending, nil }})
+		PendingMerges: func(_ context.Context, repo string, before time.Time) (bool, error) {
+			if repo != "Demo/API" {
+				t.Errorf("repo = %s", repo)
+			}
+			asked = before
+			return pending, nil
+		}})
 	u := issue(IssueClosed, IssueState{State: "closed"})
 	var de *DeferError
 	if err := s.ApplyIssue(context.Background(), u); !errors.As(err, &de) || !asked.Equal(t0.Add(30*time.Second)) {
@@ -224,6 +230,24 @@ func TestApplyIssueDeletedIgnoresStaleness(t *testing.T) {
 	}
 	if m.tickets[1].Status != StatusAbnormal {
 		t.Errorf("status = %s", m.tickets[1].Status)
+	}
+}
+
+func TestApplyIssueRecoversFromAbnormal(t *testing.T) {
+	for _, c := range []struct {
+		state string
+		fixed int64
+		want  Status
+	}{{"open", 0, StatusInProgress}, {"closed", 0, StatusClosed}, {"closed", 3, StatusFixed}} {
+		tk := base(StatusAbnormal)
+		tk.FixedPR = c.fixed
+		m := newMem(tk)
+		if err := newSync(t, m, t0.Add(time.Hour)).ApplyIssue(context.Background(), issue(IssueLabeled, IssueState{State: c.state})); err != nil {
+			t.Fatal(err)
+		}
+		if m.tickets[1].Status != c.want {
+			t.Errorf("%s fixed=%d: %s, want %s", c.state, c.fixed, m.tickets[1].Status, c.want)
+		}
 	}
 }
 

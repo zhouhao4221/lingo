@@ -122,8 +122,8 @@ func (x *ticketTx) AddHistory(ctx context.Context, h ticket.History) error {
 }
 
 func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*ticket.Comment, error) {
-	at := c.At
-	if at.IsZero() {
+	at, known := c.At, !c.At.IsZero()
+	if !known {
 		at = time.Now()
 	}
 	// 先读旧值再写；调用方已在事务内锁定工单，同一评论不会被并发写入
@@ -144,7 +144,7 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 	case err != nil:
 		return nil, fmt.Errorf("store: read comment %d: %w", c.GiteaID, err)
 	}
-	if deleted.Valid || at.Before(prev.At) {
+	if deleted.Valid || (known && at.Before(prev.At)) {
 		// 已删除，或旧于已保存版本的乱序编辑：不写入，并按“可见性未变”返回，调用方不会因此发通知
 		p := prev
 		p.Public = p.Public || c.Public

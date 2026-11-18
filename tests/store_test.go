@@ -208,8 +208,12 @@ func TestReleaseDoesNotCountFailure(t *testing.T) {
 	if _, err := s.SaveDelivery(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.HasPendingMerges(ctx, time.Now().Add(time.Minute)); err != nil || !ok {
+	if ok, err := s.HasPendingMerges(ctx, "Demo/API", time.Now().Add(time.Minute)); err != nil || !ok {
 		t.Fatalf("pending merges = %v %v", ok, err)
+	}
+	// 其他项目的仓库不受影响
+	if ok, err := s.HasPendingMerges(ctx, "other/web", time.Now().Add(time.Minute)); err != nil || ok {
+		t.Fatalf("other repo pending merges = %v %v", ok, err)
 	}
 	a, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
 	if err := s.ReleaseDelivery(ctx, a[0], "deferred", time.Now().Add(-time.Second)); err != nil {
@@ -222,15 +226,35 @@ func TestReleaseDoesNotCountFailure(t *testing.T) {
 	if err := s.RetryDelivery(ctx, b[0], "boom", time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	// 失败过的合并投递不再拖住关闭判定
+	if ok, _ := s.HasPendingMerges(ctx, "demo/api", time.Now().Add(time.Minute)); ok {
+		t.Error("failed merge still counted as pending")
+	}
 	c, _ := s.ClaimDeliveries(ctx, 1, time.Minute)
 	if len(c) != 1 || c[0].Attempts != 3 || c[0].Failures != 1 {
 		t.Fatalf("after retry = %+v", c)
 	}
-	if err := s.CompleteDelivery(ctx, c[0]); err != nil {
+}
+
+func TestPendingMergesScopedToProject(t *testing.T) {
+	db := testDB(t, true)
+	seedTicket(t, db, "open") // 项目 demo 含 demo/api
+	if _, err := db.Exec(`INSERT INTO repos (project_id, owner, name) SELECT id, 'demo', 'web' FROM projects WHERE key = 'demo'`); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := s.HasPendingMerges(ctx, time.Now().Add(time.Minute)); ok {
-		t.Error("completed merge still pending")
+	s, _ := store.New(db)
+	ctx := context.Background()
+	r := rec("d1", "k1", "demo/web", 3)
+	r.Kind = webhook.PullMerged
+	if _, err := s.SaveDelivery(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	// 同项目另一仓库的 PR 可能修复本仓库的 Issue
+	if ok, err := s.HasPendingMerges(ctx, "Demo/Api", time.Now().Add(time.Minute)); err != nil || !ok {
+		t.Errorf("same project = %v %v", ok, err)
+	}
+	if ok, _ := s.HasPendingMerges(ctx, "demo/api", time.Now().Add(-time.Hour)); ok {
+		t.Error("merge received after the deadline counted")
 	}
 }
 

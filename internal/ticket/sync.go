@@ -116,9 +116,9 @@ type SyncOptions struct {
 	// 常先于 pull_request merged 到达，等待期内推迟处理，避免先把工单误判为“关闭未修复”并通知提交人。
 	// 0 表示默认 30 秒，负数不等待。
 	CloseGrace time.Duration
-	// PendingMerges 报告是否还有在 before 之前收到、尚未处理的 PR 合并事件；可空。worker 积压时等待期已过，
-	// 但合并事件可能仍在队列中，此时继续推迟关闭的判定。
-	PendingMerges func(ctx context.Context, before time.Time) (bool, error)
+	// PendingMerges 报告与仓库 repo 同项目的仓库中，是否还有在 before 之前收到、尚未处理（且未失败过）的 PR 合并事件；
+	// 可空。worker 积压时等待期已过，但合并事件可能仍在队列中，此时继续推迟关闭的判定。在事务外调用。
+	PendingMerges func(ctx context.Context, repo string, before time.Time) (bool, error)
 	Now           func() time.Time // 测试用，默认 time.Now
 }
 
@@ -148,23 +148,31 @@ func (s *Sync) Tracks(ctx context.Context, repo string, number int64) (bool, err
 
 // ApplyIssue 处理 Issue 变化；Issue 不属于任何工单时什么也不做。
 func (s *Sync) ApplyIssue(ctx context.Context, u IssueUpdate) error {
+	// 队列检查放在事务外：事务持有连接与行锁时再从连接池取连接，连接池耗尽时会互相等待
+	mergePending := false
+	if u.Change == IssueClosed && s.o.PendingMerges != nil && s.o.CloseGrace >= 0 {
+		var err error
+		if mergePending, err = s.o.PendingMerges(ctx, u.Repo, u.ReceivedAt.Add(s.o.CloseGrace)); err != nil {
+			return err
+		}
+	}
 	return s.o.Store.InTx(ctx, func(tx Tx) error {
 		t, err := tx.LockByIssue(ctx, u.Repo, u.Number)
 		if errors.Is(err, ErrNotFound) {
 			if u.Change == IssueOpened && u.MarkerTicketID > 0 {
-				return s.linkByMarker(ctx, tx, u)
+				return s.linkByMarker(ctx, tx, u, mergePending)
 			}
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		return s.applyIssue(ctx, tx, t, u)
+		return s.applyIssue(ctx, tx, t, u, mergePending)
 	})
 }
 
 // linkByMarker 在建单结果未能保存（如进程在 Gitea 返回后崩溃）时，按 Issue 中的工单标记补记关联。
-func (s *Sync) linkByMarker(ctx context.Context, tx Tx, u IssueUpdate) error {
+func (s *Sync) linkByMarker(ctx context.Context, tx Tx, u IssueUpdate, mergePending bool) error {
 	t, err := tx.LockByID(ctx, u.MarkerTicketID)
 	if errors.Is(err, ErrNotFound) {
 		return nil
@@ -176,17 +184,17 @@ func (s *Sync) linkByMarker(ctx context.Context, tx Tx, u IssueUpdate) error {
 		return nil // 标记与库中记录不符：不采信
 	}
 	t.IssueNumber = u.Number
-	return s.applyIssue(ctx, tx, t, u)
+	return s.applyIssue(ctx, tx, t, u, mergePending)
 }
 
-func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate) error {
+func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate, mergePending bool) error {
 	cur := u.Current
 	// 删除是终态，不受乱序判断影响（Issue 已无法读取，快照只能来自旧载荷）
 	stale := u.Change != IssueDeleted && !cur.UpdatedAt.IsZero() && !t.GiteaUpdatedAt.IsZero() && cur.UpdatedAt.Before(t.GiteaUpdatedAt)
 	prev, prevMilestone := t.Status, t.Milestone
 	if !stale {
 		if u.Change == IssueClosed && cur.State != "open" && t.FixedPR == 0 && t.Status.active() {
-			if err := s.awaitFix(ctx, u); err != nil {
+			if err := s.awaitFix(u, mergePending); err != nil {
 				return err
 			}
 		}
@@ -225,7 +233,7 @@ func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate) 
 }
 
 // awaitFix 在 Issue 关闭而工单尚无修复 PR 时决定是否推迟判定，等待可能随后到达或仍在队列中的 PR 合并事件。
-func (s *Sync) awaitFix(ctx context.Context, u IssueUpdate) error {
+func (s *Sync) awaitFix(u IssueUpdate, mergePending bool) error {
 	if s.o.CloseGrace < 0 {
 		return nil
 	}
@@ -233,14 +241,7 @@ func (s *Sync) awaitFix(ctx context.Context, u IssueUpdate) error {
 	if now := s.o.Now(); now.Before(deadline) {
 		return &DeferError{Until: deadline, Reason: "issue closed without merged fix, waiting for pull request event"}
 	}
-	if s.o.PendingMerges == nil {
-		return nil
-	}
-	pending, err := s.o.PendingMerges(ctx, deadline)
-	if err != nil {
-		return err
-	}
-	if pending {
+	if mergePending {
 		return &DeferError{Until: s.o.Now().Add(5 * time.Second), Reason: "pull request merge events still queued"}
 	}
 	return nil
@@ -275,6 +276,7 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 		}
 	case IssueDeleted:
 		t.Status = StatusAbnormal
+		return
 	case IssueAssigned:
 		if t.Status == StatusOpen && len(cur.Assignees) > 0 {
 			t.Status = StatusInProgress
@@ -292,7 +294,18 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 	case IssueMilestoned, IssueDemilestoned:
 		t.Milestone, t.DueDate = cur.Milestone, cur.DueDate
 	}
-	if u.Change != IssueMilestoned && u.Change != IssueDemilestoned && u.Change != IssueDeleted && !cur.UpdatedAt.IsZero() {
+	if t.Status == StatusAbnormal && cur.State != "" {
+		// 此前读取 Issue 返回 404（如令牌权限被临时收回），现在又能读到：按当前状态恢复
+		switch {
+		case cur.State == "open":
+			t.Status = StatusInProgress
+		case t.FixedPR != 0:
+			t.Status = StatusFixed
+		default:
+			t.Status = StatusClosed
+		}
+	}
+	if u.Change != IssueMilestoned && u.Change != IssueDemilestoned && !cur.UpdatedAt.IsZero() {
 		// 其他事件携带的快照同样反映当前排期，顺带校正
 		t.Milestone, t.DueDate = cur.Milestone, cur.DueDate
 	}
@@ -363,7 +376,7 @@ func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r 
 			t.Status = StatusInProgress
 		}
 	case PullMerged:
-		if r.Closes && (t.Status.active() || t.Status == StatusClosed || t.Status == StatusFixed) {
+		if r.Closes && (t.Status.active() || t.Status == StatusSubmitted || t.Status == StatusClosed || t.Status == StatusFixed) {
 			t.Status, t.FixedPR, t.FixedCommit = StatusFixed, u.Number, u.MergeCommit
 		}
 	}

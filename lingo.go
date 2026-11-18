@@ -110,7 +110,7 @@ func (l *Lingo) labelPrefix() string {
 
 func (l *Lingo) newWorker() (*worker.Worker, error) {
 	base := l.cfg.Gitea.BaseURL
-	sync, err := ticket.NewSync(ticket.SyncOptions{
+	tickets, err := ticket.NewSync(ticket.SyncOptions{
 		Store:         l.store,
 		NeedInfoLabel: l.labelPrefix() + "/review/need-info",
 		PendingMerges: l.store.HasPendingMerges,
@@ -122,7 +122,7 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 	o := worker.Options{
 		Deliveries: l.store,
 		Gitea:      l.gitea,
-		Tickets:    sync,
+		Tickets:    tickets,
 		BotLogin:   l.botLogin,
 		ReplyMode:  l.replyMode(),
 		Logger:     l.log,
