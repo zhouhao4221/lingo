@@ -1,50 +1,66 @@
-# 灵问 Lingo
+# Lingo
 
-灵问是可嵌入业务项目的知识问答 Agent Go 库：用户随时提问，灵问基于知识库能答即答；
-答不了的整理成结构化 Issue，交给 AI 研发团队在 Gitea 中处理，进展回传给接入方；每一次问答都回流知识库。
+English | [简体中文](README.zh-CN.md)
 
-lingo 只提供公开 API，不含租户与前端，登录、用户管理、界面、部署由接入方自己处理。
+Lingo is an embeddable Go library for a knowledge Q&A agent. Users ask questions at any time and Lingo answers from the knowledge base whenever it can. Questions it cannot answer become structured Gitea issues for an AI development team; progress is reported back to the host application, and every resolved Q&A flows back into the knowledge base.
 
-## 安装
+Lingo provides public APIs only. It has no multi-tenancy and no frontend: login, user management, UI and deployment are left to the host application.
+
+> **Status:** early stage. The public API is being designed and most methods are not implemented yet.
+
+## Features
+
+- **Knowledge Q&A agent** — retrieval-augmented answers with sources; asks follow-up questions and escalates to a ticket when it cannot answer
+- **Feedback tickets** — consult / bug / feature, with text, screenshots and attachments; APIs designed for a popup widget built by the host
+- **Triage** — staff confirm before forwarding to Gitea, or answer, merge or reject; auto/manual switch per project and ticket type
+- **Gitea integration** — issues created from the repository's issue form templates, two-way comments, PR-merge detection, release linking and deployment signals; signed, de-duplicated webhooks with periodic reconciliation
+- **Progress notifications** — events delivered to your `Notifier` (at-least-once, with event IDs), plus query methods and an event feed
+- **Data isolation** — tickets, conversations and attachments are scoped by the submitter's ID, role and project; personal data never goes to Gitea
+- **MCP server** — the same capabilities exposed as MCP tools for AI clients and AI developer agents
+- **Business data tools** — register Go functions that fetch data on behalf of the user, under that user's own permissions
+
+## Install
 
 ```sh
 go get github.com/zhouhao4221/lingo
 ```
 
-## 接入
+## Usage
 
 ```go
-if err := lingo.Migrate(ctx, db); err != nil { ... } // 发布流程中执行一次
+if err := lingo.Migrate(ctx, db); err != nil { ... } // run once in your release process
 
 l, err := lingo.New(lingo.Config{
-	DB:           db,       // *sql.DB（PostgreSQL，驱动自选）
-	Model:        model,    // 实现 lingo.Model：Chat + Embed
+	DB:           db,       // *sql.DB (PostgreSQL, bring your own driver)
+	Model:        model,    // implements lingo.Model: Chat + Embed
 	Gitea:        lingo.GiteaConfig{BaseURL: url, Token: token, WebhookSecret: secret},
-	Projects:     projects, // 项目与所含 Gitea 仓库
-	Authenticate: authn,    // 从请求解析 lingo.User
-	Notifier:     notifier, // 可选：接收工单进展
-	Tools:        tools,    // 可选：代用户取业务数据
+	Projects:     projects, // projects and their Gitea repositories
+	Authenticate: authn,    // resolves lingo.User from a request
+	Notifier:     notifier, // optional: receives ticket progress events
+	Tools:        tools,    // optional: fetch business data on behalf of users
 })
 
 mux.Handle("/lingo/", http.StripPrefix("/lingo", l.Handler())) // REST JSON
 mux.Handle("/mcp", l.MCPHandler())                             // MCP
-mux.Handle("/webhooks/gitea", l.WebhookHandler())              // Gitea Webhook
-go l.Run(ctx)                                                  // 后台任务
+mux.Handle("/webhooks/gitea", l.WebhookHandler())              // Gitea webhook
+go l.Run(ctx)                                                  // background workers
 ```
 
-完整示例见 [examples/server](examples/server/main.go)。
+See [examples/server](examples/server/main.go) for a complete example.
 
-## 目录
+Requirements: Go 1.24+, PostgreSQL, Gitea 1.22+ (1.25+ to use Gitea Actions as a deployment signal).
+
+## Layout
 
 ```
-*.go                 公开 API（根包 lingo）
-internal/            实现（见 docs/architecture/overview.md）
-migrations/          数据库迁移（go:embed 打包）
-examples/            接入示例
-docs/                需求与架构文档
-tests/               集成测试
+*.go                 public API (root package lingo)
+internal/            implementation (see docs/architecture/overview.md)
+migrations/          database migrations (embedded with go:embed)
+examples/            integration examples
+docs/                requirements and architecture docs (Chinese)
+tests/               integration tests
 ```
 
-## 许可证
+## License
 
 [Apache License 2.0](LICENSE)
