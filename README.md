@@ -44,3 +44,7 @@ examples/            接入示例
 docs/                需求与架构文档
 tests/               集成测试
 ```
+
+## 许可证
+
+[Apache License 2.0](LICENSE)
