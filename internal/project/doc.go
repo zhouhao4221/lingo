@@ -1,2 +1,3 @@
-// Package project 项目与仓库：同步 Config.Projects 入库，多个 Gitea 仓库（前端、后端等）归属一个项目，判定 Issue 落库仓库。
+// Package project 项目与仓库：Spec 是代码中声明的项目（lingo.Config.Projects），由 store.SyncProjects 同步入库；
+// 校验见 Validate。工单选择仓库的规则（指定仓库 → 项目默认仓库）在 internal/ticket 中实现。
 package project

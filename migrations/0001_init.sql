@@ -99,6 +99,7 @@ CREATE TABLE tickets (
                               'fixed', 'released', 'deployed', 'closed', 'abnormal')),
     merged_into_ticket_id bigint      REFERENCES tickets (id) ON DELETE SET NULL,
     context               jsonb       NOT NULL DEFAULT '{}', -- 页面 URL、浏览器、版本等
+    fields                jsonb       NOT NULL DEFAULT '{}', -- Issue 表单模板字段取值（字段 ID → 值列表）
     gitea_issue_number    bigint,
     gitea_updated_at      timestamptz, -- Webhook 乱序判断
     reported_version      text        NOT NULL DEFAULT '',
@@ -269,6 +270,7 @@ CREATE TABLE outbox (
     kind            text        NOT NULL CHECK (kind IN ('gitea', 'notify')),
     key             text        UNIQUE, -- 幂等键，如 'create_issue:ticket:42'，同一键只入队一次
     event_id        bigint      REFERENCES events (id) ON DELETE CASCADE,
+    ticket_id       bigint      REFERENCES tickets (id) ON DELETE CASCADE, -- gitea 任务所属工单，同一工单按序执行
     payload         jsonb       NOT NULL DEFAULT '{}',
     status          text        NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'failed')),
     attempts        integer     NOT NULL DEFAULT 0, -- 领取次数，兼作租约令牌
@@ -282,6 +284,7 @@ CREATE TABLE outbox (
 CREATE INDEX outbox_due_idx ON outbox (next_attempt_at) WHERE status = 'pending';
 -- 通知按工单顺序领取时检查同一工单是否有更早的未完成通知
 CREATE INDEX outbox_notify_pending_idx ON outbox (event_id) WHERE kind = 'notify' AND status = 'pending';
+CREATE INDEX outbox_gitea_pending_idx ON outbox (ticket_id, id) WHERE kind = 'gitea' AND status = 'pending';
 
 -- Webhook 投递：验签后落库，worker 处理；去重见 internal/webhook
 CREATE TABLE webhook_deliveries (

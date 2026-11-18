@@ -42,18 +42,50 @@ func (s Status) fixed() bool {
 	return false
 }
 
-// Ticket 是工单在领域层的视图，只含 Gitea 回流处理需要的字段。
+// 工单类型，取值与 lingo.TicketType 一致。
+const (
+	TypeConsult = "consult"
+	TypeBug     = "bug"
+	TypeFeature = "feature"
+)
+
+// ValidType 报告 t 是否为合法工单类型。
+func ValidType(t string) bool { return t == TypeConsult || t == TypeBug || t == TypeFeature }
+
+// forwarded 表示工单已确认转出（研发 Agent 可见）。
+func (s Status) forwarded() bool {
+	switch s {
+	case StatusPendingTriage, StatusAnswered, StatusMerged, StatusRejected:
+		return false
+	}
+	return true
+}
+
+// Ticket 是工单在领域层的视图。
 type Ticket struct {
-	ID          int64
-	ProjectID   int64
-	ProjectKey  string
-	RepoID      int64  // 转出前为 0
-	Repo        string // "owner/name"，转出前为空
-	Type        string // consult | bug | feature
-	Title       string
-	Status      Status
-	UserID      string // 提交人（接入方用户 ID）
-	IssueNumber int64  // 主 Issue 编号，Issue 创建前为 0
+	ID           int64
+	ProjectID    int64
+	ProjectKey   string
+	RepoID       int64  // 未选定仓库时为 0
+	Repo         string // "owner/name"，未选定仓库时为空
+	Type         string // consult | bug | feature
+	Title        string
+	Body         string
+	Fields       map[string][]string // Issue 表单模板字段取值（按字段 ID）
+	Context      map[string]string   // 页面 URL、浏览器等提交环境
+	Version      string              // 提交人使用的版本
+	Status       Status
+	UserID       string // 提交人（接入方用户 ID）
+	UserName     string // 提交人姓名快照，仅展示
+	UserEmail    string
+	Conversation int64 // 从问答转出时的会话 ID
+	IssueNumber  int64 // 主 Issue 编号，Issue 创建前为 0
+	MergedInto   int64
+	TriageSince  *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	FixedTag     string     // 修复版本（只读）
+	DeployedAt   *time.Time // 上线时间（只读）
 
 	GiteaUpdatedAt time.Time // 最近一次采纳的 Issue updated_at，用于丢弃乱序到达的旧事件
 	FixedPR        int64
@@ -62,8 +94,16 @@ type Ticket struct {
 	DueDate        *time.Time
 }
 
-// ErrNotFound 表示工单不存在。
-var ErrNotFound = errors.New("ticket: not found")
+var (
+	// ErrNotFound 表示工单（或项目、仓库）不存在，或调用者无权访问。
+	ErrNotFound = errors.New("ticket: not found")
+	// ErrInvalid 表示参数不合法。
+	ErrInvalid = errors.New("ticket: invalid input")
+	// ErrForbidden 表示调用者的角色不能执行该操作。
+	ErrForbidden = errors.New("ticket: forbidden")
+	// ErrConflict 表示工单当前状态不允许该操作（如对已处理的工单再次转出）。
+	ErrConflict = errors.New("ticket: conflict")
+)
 
 // DeferError 表示事件暂不能处理，应在 Until 之后重试（不算失败）。
 type DeferError struct {

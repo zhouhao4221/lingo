@@ -1,0 +1,337 @@
+package worker
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/zhouhao4221/lingo/internal/gitea"
+	"github.com/zhouhao4221/lingo/internal/store"
+	"github.com/zhouhao4221/lingo/internal/ticket"
+)
+
+// TaskStore 是 Gitea 写操作任务队列，由 store.Store 实现。
+type TaskStore interface {
+	ClaimTasks(ctx context.Context, limit int, lease time.Duration) ([]store.Task, error)
+	CompleteTask(ctx context.Context, t store.Task) error
+	RetryTask(ctx context.Context, t store.Task, reason string, retryAt time.Time) error
+	ReleaseTask(ctx context.Context, t store.Task, reason string, retryAt time.Time) error
+	FailTask(ctx context.Context, t store.Task, reason string) error
+}
+
+// IssueWriter 是建 Issue 用到的 Gitea 接口，由 gitea.Client 实现。
+type IssueWriter interface {
+	ListIssues(ctx context.Context, owner, repo string, o gitea.ListIssuesOptions) ([]*gitea.Issue, *gitea.Response, error)
+	CreateIssue(ctx context.Context, owner, repo string, opt gitea.CreateIssueOption) (*gitea.Issue, error)
+	ListLabels(ctx context.Context, owner, repo string, o gitea.ListOptions) ([]*gitea.Label, *gitea.Response, error)
+	CreateLabel(ctx context.Context, owner, repo string, opt gitea.CreateLabelOption) (*gitea.Label, error)
+	ListIssueTemplates(ctx context.Context, owner, repo string) ([]*gitea.IssueTemplate, error)
+}
+
+// Drafts 读取待建 Issue 的工单并记录建单结果，由 ticket.Service 实现。
+type Drafts interface {
+	Draft(ctx context.Context, id int64) (*ticket.Ticket, error)
+	IssueCreated(ctx context.Context, id, number int64, via string) (bool, error)
+}
+
+// RepoConfig 是仓库在 lingo.Repo 中的建单配置。
+type RepoConfig struct {
+	Assignees []string
+	Templates map[string]string // 工单类型 → 模板文件名
+}
+
+// ProcessTasks 领取并执行一批 Gitea 写操作任务，返回领取到的条数；未配置时返回 0。
+func (w *Worker) ProcessTasks(ctx context.Context) (int, error) {
+	if w.o.Tasks == nil {
+		return 0, nil
+	}
+	claimed := time.Now()
+	ts, err := w.o.Tasks.ClaimTasks(ctx, w.o.BatchSize, w.o.Lease)
+	if err != nil {
+		return 0, err
+	}
+	budget := w.batchBudget(claimed)
+	for i, t := range ts {
+		switch {
+		case ctx.Err() != nil:
+			w.releaseTask(ctx, t, "worker shutting down")
+		case i > 0 && time.Now().After(budget):
+			w.releaseTask(ctx, t, "lease budget exhausted")
+		default:
+			w.handleTask(ctx, t)
+		}
+	}
+	return len(ts), nil
+}
+
+func (w *Worker) releaseTask(ctx context.Context, t store.Task, reason string) {
+	fctx, cancel := finishContext(ctx)
+	defer cancel()
+	w.finishTask(t, w.o.Tasks.ReleaseTask(fctx, t, reason, w.o.Now()))
+}
+
+func (w *Worker) handleTask(ctx context.Context, t store.Task) {
+	tctx, cancel := w.taskContext(ctx)
+	err := w.runTask(tctx, t)
+	cancel()
+	fctx, fcancel := finishContext(ctx)
+	defer fcancel()
+	log := w.log.With("task", t.OutboxID, "op", t.Op, "ticket", t.TicketID, "attempt", t.Attempts, "failures", t.Failures)
+	var de *ticket.DeferError
+	var pe *permanentError
+	switch {
+	case err == nil:
+		w.finishTask(t, w.o.Tasks.CompleteTask(fctx, t))
+	case errors.As(err, &de):
+		log.Debug("task deferred", "until", de.Until, "reason", de.Reason)
+		w.finishTask(t, w.o.Tasks.ReleaseTask(fctx, t, de.Reason, de.Until))
+	case errors.As(err, &pe) || t.Failures+1 >= w.o.MaxAttempts:
+		log.Error("task abandoned", "err", err)
+		w.finishTask(t, w.o.Tasks.FailTask(fctx, t, err.Error()))
+	default:
+		retryAt := w.o.Now().Add(backoff(t.Failures + 1))
+		log.Warn("task failed, will retry", "err", err, "retry_at", retryAt)
+		w.finishTask(t, w.o.Tasks.RetryTask(fctx, t, err.Error(), retryAt))
+	}
+}
+
+func (w *Worker) finishTask(t store.Task, err error) {
+	switch {
+	case errors.Is(err, store.ErrLeaseLost):
+		w.log.Warn("task lease lost", "task", t.OutboxID, "attempt", t.Attempts)
+	case err != nil:
+		w.log.Error("task update failed", "task", t.OutboxID, "err", err)
+	}
+}
+
+func (w *Worker) runTask(ctx context.Context, t store.Task) error {
+	switch t.Op {
+	case ticket.OpCreateIssue:
+		var p struct {
+			ForwardedBy string `json:"forwarded_by"`
+			Note        string `json:"note"`
+		}
+		if err := json.Unmarshal(t.Payload, &p); err != nil {
+			return permanent(fmt.Errorf("task payload: %w", err))
+		}
+		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note)
+	}
+	return permanent(fmt.Errorf("unknown task op %q", t.Op))
+}
+
+// giteaErr 把 Gitea 错误分为可重试与不可重试（后者直接放弃，避免无意义的重试）。
+func giteaErr(what string, err error) error {
+	err = fmt.Errorf("%s: %w", what, err)
+	if gitea.IsRetryable(err) {
+		return err
+	}
+	return permanent(err)
+}
+
+func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string) error {
+	t, err := w.o.Drafts.Draft(ctx, id)
+	if errors.Is(err, ticket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if t.Status != ticket.StatusSubmitted || t.IssueNumber != 0 {
+		return nil // 已建单（或被 Webhook 按标记补记），或工单已不再待建
+	}
+	if t.Repo == "" {
+		return permanent(fmt.Errorf("ticket %d has no repo", id))
+	}
+	bot := w.o.BotLogin()
+	if bot == "" {
+		return &ticket.DeferError{Until: w.o.Now().Add(botRetry), Reason: "bot login not yet known"}
+	}
+	owner, name, _ := strings.Cut(t.Repo, "/")
+
+	// 幂等：上次可能已建好 Issue 但没来得及保存（进程崩溃、超时），按隐藏标记查重
+	existing, _, err := w.o.Issues.ListIssues(ctx, owner, name, gitea.ListIssuesOptions{
+		ListOptions: gitea.ListOptions{Limit: 50}, State: gitea.StateAll, Labels: []string{w.o.LabelPrefix},
+		Query: gitea.TicketMarkerQuery(id)})
+	if err != nil {
+		return giteaErr("search existing issue", err)
+	}
+	for _, is := range existing {
+		if is.User != nil && strings.EqualFold(is.User.Login, bot) && gitea.HasTicketMarker(is.Body, id) {
+			_, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup")
+			return err
+		}
+	}
+
+	labels, err := w.labels.ensure(ctx, w.o.Issues, owner, name, []labelSpec{
+		{Name: w.o.LabelPrefix, Color: "#6f42c1", Description: "由灵问创建"},
+		{Name: w.o.LabelPrefix + "/type/" + t.Type, Color: typeColors[t.Type], Exclusive: true},
+	})
+	if err != nil {
+		return err
+	}
+	cfg := w.o.Repos(t.Repo)
+	tmpl, err := w.template(ctx, owner, name, t.Type, cfg)
+	if err != nil {
+		return err
+	}
+	opt := gitea.CreateIssueOption{Title: t.Title, Body: IssueBody(t, tmpl, forwardedBy, note), Labels: labels, Assignees: cfg.Assignees}
+	if tmpl != nil && tmpl.Title != "" && !strings.HasPrefix(t.Title, tmpl.Title) {
+		opt.Title = tmpl.Title + t.Title
+	}
+	is, err := w.o.Issues.CreateIssue(ctx, owner, name, opt)
+	var ae *gitea.APIError
+	if errors.As(err, &ae) && ae.StatusCode == http.StatusUnprocessableEntity && len(opt.Assignees) > 0 {
+		// 指派人不存在或无权限时 Gitea 返回 422：不指派再建一次，不让配置错误挡住建单
+		w.log.Warn("create issue with assignees rejected, retrying without", "repo", t.Repo, "assignees", opt.Assignees, "err", err)
+		opt.Assignees = nil
+		is, err = w.o.Issues.CreateIssue(ctx, owner, name, opt)
+	}
+	if err != nil {
+		return giteaErr("create issue", err)
+	}
+	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create"); err != nil {
+		return err // 重试时会按标记查到这个 Issue，不会重复建
+	}
+	return nil
+}
+
+var typeColors = map[string]string{ticket.TypeConsult: "#1d76db", ticket.TypeBug: "#d73a4a", ticket.TypeFeature: "#0e8a16"}
+
+// template 按 Repo.Templates 的文件名、再按模板标签匹配工单类型的 Issue 模板；没有时返回 nil（用内置结构）。
+func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg RepoConfig) (*gitea.IssueTemplate, error) {
+	ts, err := w.o.Issues.ListIssueTemplates(ctx, owner, name)
+	if err != nil {
+		if gitea.IsRetryable(err) {
+			return nil, fmt.Errorf("list issue templates: %w", err)
+		}
+		w.log.Warn("list issue templates failed, using built-in body", "repo", owner+"/"+name, "err", err)
+		return nil, nil
+	}
+	if file := cfg.Templates[typ]; file != "" {
+		for _, t := range ts {
+			if t.FileName == file || strings.HasSuffix(t.FileName, "/"+file) {
+				return t, nil
+			}
+		}
+		w.log.Warn("configured issue template not found", "repo", owner+"/"+name, "template", file)
+	}
+	want := []string{"type/" + typ, w.o.LabelPrefix + "/type/" + typ, typ}
+	for _, t := range ts {
+		for _, l := range t.Labels {
+			if slices.ContainsFunc(want, func(s string) bool { return strings.EqualFold(s, l) }) {
+				return t, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// IssueBody 生成 Issue 正文：有表单模板且提交了字段时按 Gitea 表单格式渲染，否则用内置结构；
+// 末尾附项目、版本、提交环境、确认人与隐藏标记。不写入提交人姓名、邮箱等身份信息（PRD 3.2.0.6）。
+func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, forwardedBy, note string) string {
+	var b strings.Builder
+	switch {
+	case tmpl != nil && tmpl.IsForm() && len(t.Fields) > 0:
+		b.WriteString(gitea.RenderForm(tmpl, gitea.FormValues(t.Fields)))
+		if t.Body != "" {
+			b.WriteString("### 补充说明\n\n" + t.Body + "\n\n")
+		}
+	default:
+		b.WriteString("### 描述\n\n" + t.Body + "\n\n")
+		ids := make([]string, 0, len(t.Fields))
+		for id := range t.Fields {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			b.WriteString("### " + id + "\n\n" + strings.Join(t.Fields[id], "\n") + "\n\n")
+		}
+	}
+	b.WriteString("---\n\n")
+	b.WriteString("- 项目：" + t.ProjectKey + "\n")
+	if t.Version != "" {
+		b.WriteString("- 版本：" + t.Version + "\n")
+	}
+	keys := make([]string, 0, len(t.Context))
+	for k := range t.Context {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v := strings.TrimSpace(t.Context[k]); v != "" {
+			b.WriteString("- " + k + "：" + v + "\n")
+		}
+	}
+	if forwardedBy != "" {
+		b.WriteString("- 由 " + forwardedBy + " 确认转出\n")
+	}
+	if note = strings.TrimSpace(note); note != "" {
+		b.WriteString("\n> " + strings.ReplaceAll(note, "\n", "\n> ") + "\n")
+	}
+	b.WriteString("\n" + gitea.TicketMarker(t.ID) + "\n")
+	return b.String()
+}
+
+type labelSpec struct {
+	Name, Color, Description string
+	Exclusive                bool
+}
+
+// labelCache 缓存各仓库标签 name → id，缺的标签创建后加入缓存。
+type labelCache struct {
+	mu     sync.Mutex
+	byRepo map[string]map[string]int64
+}
+
+func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name string, want []labelSpec) ([]int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := strings.ToLower(owner + "/" + name)
+	if c.byRepo == nil {
+		c.byRepo = map[string]map[string]int64{}
+	}
+	ids := c.byRepo[key]
+	missing := func() bool {
+		for _, l := range want {
+			if _, ok := ids[strings.ToLower(l.Name)]; !ok {
+				return true
+			}
+		}
+		return false
+	}
+	if ids == nil || missing() {
+		ls, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Label, *gitea.Response, error) {
+			return g.ListLabels(ctx, owner, name, o)
+		})
+		if err != nil {
+			return nil, giteaErr("list labels", err)
+		}
+		ids = map[string]int64{}
+		for _, l := range ls {
+			ids[strings.ToLower(l.Name)] = l.ID
+		}
+		c.byRepo[key] = ids
+	}
+	out := make([]int64, 0, len(want))
+	for _, l := range want {
+		id, ok := ids[strings.ToLower(l.Name)]
+		if !ok {
+			created, err := g.CreateLabel(ctx, owner, name, gitea.CreateLabelOption{Name: l.Name, Color: l.Color,
+				Description: l.Description, Exclusive: l.Exclusive})
+			if err != nil {
+				return nil, giteaErr("create label "+l.Name, err)
+			}
+			id = created.ID
+			ids[strings.ToLower(l.Name)] = id
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
