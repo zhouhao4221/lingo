@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.11 | 2026-11-18 | haiqing | Webhook 回流规则补充：新增事件 `ticket.scheduled`（排期）；Issue 关闭但尚无修复 PR 时等待 30 秒再判定；重开清除修复记录；标签全名带 `LabelPrefix`（如 `lingo/review/need-info`） |
 | v1.9 | 2026-11-18 | haiqing | 细化 Gitea 对接（含启动自检；调研见 [gitea-integration.md](../architecture/gitea-integration.md)）：按仓库 Issue 表单模板提单、评论往来与对外回复规则、工单状态机、PR 合并识别修复、按 tag 区间提交关联版本、上线信号、Webhook 自动注册与对账；Gitea 最低 1.22 |
 
 ---
@@ -665,7 +666,15 @@ flowchart LR
 | `closed` | 关闭未修复（已答复 / 不修复 / 重复） | `issues` closed 且无已合并的修复 PR |
 | `abnormal` | Issue 被删除或仓库不可访问 | `issues` deleted；API 返回 404 |
 
-`issues` reopened 时回到 `in_progress` 并通知提交人；`issue_milestone` milestoned 时记录计划版本与截止日期并通知提交人。
+`issues` reopened 时回到 `in_progress`、清除已记录的修复 PR 与提交并通知提交人；`issue_milestone` milestoned 时记录计划版本与截止日期，经 `ticket.scheduled` 通知提交人。
+
+回流处理细则（`internal/ticket`、`internal/worker`）：
+- 指派、标签、里程碑、关闭 / 重开等状态类事件只是触发器：worker 先 `GET /issues/{index}` 读取当前状态再判定，返回 404 时按 Issue 已删除处理（`abnormal`）；与灵问工单无关的 Issue 直接跳过，不调用 Gitea
+- PR 合并经关闭关键词自动关闭 Issue 时，`issues` closed 常先于 `pull_request` merged 到达：Issue 关闭而工单尚无修复 PR 时，等待 30 秒再判定，避免先把工单误判为 `closed` 并通知提交人
+- 只有带关闭关键词（`Fixes #N` 等）的 PR 合并才记为 `fixed`；仅提及的 PR 打开时工单进入 `in_progress`
+- `need_info` 由带前缀的标签全名判定，如 `lingo/review/need-info`；标签移除后回到 `in_progress`
+- 评论保存到 `ticket_comments`（内部评论 `public=false`），对外评论首次出现时发 `ticket.comment`，编辑不重复通知；机器人自己的评论跳过
+- 投递处理失败按 10 秒起翻倍（最长 1 小时）重试，最多 10 次后放弃，由对账补齐
 
 **业务规则**：
 - 工单类型：`consult`（咨询）/ `bug` / `feature`（需求），对应 Gitea 标签
@@ -706,6 +715,7 @@ flowchart LR
 | `ticket.created` | 工单提交 | 回执 |
 | `ticket.status` | 状态变化（含 `PrevStatus`） | 通知提交人进展 |
 | `ticket.comment` | 对外回复、用户补充 | 通知提交人 / 后台人员 |
+| `ticket.scheduled` | Issue 排进里程碑（`Body` 为计划版本与预计日期） | 告知提交人预计版本 |
 | `triage.required` | 进入待确认 | 后台待办 |
 | `triage.overdue` | 待确认超时（按 `TriageRemindAfter` 重复） | 催办 |
 | `triage.resolved` | 后台处理完成（`Action`：forward / answer / merge / reject） | 消除后台待办 |

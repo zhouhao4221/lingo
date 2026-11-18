@@ -11,8 +11,11 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
+	"github.com/zhouhao4221/lingo/internal/notify"
 	"github.com/zhouhao4221/lingo/internal/store"
+	"github.com/zhouhao4221/lingo/internal/ticket"
 	"github.com/zhouhao4221/lingo/internal/webhook"
+	"github.com/zhouhao4221/lingo/internal/worker"
 )
 
 // Config 是 lingo 的全部配置，由接入方在代码中构造。
@@ -40,6 +43,7 @@ type Lingo struct {
 	gitea   *gitea.Client
 	store   *store.Store
 	webhook http.Handler
+	worker  *worker.Worker
 
 	botMu       sync.Mutex
 	bot         string    // 机器人账号 login，首次成功获取后缓存
@@ -73,14 +77,70 @@ func New(cfg Config) (*Lingo, error) {
 	if l.gitea, err = gitea.New(gitea.Options{BaseURL: cfg.Gitea.BaseURL, Token: cfg.Gitea.Token}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
-	if l.store, err = store.New(cfg.DB); err != nil {
+	var opts []store.Option
+	if cfg.Notifier != nil {
+		opts = append(opts, store.WithNotify())
+	}
+	if l.store, err = store.New(cfg.DB, opts...); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	if l.webhook, err = l.newWebhookHandler(); err != nil {
 		return nil, err
 	}
+	if l.worker, err = l.newWorker(); err != nil {
+		return nil, err
+	}
 	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
 	return l, nil
+}
+
+func (l *Lingo) replyMode() webhook.ReplyMode {
+	if l.cfg.Gitea.ReplyMode == ReplyAll {
+		return webhook.ReplyAll
+	}
+	return webhook.ReplyMarked
+}
+
+func (l *Lingo) labelPrefix() string {
+	if l.cfg.Gitea.LabelPrefix != "" {
+		return l.cfg.Gitea.LabelPrefix
+	}
+	return "lingo"
+}
+
+func (l *Lingo) newWorker() (*worker.Worker, error) {
+	base := l.cfg.Gitea.BaseURL
+	sync, err := ticket.NewSync(ticket.SyncOptions{
+		Store:         l.store,
+		NeedInfoLabel: l.labelPrefix() + "/review/need-info",
+		IssueURL:      func(repo string, n int64) string { return ticket.IssueURL(base, repo, n) },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lingo: %w", err)
+	}
+	o := worker.Options{
+		Deliveries: l.store,
+		Gitea:      l.gitea,
+		Tickets:    sync,
+		BotLogin:   l.botLogin,
+		ReplyMode:  l.replyMode(),
+		Logger:     l.log,
+	}
+	if n := l.cfg.Notifier; n != nil {
+		o.Notifications = l.store
+		o.Notify = func(ctx context.Context, e notify.Event) error { return n.Notify(ctx, publicEvent(e)) }
+	}
+	w, err := worker.New(o)
+	if err != nil {
+		return nil, fmt.Errorf("lingo: %w", err)
+	}
+	return w, nil
+}
+
+func publicEvent(e notify.Event) Event {
+	return Event{ID: e.ID, Kind: EventKind(e.Kind), At: e.At, ProjectKey: e.ProjectKey, TicketID: e.TicketID,
+		TicketType: TicketType(e.TicketType), Title: e.Title, Status: e.Status, PrevStatus: e.PrevStatus,
+		Action: TriageAction(e.Action), UserID: e.UserID, ActorID: e.ActorID, Body: e.Body, URL: e.URL}
 }
 
 func (l *Lingo) newWebhookHandler() (http.Handler, error) {
@@ -91,14 +151,10 @@ func (l *Lingo) newWebhookHandler() (http.Handler, error) {
 			http.Error(w, "webhook secret not configured", http.StatusServiceUnavailable)
 		}), nil
 	}
-	mode := webhook.ReplyMarked
-	if l.cfg.Gitea.ReplyMode == ReplyAll {
-		mode = webhook.ReplyAll
-	}
 	h, err := webhook.NewHandler(webhook.Options{
 		Secret:    l.cfg.Gitea.WebhookSecret,
 		BotLogin:  l.botLogin,
-		ReplyMode: mode,
+		ReplyMode: l.replyMode(),
 		Store:     l.store,
 		Logger:    l.log,
 	})
@@ -184,11 +240,12 @@ func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
 	return errNotImplemented
 }
 
-// Run 运行后台任务（outbox 投递、Gitea 初始化与对账补偿、知识库生成），直到 ctx 取消；多实例运行安全。
+// Run 运行后台任务直到 ctx 取消，取消后处理完在途任务再返回；多实例运行安全。
+// 目前包括：处理 WebhookHandler 落库的投递（同步工单状态、评论，写事件）、把事件投递给 Config.Notifier。
+// Gitea 初始化与对账补偿、知识库生成待实现。
 func (l *Lingo) Run(ctx context.Context) error {
 	l.botLogin() // 机器人账号获取由 botLogin 统一负责（New 时已发起）
-	<-ctx.Done()
-	return nil
+	return l.worker.Run(ctx)
 }
 
 // ErrNotFound 表示资源不存在或无权访问（两者不区分，避免暴露数据是否存在）。

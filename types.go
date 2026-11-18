@@ -97,7 +97,9 @@ type GiteaConfig struct {
 	Token         string // 机器人账号 token，最小 scope：write:issue、read:repository、read:user
 	WebhookSecret string // Webhook 共享密钥
 
-	LabelPrefix string    // 来源标签与作用域标签前缀，默认 "lingo"
+	// LabelPrefix 是来源标签与作用域标签前缀，默认 "lingo"：来源标签即前缀本身，其余为 "<前缀>/type/bug"、
+	// "<前缀>/review/need-info" 等。
+	LabelPrefix string
 	ReplyMode   ReplyMode // 默认 ReplyMarked
 
 	// AutoRegisterWebhook 为真时，Run 启动时在各仓库查找或创建指向 WebhookURL 的 Webhook
@@ -142,12 +144,13 @@ type Tool struct {
 type EventKind string
 
 const (
-	EventTicketCreated  EventKind = "ticket.created"
-	EventTicketStatus   EventKind = "ticket.status"
-	EventTicketComment  EventKind = "ticket.comment"
-	EventReviewDecision EventKind = "review.decision"
-	EventTicketReleased EventKind = "ticket.released" // 修复版本已发布
-	EventTicketDeployed EventKind = "ticket.deployed" // 修复版本已上线
+	EventTicketCreated   EventKind = "ticket.created"
+	EventTicketStatus    EventKind = "ticket.status"
+	EventTicketComment   EventKind = "ticket.comment"
+	EventTicketScheduled EventKind = "ticket.scheduled" // Issue 被排进里程碑，Body 为计划版本与预计日期
+	EventReviewDecision  EventKind = "review.decision"
+	EventTicketReleased  EventKind = "ticket.released" // 修复版本已发布
+	EventTicketDeployed  EventKind = "ticket.deployed" // 修复版本已上线
 	// EventTriageRequired 表示工单待后台人员确认转出；UserID 仍为提交人，由接入方决定通知哪些后台人员。
 	EventTriageRequired EventKind = "triage.required"
 	EventTriageOverdue  EventKind = "triage.overdue"  // 待确认超过 Config.TriageRemindAfter 未处理，按该间隔重复提醒

@@ -81,9 +81,9 @@ type Delivery struct {
 // DefaultLease 是 ClaimDeliveries 的默认租约时长。
 const DefaultLease = 5 * time.Minute
 
-// ErrLeaseLost 表示租约已失效：投递在租约过期后被其他 worker 重新领取（attempts 已变化）或已处理完成，
+// ErrLeaseLost 表示租约已失效：投递或通知在租约过期后被其他 worker 重新领取（attempts 已变化）或已处理完成，
 // 本次处理结果不再写入。
-var ErrLeaseLost = errors.New("store: delivery lease lost")
+var ErrLeaseLost = errors.New("store: lease lost")
 
 // ClaimDeliveries 领取最多 limit 条到期的未处理投递，租约 lease（≤0 时为 DefaultLease）内其他实例不会再领取。
 // 同一 Issue 的投递按顺序处理：存在更早的未完成投递时，后面的投递暂不领取。结果按 ID 升序。
