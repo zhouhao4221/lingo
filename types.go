@@ -227,6 +227,14 @@ type Attachment struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// CheckResult 是一项启动自检结果；Repo 为空表示实例级检查。Level 为 ok / warn（功能受限）/ error（该仓库无法对接）。
+type CheckResult struct {
+	Repo    string `json:"repo,omitempty"`
+	Item    string `json:"item"` // version | attachments | repo | permission | labels | webhook | delivery | templates | workflow
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
 // ProjectInfo 是调用者可访问的项目及其仓库。
 type ProjectInfo struct {
 	Key         string     `json:"key"`

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
+	"github.com/zhouhao4221/lingo/internal/selfcheck"
 	"github.com/zhouhao4221/lingo/internal/store"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -235,10 +236,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		}
 	}
 
-	wantLabels := []labelSpec{
-		{Name: w.o.LabelPrefix, Color: "#6f42c1", Description: "由灵问创建"},
-		{Name: w.o.LabelPrefix + "/type/" + t.Type, Color: typeColors[t.Type], Exclusive: true},
-	}
+	wantLabels := issueLabels(w.o.LabelPrefix, t.Type)
 	labels, err := w.labels.ensure(ctx, w.o.Issues, owner, name, wantLabels)
 	if err != nil {
 		return err
@@ -492,7 +490,16 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 	return nil
 }
 
-var typeColors = map[string]string{ticket.TypeConsult: "#1d76db", ticket.TypeBug: "#d73a4a", ticket.TypeFeature: "#0e8a16"}
+// issueLabels 是新建 Issue 要打的标签：来源标签与类型标签（定义取自 selfcheck.LabelSpecs，与启动自检补齐的一致）。
+func issueLabels(prefix, typ string) []labelSpec {
+	var out []labelSpec
+	for _, s := range selfcheck.LabelSpecs(prefix) {
+		if s.Name == prefix || s.Name == prefix+"/type/"+typ {
+			out = append(out, labelSpec{Name: s.Name, Color: s.Color, Description: s.Description, Exclusive: s.Exclusive})
+		}
+	}
+	return out
+}
 
 // template 按 Repo.Templates 的文件名、再按模板标签匹配工单类型的 Issue 模板；没有时返回 nil（用内置结构）。
 func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg RepoConfig) (*gitea.IssueTemplate, error) {

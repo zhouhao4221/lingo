@@ -37,6 +37,8 @@ type Config struct {
 	// MCPAllowedOrigins 是 MCPHandler 额外允许的浏览器来源（如 "https://app.example.com"）。默认只允许与请求 Host
 	// 同源的浏览器请求（防 DNS 重绑定）；前端与 MCP 不同源、或反向代理改写了 Host 时在此列出。非浏览器客户端不受影响。
 	MCPAllowedOrigins []string
+	// SkipSelfCheck 为真时 Run 启动时不执行自检（也就不会自动注册 Webhook、补齐标签）；可随时调用 SelfCheck。
+	SkipSelfCheck bool
 	// Logger 为空时使用 slog.Default()。
 	Logger *slog.Logger
 }
@@ -282,7 +284,8 @@ func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
 	return err
 }
 
-// Run 运行后台任务直到 ctx 取消，取消后处理完在途任务再返回；多实例运行安全。
+// Run 运行后台任务直到 ctx 取消，取消后处理完在途任务再返回；多实例运行安全。启动时同步项目，并在后台执行一次
+// SelfCheck（见其说明，含 AutoRegisterWebhook 的自动注册）。
 // 目前包括：处理 WebhookHandler 落库的投递（同步工单状态、评论，写事件）、把事件投递给 Config.Notifier。
 // Gitea 初始化与对账补偿、知识库生成待实现。
 func (l *Lingo) Run(ctx context.Context) error {
@@ -290,6 +293,9 @@ func (l *Lingo) Run(ctx context.Context) error {
 	if err := l.ensureProjects(ctx); err != nil {
 		// 不阻断启动：各方法调用时会再次尝试同步
 		l.log.Error("lingo: sync projects failed", "err", err)
+	}
+	if !l.cfg.SkipSelfCheck {
+		go l.logSelfCheck(ctx) // 不阻断启动；结果写日志，也可调用 SelfCheck 获取
 	}
 	return l.worker.Run(ctx)
 }
