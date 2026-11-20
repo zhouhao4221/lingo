@@ -44,6 +44,9 @@ type Config struct {
 	// 该附件属于此用户（或其有权访问），否则返回 ErrNotFound / ErrForbidden——该附件不会上传，Issue 中注明未能上传。
 	// 其他错误视为临时错误，随任务重试，连续失败 3 次后同样注明。
 	FetchAttachment func(ctx context.Context, userID string, a Attachment) (io.ReadCloser, error)
+	// RequiredPerspectives 是需求工单默认的必填视角（可被 Project.RequiredPerspectives 覆盖）；为空不检查。
+	// 转出时缺少必填视角发出 ticket.perspective_missing，Issue 的视角区块中标注“缺少：…”。
+	RequiredPerspectives []Perspective
 	// TriageRemindAfter 是待确认工单的提醒间隔：超过该时长未处理发出 triage.overdue，之后按同样间隔重复；
 	// 0 表示默认 24 小时，负数关闭提醒（接入方可用 ListTriage 的 PendingBefore 自行实现）。
 	TriageRemindAfter time.Duration
@@ -101,6 +104,9 @@ func New(cfg Config) (*Lingo, error) {
 	if err := project.Validate(projectSpecs(cfg.Projects)); err != nil {
 		return nil, fmt.Errorf("lingo: Config.Projects: %w", err)
 	}
+	if err := validatePerspectives(cfg); err != nil {
+		return nil, err
+	}
 	l := &Lingo{cfg: cfg, log: cfg.Logger, tmpls: &gitea.TemplateCache{}}
 	if l.log == nil {
 		l.log = slog.Default()
@@ -120,11 +126,12 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, err
 	}
 	if l.tickets, err = ticket.NewService(ticket.ServiceOptions{
-		Store:         l.store,
-		AutoForward:   l.defaultAutoForward,
-		IssueURL:      l.issueURL,
-		Declared:      l.declared,
-		NeedInfoLabel: l.labelPrefix() + "/review/need-info",
+		Store:                l.store,
+		AutoForward:          l.defaultAutoForward,
+		IssueURL:             l.issueURL,
+		Declared:             l.declared,
+		NeedInfoLabel:        l.labelPrefix() + "/review/need-info",
+		RequiredPerspectives: l.requiredPerspectives,
 	}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
@@ -292,7 +299,8 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 func publicEvent(e notify.Event) Event {
 	return Event{ID: e.ID, Kind: EventKind(e.Kind), At: e.At, ProjectKey: e.ProjectKey, TicketID: e.TicketID,
 		TicketType: TicketType(e.TicketType), Title: e.Title, Status: e.Status, PrevStatus: e.PrevStatus,
-		Action: TriageAction(e.Action), UserID: e.UserID, ActorID: e.ActorID, Body: e.Body, URL: e.URL}
+		Action: TriageAction(e.Action), UserID: e.UserID, ActorID: e.ActorID, Body: e.Body, URL: e.URL,
+		Perspectives: publicPerspectives(e.Perspectives)}
 }
 
 func (l *Lingo) newWebhookHandler() (http.Handler, error) {

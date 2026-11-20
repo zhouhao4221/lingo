@@ -41,7 +41,9 @@ type ServiceOptions struct {
 	Declared func(projectKey, repo string) bool
 	// NeedInfoLabel 是“需补充信息”标签全名；提交人在 need_info 时补充后，由机器人从 Issue 上移除。为空时不移除。
 	NeedInfoLabel string
-	Now           func() time.Time
+	// RequiredPerspectives 返回项目的必填视角（lingo.Config / Project.RequiredPerspectives）；为空时不检查缺失。
+	RequiredPerspectives func(projectKey string) []string
+	Now                  func() time.Time
 }
 
 // Service 是工单的提交、后台确认与查询；所有方法在领域层执行访问控制（PRD 3.2.0.6）。
@@ -103,6 +105,10 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 	case !p.InProject(in.Project) || !s.o.Declared(in.Project, ""):
 		return nil, fmt.Errorf("%w: project %q", ErrNotFound, in.Project)
 	}
+	persp, ok := NormalizePerspective(p.Perspective)
+	if !ok {
+		return nil, fmt.Errorf("%w: perspective %q", ErrInvalid, p.Perspective)
+	}
 	in.Title, in.Body = textutil.ClipEllipsis(strings.TrimSpace(in.Title), MaxTitleRunes), strings.TrimSpace(in.Body)
 	if in.Body == "" && !textutil.AnyValue(in.Fields) {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
@@ -125,7 +131,7 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 			return err
 		}
 		t = &Ticket{ProjectID: proj.ID, ProjectKey: proj.Key, Type: in.Type, Title: in.Title, Body: in.Body,
-			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email, TitleAuto: titleAuto, Attachments: atts}
+			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email, UserPerspective: persp, TitleAuto: titleAuto, Attachments: atts}
 		if err := s.setRepo(ctx, tx, t, proj, in.Repo); err != nil {
 			return err
 		}
@@ -158,7 +164,10 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		if !on {
 			return tx.Emit(ctx, s.event(t, notify.TriageRequired, "", p.ID, ""))
 		}
-		return enqueueCreate(ctx, tx, t, "", "", nil, time.Time{})
+		if err := enqueueCreate(ctx, tx, t, "", "", nil, time.Time{}); err != nil {
+			return err
+		}
+		return s.emitMissing(ctx, tx, t, p.ID)
 	})
 	if err != nil {
 		return nil, err
@@ -287,7 +296,10 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 		if name == "" {
 			name = p.ID
 		}
-		return "", in.Note, enqueueCreate(ctx, tx, t, name, in.Note, in.Attachments, retry)
+		if err := enqueueCreate(ctx, tx, t, name, in.Note, in.Attachments, retry); err != nil {
+			return "", "", err
+		}
+		return "", in.Note, s.emitMissing(ctx, tx, t, p.ID)
 	})
 }
 

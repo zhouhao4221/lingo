@@ -58,7 +58,7 @@ type ticketTx struct {
 }
 
 const ticketColumns = `t.id, t.project_id, p.key, COALESCE(t.repo_id, 0), COALESCE(r.owner || '/' || r.name, ''), t.type, t.title, t.title_auto,
-	t.body, t.fields, t.context, t.reported_version, t.status, t.user_id, t.user_name, t.user_email,
+	t.body, t.fields, t.context, t.reported_version, t.status, t.user_id, t.user_name, t.user_email, t.user_perspective,
 	COALESCE(t.gitea_issue_number, 0), COALESCE(t.merged_into_ticket_id, 0), t.triage_since, t.created_at, t.updated_at,
 	t.gitea_updated_at, COALESCE(t.fixed_pr, 0), t.fixed_commit, t.milestone, t.due_date, t.deployed_at, COALESCE(rel.tag, ''),
 	COALESCE(t.fixed_release_id, 0), t.fixed_repo
@@ -72,7 +72,7 @@ func scanTicket(row rowScanner) (*ticket.Ticket, error) {
 	var fields, tctx []byte
 	var triage, updated, due, deployed sql.NullTime
 	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.RepoID, &t.Repo, &t.Type, &t.Title, &t.TitleAuto,
-		&t.Body, &fields, &tctx, &t.Version, &t.Status, &t.UserID, &t.UserName, &t.UserEmail,
+		&t.Body, &fields, &tctx, &t.Version, &t.Status, &t.UserID, &t.UserName, &t.UserEmail, &t.UserPerspective,
 		&t.IssueNumber, &t.MergedInto, &triage, &t.CreatedAt, &t.UpdatedAt,
 		&updated, &t.FixedPR, &t.FixedCommit, &t.Milestone, &due, &deployed, &t.FixedTag, &t.FixedReleaseID, &t.FixedRepo)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -172,11 +172,11 @@ func (x *ticketTx) Insert(ctx context.Context, t *ticket.Ticket) error {
 	}
 	err = x.tx.QueryRowContext(ctx, `
 		INSERT INTO lingo_tickets (user_id, user_name, user_email, project_id, repo_id, type, title, body, status,
-		    context, fields, reported_version, triage_since, title_auto, attachments)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		    context, fields, reported_version, triage_since, title_auto, attachments, user_perspective)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		RETURNING id, created_at, updated_at`,
 		t.UserID, t.UserName, t.UserEmail, t.ProjectID, nullInt64(t.RepoID), t.Type, t.Title, t.Body,
-		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince), t.TitleAuto, atts).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
+		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince), t.TitleAuto, atts, perspectiveOrUser(t.UserPerspective)).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: insert ticket: %w", err)
 	}
@@ -406,6 +406,8 @@ type eventPayload struct {
 	Body       string `json:"body,omitempty"`
 	URL        string `json:"url,omitempty"`
 	CommentID  int64  `json:"comment_id,omitempty"`
+	// Perspectives 是视角事件涉及的视角（ticket.perspective_*）
+	Perspectives []string `json:"perspectives,omitempty"`
 }
 
 // mergedFanout 是转发给被合并工单提交人的事件类型：目标工单的对外进展（不含后台事件与提交回执）。
@@ -467,7 +469,8 @@ func (x *ticketTx) Emit(ctx context.Context, e notify.Event) error {
 }
 
 func (x *ticketTx) emit(ctx context.Context, e notify.Event) error {
-	payload, err := json.Marshal(eventPayload{TicketType: e.TicketType, Title: e.Title, Body: e.Body, URL: e.URL, CommentID: e.CommentID})
+	payload, err := json.Marshal(eventPayload{TicketType: e.TicketType, Title: e.Title, Body: e.Body, URL: e.URL, CommentID: e.CommentID,
+		Perspectives: e.Perspectives})
 	if err != nil {
 		return err
 	}

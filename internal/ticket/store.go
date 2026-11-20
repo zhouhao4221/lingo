@@ -62,6 +62,10 @@ type Tx interface {
 	SaveGiteaComment(ctx context.Context, c Comment) (prev *Comment, err error)
 	// DeleteGiteaComment 软删除来自 Gitea 的评论；评论不存在时不报错。
 	DeleteGiteaComment(ctx context.Context, giteaID int64, at time.Time) error
+	// AddPerspective 写一段需求视角补充，返回 ID。
+	AddPerspective(ctx context.Context, p Perspective) (int64, error)
+	// Perspectives 返回工单的视角补充（不含首段），按时间升序。
+	Perspectives(ctx context.Context, ticketID int64) ([]Perspective, error)
 	// Emit 写入对外事件（分配 ID），并在启用通知时写入通知 outbox。
 	Emit(ctx context.Context, e notify.Event) error
 }
@@ -110,6 +114,8 @@ const (
 	OpCreateIssue   = "create_issue"
 	OpCreateComment = "create_comment"
 	OpRemoveLabel   = "remove_label"
+	// OpSyncPerspectives 把需求视角补充同步到 Issue：重写正文区块、补打视角标签、发提示评论。
+	OpSyncPerspectives = "sync_perspectives"
 )
 
 // Task 是 Gitea 写操作任务（outbox kind=gitea）。

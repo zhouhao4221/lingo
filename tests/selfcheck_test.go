@@ -97,7 +97,7 @@ func TestSelfCheckRegistersWebhookAndConfirmsDelivery(t *testing.T) {
 	if len(hooks) != 1 || hooks[0]["config"].(map[string]any)["url"] != whURL || len(hooks[0]["events"].([]any)) != len(gitea.LingoHookEvents) {
 		t.Errorf("hooks = %+v", hooks)
 	}
-	if len(labels) != 8 || labels[0] != "lingo" {
+	if len(labels) != 12 || labels[0] != "lingo" {
 		t.Errorf("labels = %v", labels)
 	}
 	mu.Unlock()

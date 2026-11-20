@@ -54,7 +54,7 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 | 根包 `lingo` | 公开 API：`Config`、扩展点接口、`New`、Handler、`Run`、`Migrate` |
 | `internal/assistant` | 知识问答 Agent：会话、检索增强回答、追问、转工单 |
 | `internal/llm` | 经 `lingo.Model` 的对话与向量调用封装 |
-| `internal/mcp` | MCP Server：工具定义（list_projects、ask、search_knowledge、create_ticket、get_ticket、reply_ticket、list_releases、get_release） |
+| `internal/mcp` | MCP Server：工具定义（list_projects、ask、search_knowledge、create_ticket、get_ticket、reply_ticket、add_perspective、list_perspectives、list_releases、get_release） |
 | `internal/project` | 项目与仓库：同步声明、仓库归属与类型、默认仓库、Issue 落库仓库判定 |
 | `internal/auth` | 调用 `Authenticate`，按固定角色与项目范围鉴权 |
 | `internal/ticket` | 工单领域与状态机 |
