@@ -30,7 +30,8 @@ func sourceOf(ctx context.Context) string {
 
 // ServiceOptions 是 Service 的配置。
 type ServiceOptions struct {
-	Store Store
+	Store   Store
+	Queries QueryStore // 列表与变更流查询；为空时用 Store（若其实现了 QueryStore）
 	// AutoForward 返回代码中声明的默认值（lingo.Project.AutoForward），运行时覆盖优先；为空时一律手动确认。
 	AutoForward func(projectKey, typ string) bool
 	IssueURL    func(repo string, number int64) string
@@ -55,6 +56,13 @@ func NewService(o ServiceOptions) (*Service, error) {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.Queries == nil {
+		q, ok := o.Store.(QueryStore)
+		if !ok {
+			return nil, errors.New("ticket: Queries is required")
+		}
+		o.Queries = q
 	}
 	if o.Declared == nil {
 		o.Declared = func(string, string) bool { return true }

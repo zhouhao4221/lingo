@@ -36,6 +36,10 @@ type Tx interface {
 	AutoForward(ctx context.Context, projectID int64, typ string) (on, ok bool, err error)
 	// SetAutoForward 写入（on 非空）或删除（on 为空）运行时覆盖值。
 	SetAutoForward(ctx context.Context, projectID int64, typ string, on *bool, by string) error
+	// LockOverdue 锁定并返回最多 limit 张在 before 之前进入待确认（或上次提醒早于 before）的工单，跳过已被锁定的。
+	LockOverdue(ctx context.Context, before time.Time, limit int) ([]*Ticket, error)
+	// MarkReminded 记录提醒时间。
+	MarkReminded(ctx context.Context, id int64, at time.Time) error
 	// ConversationOwner 返回会话的提交人；不存在返回 ErrNotFound。
 	ConversationOwner(ctx context.Context, id int64) (string, error)
 	// AddComment 写一条工单评论（用户补充或后台答复）。
@@ -65,6 +69,7 @@ type History struct {
 
 // Comment 是工单评论（ticket_comments）。
 type Comment struct {
+	ID         int64 // ticket_comments.id（读取时回填）
 	TicketID   int64
 	GiteaID    int64  // 来自 Gitea 的评论 ID
 	Source     string // user | staff | gitea；SaveGiteaComment 固定为 gitea

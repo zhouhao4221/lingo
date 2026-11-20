@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -239,23 +238,11 @@ func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg Repo
 		w.log.Warn("list issue templates failed, using built-in body", "repo", owner+"/"+name, "err", err)
 		return nil, nil
 	}
-	if file := cfg.Templates[typ]; file != "" {
-		for _, t := range ts {
-			if t.FileName == file || strings.HasSuffix(t.FileName, "/"+file) {
-				return t, nil
-			}
-		}
-		w.log.Warn("configured issue template not found", "repo", owner+"/"+name, "template", file)
+	t := gitea.MatchTemplate(ts, cfg.Templates[typ], typ, w.o.LabelPrefix)
+	if t == nil && cfg.Templates[typ] != "" {
+		w.log.Warn("configured issue template not found", "repo", owner+"/"+name, "template", cfg.Templates[typ])
 	}
-	want := []string{"type/" + typ, w.o.LabelPrefix + "/type/" + typ, typ}
-	for _, t := range ts {
-		for _, l := range t.Labels {
-			if slices.ContainsFunc(want, func(s string) bool { return strings.EqualFold(s, l) }) {
-				return t, nil
-			}
-		}
-	}
-	return nil, nil
+	return t, nil
 }
 
 // IssueBody 生成 Issue 正文：有表单模板且提交了字段时按 Gitea 表单格式渲染，否则用内置结构；

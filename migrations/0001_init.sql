@@ -258,6 +258,8 @@ CREATE TABLE events (
     prev_status text        NOT NULL DEFAULT '',
     action      text        NOT NULL DEFAULT '',
     payload     jsonb       NOT NULL DEFAULT '{}',
+    -- 写入事务的 ID：变更流只返回早于所有进行中事务的事件，ID 先分配后提交的事件不会被游标跳过
+    txid        xid8        NOT NULL DEFAULT pg_current_xact_id(),
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX events_ticket_idx ON events (ticket_id, id);

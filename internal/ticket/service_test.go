@@ -277,6 +277,64 @@ func TestCreateConversationAndEmptyFields(t *testing.T) {
 	}
 }
 
+func TestRemindOverdue(t *testing.T) {
+	m := newMem()
+	now := t0
+	s, _ := NewService(ServiceOptions{Store: m, Now: func() time.Time { return now }})
+	ctx := context.Background()
+	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeFeature, Body: "x"})
+	count := func() int {
+		n := 0
+		for _, e := range m.events {
+			if e.Kind == notify.TriageOverdue && e.TicketID == tk.ID {
+				n++
+			}
+		}
+		return n
+	}
+	for _, step := range []struct {
+		after time.Duration
+		want  int
+	}{{time.Hour, 0}, {25 * time.Hour, 1}, {26 * time.Hour, 1}, {50 * time.Hour, 2}} {
+		now = t0.Add(step.after)
+		if _, err := s.RemindOverdue(ctx, 24*time.Hour, 10); err != nil {
+			t.Fatal(err)
+		}
+		if got := count(); got != step.want {
+			t.Errorf("after %v: reminders = %d, want %d", step.after, got, step.want)
+		}
+	}
+}
+
+func TestListEventsScopesByRole(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, nil)
+	ctx := context.Background()
+	for _, c := range []struct {
+		p    auth.Principal
+		want EventQuery
+	}{
+		{alice, EventQuery{Scope: Scope{All: true}, UserID: "u1", ExcludeTriage: true}},
+		{agent, EventQuery{Scope: Scope{All: true}, ExcludeTriage: true, ForwardedOnly: true}},
+		{reviewer, EventQuery{Scope: Scope{Projects: []string{"demo"}}}},
+	} {
+		if _, err := s.ListEvents(ctx, c.p, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		got := m.lastEventQuery
+		if got.UserID != c.want.UserID || got.ExcludeTriage != c.want.ExcludeTriage || got.ForwardedOnly != c.want.ForwardedOnly ||
+			got.Scope.All != c.want.Scope.All || len(got.Scope.Projects) != len(c.want.Scope.Projects) || got.Limit != 100 {
+			t.Errorf("%s: query = %+v", c.p.Role, got)
+		}
+	}
+	if _, err := s.ListEvents(ctx, auth.Principal{ID: "x", Role: "guest"}, 0, 0); !errors.Is(err, ErrForbidden) {
+		t.Errorf("guest: %v", err)
+	}
+	if _, err := s.ListTriage(ctx, alice, "", TriageQuery{}); !errors.Is(err, ErrForbidden) {
+		t.Errorf("external triage: %v", err)
+	}
+}
+
 func TestIssueCreated(t *testing.T) {
 	m := newMem()
 	s := newService(t, m, map[string]bool{TypeBug: true})

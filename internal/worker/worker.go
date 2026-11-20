@@ -65,6 +65,10 @@ type Options struct {
 	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
 	LabelPrefix string                       // 默认 "lingo"
 
+	// Reminder 与 RemindEvery > 0 时，每分钟检查一次待确认超时（triage.overdue）。
+	Reminder    Reminder
+	RemindEvery time.Duration
+
 	Logger       *slog.Logger
 	PollInterval time.Duration // 队列为空时的轮询间隔，默认 1 秒
 	BatchSize    int           // 每次领取条数，默认 20
@@ -75,6 +79,14 @@ type Options struct {
 	TaskTimeout time.Duration
 	Now         func() time.Time
 }
+
+// Reminder 发出待确认超时提醒，由 ticket.Service 实现。
+type Reminder interface {
+	RemindOverdue(ctx context.Context, every time.Duration, limit int) (int, error)
+}
+
+// remindInterval 是检查待确认超时的间隔。
+const remindInterval = time.Minute
 
 // Worker 消费 Webhook 投递与通知 outbox；多实例运行安全（领取用 SKIP LOCKED + 租约）。
 type Worker struct {
@@ -160,6 +172,30 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.o.Tasks != nil {
 		wg.Add(1)
 		go loop("gitea", w.ProcessTasks)
+	}
+	if w.o.Reminder != nil && w.o.RemindEvery > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t := time.NewTicker(remindInterval)
+			defer t.Stop()
+			for {
+				for {
+					n, err := w.o.Reminder.RemindOverdue(ctx, w.o.RemindEvery, w.o.BatchSize)
+					if err != nil && ctx.Err() == nil {
+						w.log.Error("worker loop failed", "loop", "remind", "err", err)
+					}
+					if err != nil || n < w.o.BatchSize {
+						break
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
 	}
 	wg.Wait()
 	return nil

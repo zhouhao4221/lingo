@@ -24,10 +24,13 @@ type memStore struct {
 	notes    []Comment
 	triages  []Triage
 	tasks    map[string]Task
+	reminded map[int64]time.Time
+
+	lastEventQuery EventQuery
 }
 
 func newMem(ts ...Ticket) *memStore {
-	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{},
+	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{}, reminded: map[int64]time.Time{},
 		projects: map[string]*Project{"demo": {ID: 1, Key: "demo", DefaultRepo: &RepoRef{ID: 10, Name: "demo/api"}}, "empty": {ID: 2, Key: "empty"}},
 		repos:    map[int64][]RepoRef{1: {{ID: 10, Name: "demo/api"}, {ID: 11, Name: "demo/web"}}}}
 	for _, t := range ts {
@@ -101,6 +104,41 @@ func (m *memStore) SetAutoForward(_ context.Context, pid int64, typ string, on *
 	}
 	return nil
 }
+
+func (m *memStore) LockOverdue(_ context.Context, before time.Time, limit int) ([]*Ticket, error) {
+	var out []*Ticket
+	for id := int64(1); id <= int64(len(m.tickets)); id++ {
+		t, ok := m.tickets[id]
+		if !ok || t.Status != StatusPendingTriage || t.TriageSince == nil {
+			continue
+		}
+		last := *t.TriageSince
+		if r, ok := m.reminded[id]; ok {
+			last = r
+		}
+		if last.Before(before) && len(out) < limit {
+			c := *t
+			out = append(out, &c)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) MarkReminded(_ context.Context, id int64, at time.Time) error {
+	m.reminded[id] = at
+	return nil
+}
+
+func (m *memStore) ListTriage(context.Context, TriageQuery) ([]*Ticket, error) { return nil, nil }
+func (m *memStore) TriageCounts(context.Context, Scope, time.Time) ([]TriageCount, error) {
+	return nil, nil
+}
+func (m *memStore) ListMine(context.Context, MineQuery) ([]*Ticket, error) { return nil, nil }
+func (m *memStore) Events(_ context.Context, q EventQuery) ([]notify.Event, error) {
+	m.lastEventQuery = q
+	return nil, nil
+}
+func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }
 
 func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {
 	if id == 1 {

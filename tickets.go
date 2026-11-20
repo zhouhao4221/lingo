@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
+	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/project"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 	"github.com/zhouhao4221/lingo/internal/worker"
@@ -107,6 +109,161 @@ func (l *Lingo) ResetAutoForward(ctx context.Context, u User, project string, t 
 		return err
 	}
 	return publicErr(l.tickets.SetAutoForward(ctx, principal(u), project, string(t), nil))
+}
+
+// ListMyTickets 返回 u 本人提交的工单，新的在前；status 可空；beforeID 为上一页最后一条的 ID（首页传 0）；
+// limit 为 0 时默认 50，最多 200。
+func (l *Lingo) ListMyTickets(ctx context.Context, u User, status string, beforeID int64, limit int) ([]Ticket, error) {
+	ts, err := l.tickets.ListMine(ctx, principal(u), ticket.MineQuery{Status: status, BeforeID: beforeID, Limit: limit})
+	return l.ticketList(ts, err)
+}
+
+// ListTicketComments 返回工单评论（时间顺序）：external 只能看到对外评论；无权访问时返回 ErrNotFound。
+func (l *Lingo) ListTicketComments(ctx context.Context, u User, id int64) ([]Comment, error) {
+	cs, err := l.tickets.Comments(ctx, principal(u), id)
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]Comment, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, Comment{ID: c.ID, Source: c.Source, AuthorID: c.AuthorID, AuthorName: c.AuthorName, Body: c.Body,
+			Public: c.Public, At: c.At})
+	}
+	return out, nil
+}
+
+// ListTriage 列出 u 可见项目中的待确认工单（仅 reviewer / admin），按进入待确认的先后。
+func (l *Lingo) ListTriage(ctx context.Context, u User, f TriageFilter) ([]Ticket, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return nil, err
+	}
+	ts, err := l.tickets.ListTriage(ctx, principal(u), f.ProjectKey, ticket.TriageQuery{Type: string(f.Type),
+		PendingBefore: f.PendingBefore, AfterID: f.AfterID, Limit: f.Limit})
+	return l.ticketList(ts, err)
+}
+
+// TriageSummary 返回 u 可见项目的待确认数与超时数（仅 reviewer / admin）；超时按 Config.TriageRemindAfter
+// 计算（关闭提醒时按 24 小时）。
+func (l *Lingo) TriageSummary(ctx context.Context, u User) ([]TriageCount, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return nil, err
+	}
+	cs, err := l.tickets.TriageSummary(ctx, principal(u), l.overdueAfter())
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]TriageCount, 0, len(cs))
+	for _, c := range cs {
+		if !l.declared(c.ProjectKey, "") {
+			continue
+		}
+		out = append(out, TriageCount{ProjectKey: c.ProjectKey, Pending: c.Pending, Overdue: c.Overdue})
+	}
+	return out, nil
+}
+
+// ListEvents 返回 ID 大于 afterID 的事件（按 ID 升序，最多 limit 条，0 表示默认 100，最多 200），
+// 与 Notifier 推送的事件同源；按 u 的角色与项目过滤：external 只看本人工单的非 triage 事件，agent 看项目内
+// 已转出工单的非 triage 事件，reviewer / admin 看项目内全部。用最后一条的 ID 作下次的 afterID。
+func (l *Lingo) ListEvents(ctx context.Context, u User, afterID int64, limit int) ([]Event, error) {
+	es, err := l.tickets.ListEvents(ctx, principal(u), afterID, limit)
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]Event, 0, len(es))
+	for _, e := range es {
+		out = append(out, publicEvent(e))
+	}
+	return out, nil
+}
+
+// TicketTypes 返回项目（为空取默认项目）下可提交的工单类型与各自的表单字段，取自仓库 repo（为空取项目默认仓库）
+// 的 Issue 表单模板，供接入方弹窗渲染；读取模板失败时只返回类型、不带字段。
+func (l *Lingo) TicketTypes(ctx context.Context, u User, projectKey, repo string) ([]TicketTypeInfo, error) {
+	if projectKey == "" {
+		projectKey = l.cfg.Projects[0].Key
+	}
+	p := principal(u)
+	var proj *Project
+	for i := range l.cfg.Projects {
+		if l.cfg.Projects[i].Key == projectKey {
+			proj = &l.cfg.Projects[i]
+		}
+	}
+	if proj == nil || !p.Known() || !p.InProject(projectKey) {
+		return nil, ErrNotFound
+	}
+	if repo == "" {
+		repo = proj.DefaultRepo
+		if repo == "" && len(proj.Repos) > 0 {
+			repo = proj.Repos[0].Owner + "/" + proj.Repos[0].Name
+		}
+	}
+	if repo != "" && !l.declared(projectKey, repo) {
+		return nil, fmt.Errorf("%w: repo %q is not in project %q", ErrInvalidInput, repo, projectKey)
+	}
+	var tmpls []*gitea.IssueTemplate
+	if owner, name, ok := strings.Cut(repo, "/"); ok {
+		var err error
+		if tmpls, err = l.gitea.ListIssueTemplates(ctx, owner, name); err != nil {
+			l.log.Warn("lingo: list issue templates failed", "repo", repo, "err", err)
+		}
+	}
+	cfg := l.repoConfig(repo)
+	var out []TicketTypeInfo
+	for _, typ := range []TicketType{TicketConsult, TicketBug, TicketFeature} {
+		info := TicketTypeInfo{Type: typ}
+		if t := gitea.MatchTemplate(tmpls, cfg.Templates[string(typ)], string(typ), l.labelPrefix()); t != nil && t.IsForm() {
+			info.Template = t.Name
+			for _, f := range t.Fields {
+				if !f.IsInput() || f.ID == "" {
+					continue
+				}
+				info.Fields = append(info.Fields, FormField{ID: f.ID, Kind: f.Type, Label: f.Label(), Description: f.Description(),
+					Placeholder: f.Placeholder(), Required: f.Required(), Options: f.Options(), Multiple: f.Multiple()})
+			}
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+// AutoForwardSettings 返回 u 可见项目各工单类型当前生效的自动转出开关（reviewer / admin）。
+func (l *Lingo) AutoForwardSettings(ctx context.Context, u User) ([]AutoForwardSetting, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(l.cfg.Projects))
+	for _, p := range l.cfg.Projects {
+		keys = append(keys, p.Key)
+	}
+	ss, err := l.tickets.AutoForwardSettings(ctx, principal(u), keys)
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]AutoForwardSetting, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, AutoForwardSetting{ProjectKey: s.ProjectKey, Type: TicketType(s.Type), On: s.On, Overridden: s.Overridden})
+	}
+	return out, nil
+}
+
+func (l *Lingo) overdueAfter() time.Duration {
+	if d := l.cfg.TriageRemindAfter; d > 0 {
+		return d
+	}
+	return 24 * time.Hour
+}
+
+func (l *Lingo) ticketList(ts []*ticket.Ticket, err error) ([]Ticket, error) {
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]Ticket, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, l.publicTicket(t))
+	}
+	return out, nil
 }
 
 // ensureProjects 把 Config.Projects 同步入库，成功一次后不再重复；Handler 与 Run 分进程部署时都能触发。

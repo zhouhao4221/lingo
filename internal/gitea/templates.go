@@ -159,6 +159,29 @@ func (f *IssueFormField) optionVisibleInContent(i int) bool {
 	return false
 }
 
+// MatchTemplate 选出工单类型 typ 对应的模板：先按文件名 file（如 "bug_report.yaml"，可空），
+// 再按模板标签 "type/<typ>"、"<prefix>/type/<typ>" 或 "<typ>"（不区分大小写）；都没有时返回 nil。
+func MatchTemplate(ts []*IssueTemplate, file, typ, prefix string) *IssueTemplate {
+	if file != "" {
+		for _, t := range ts {
+			if t.FileName == file || strings.HasSuffix(t.FileName, "/"+file) {
+				return t
+			}
+		}
+	}
+	want := []string{"type/" + typ, prefix + "/type/" + typ, typ}
+	for _, t := range ts {
+		for _, l := range t.Labels {
+			for _, w := range want {
+				if strings.EqualFold(w, l) {
+					return t
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // FormValues 是表单取值，按字段 ID：input / textarea 取第一个值；
 // dropdown 为选中的选项标题；checkboxes 为勾选的选项标题。
 type FormValues map[string][]string
