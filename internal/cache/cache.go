@@ -13,13 +13,20 @@ type Cache[K comparable, V any] struct {
 	ttl   time.Duration
 	max   int
 	now   func() time.Time
+	seq   uint64
 	items map[K]entry[V]
-	order []K // 写入顺序，用于容量淘汰；过期与删除的键惰性清理
+	order []slot[K] // 写入顺序；条目被覆盖、删除或过期后，旧的顺序记录凭 seq 识别为失效并跳过
 }
 
 type entry[V any] struct {
 	v   V
 	exp time.Time
+	seq uint64
+}
+
+type slot[K comparable] struct {
+	k   K
+	seq uint64
 }
 
 // New 创建缓存：ttl 为默认过期时间（≤0 表示不过期），max 为最多条目数（≤0 表示 1000）。
@@ -48,7 +55,7 @@ func (c *Cache[K, V]) Get(k K) (V, bool) {
 // Put 以默认过期时间写入。
 func (c *Cache[K, V]) Put(k K, v V) { c.PutTTL(k, v, c.ttl) }
 
-// PutTTL 以 ttl 写入（≤0 表示不过期），超出容量时淘汰最早写入的条目。
+// PutTTL 以 ttl 写入（≤0 表示不过期）；每次写入都算最新，超出容量时淘汰写入最早的条目。
 func (c *Cache[K, V]) PutTTL(k K, v V, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -56,22 +63,21 @@ func (c *Cache[K, V]) PutTTL(k K, v V, ttl time.Duration) {
 	if ttl > 0 {
 		exp = c.now().Add(ttl)
 	}
-	if _, ok := c.items[k]; !ok {
-		c.order = append(c.order, k)
-	}
-	c.items[k] = entry[V]{v, exp}
+	c.seq++
+	c.items[k] = entry[V]{v, exp, c.seq}
+	c.order = append(c.order, slot[K]{k, c.seq})
 	for len(c.items) > c.max && len(c.order) > 0 {
-		old := c.order[0]
+		s := c.order[0]
 		c.order = c.order[1:]
-		delete(c.items, old)
+		if e, ok := c.items[s.k]; ok && e.seq == s.seq {
+			delete(c.items, s.k)
+		}
 	}
-	if len(c.order) > 2*c.max { // 清掉已删除键留下的顺序记录
+	if len(c.order) > 2*c.max { // 去掉失效的顺序记录
 		keep := c.order[:0]
-		seen := make(map[K]bool, len(c.items))
-		for _, k := range c.order {
-			if _, ok := c.items[k]; ok && !seen[k] {
-				seen[k] = true
-				keep = append(keep, k)
+		for _, s := range c.order {
+			if e, ok := c.items[s.k]; ok && e.seq == s.seq {
+				keep = append(keep, s)
 			}
 		}
 		c.order = keep

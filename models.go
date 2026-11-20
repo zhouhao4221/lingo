@@ -122,11 +122,8 @@ func (m openAIModel) ChatUsage(ctx context.Context, messages []Message) (string,
 }
 
 func (m openAIModel) Chat(ctx context.Context, messages []Message) (string, error) {
-	ms := make([]llm.Message, 0, len(messages))
-	for _, x := range messages {
-		ms = append(ms, llm.Message{Role: x.Role, Content: x.Content})
-	}
-	return m.c.Chat(ctx, ms)
+	s, _, err := m.ChatUsage(ctx, messages)
+	return s, err
 }
 
 func (m openAIModel) Embed(ctx context.Context, texts []string) ([][]float32, error) {

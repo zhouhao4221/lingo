@@ -51,6 +51,9 @@ type Draft struct {
 	Fields      map[string][]string // 合并后的模板字段：提交人已填的保持原值，模型只补空缺
 }
 
+// ErrNotCalled 表示没有调用到模型（未配置、提示词构造失败），不计入用量。
+var ErrNotCalled = errors.New("llm: model not called")
+
 // Drafter 用轻量模型把工单整理为结构清晰的 Issue：生成标题、从自由描述中抽取模板字段、整理描述。
 // 输出逐项校验（字段 ID、选项须来自模板），不合格的丢弃；提交人已填的字段不改。
 type Drafter struct {
@@ -83,11 +86,11 @@ const draftSystemPrompt = `你是软件研发团队的工单整理助手。用�
 // 各工单相同的模板字段定义，再放本工单的内容。
 func (d *Drafter) DraftIssue(ctx context.Context, in DraftInput) (*Draft, Usage, error) {
 	if d == nil || d.Chat == nil {
-		return nil, Usage{}, errors.New("llm: no model")
+		return nil, Usage{}, fmt.Errorf("%w: no model", ErrNotCalled)
 	}
 	prompt, err := draftPrompt(in)
 	if err != nil {
-		return nil, Usage{}, err
+		return nil, Usage{}, fmt.Errorf("%w: build prompt: %v", ErrNotCalled, err)
 	}
 	out, u, err := d.Chat(ctx, []Message{{Role: "system", Content: draftSystemPrompt}, {Role: "user", Content: prompt}})
 	if err != nil {

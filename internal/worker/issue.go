@@ -367,7 +367,9 @@ func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.I
 	}
 	start := time.Now()
 	d, usage, err := w.o.Drafter.DraftIssue(dctx, in)
-	w.recordUsage(ctx, "draft_issue", t.ID, usage, err == nil, time.Since(start))
+	if !errors.Is(err, llm.ErrNotCalled) { // 没调用到模型（如提示词构造失败）不计用量
+		w.recordUsage(ctx, "draft_issue", t.ID, usage, err == nil, time.Since(start))
+	}
 	if err != nil {
 		w.log.Warn("issue drafting failed, using original content", "ticket", t.ID, "err", err)
 		return t, ""
@@ -386,12 +388,14 @@ func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.I
 
 // recordUsage 记录一次模型调用的用量（写库失败只记日志），并在日志中给出前缀缓存命中情况，便于观察提示词前缀是否稳定。
 func (w *Worker) recordUsage(ctx context.Context, kind string, ticketID int64, u llm.Usage, ok bool, latency time.Duration) {
-	w.log.Info("llm usage", "kind", kind, "ticket", ticketID, "model", u.Model, "input", u.Input, "cached", u.Cached,
+	w.log.Debug("llm usage", "kind", kind, "ticket", ticketID, "model", u.Model, "input", u.Input, "cached", u.Cached,
 		"output", u.Output, "ok", ok, "latency_ms", latency.Milliseconds())
 	if w.o.Usage == nil {
 		return
 	}
-	if err := w.o.Usage.RecordLLMUsage(context.WithoutCancel(ctx), store.LLMUsage{Kind: kind, Model: u.Model, TicketID: ticketID,
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second) // 记账不拖住建单
+	defer cancel()
+	if err := w.o.Usage.RecordLLMUsage(rctx, store.LLMUsage{Kind: kind, Model: u.Model, TicketID: ticketID,
 		Input: u.Input, Output: u.Output, Cached: u.Cached, OK: ok, Latency: latency}); err != nil {
 		w.log.Warn("record llm usage failed", "err", err)
 	}
@@ -759,8 +763,16 @@ const maxIssueTitle = 255
 
 // labelCache 缓存各仓库标签 name（小写）→ id（10 分钟），缺的标签创建后更新缓存。
 type labelCache struct {
-	once sync.Once
-	c    *cache.Cache[string, map[string]int64]
+	once  sync.Once
+	c     *cache.Cache[string, map[string]int64]
+	locks sync.Map // 仓库 → *sync.Mutex：同一仓库的“列出再创建”串行，避免并发建出同名标签
+}
+
+func (c *labelCache) lock(key string) func() {
+	m, _ := c.locks.LoadOrStore(key, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (c *labelCache) cache() *cache.Cache[string, map[string]int64] {
@@ -792,6 +804,7 @@ func (c *labelCache) forget(owner, name string) {
 // ensure 返回 want 中各标签的 ID，缺的创建。
 func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name string, want []gitea.CreateLabelOption) ([]int64, error) {
 	key := strings.ToLower(owner + "/" + name)
+	defer c.lock(key)()
 	ids, ok := c.cache().Get(key)
 	if ok {
 		for _, l := range want {

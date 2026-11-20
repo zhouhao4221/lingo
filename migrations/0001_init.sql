@@ -341,6 +341,7 @@ CREATE TABLE llm_usage (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX llm_usage_created_idx ON llm_usage (created_at);
+CREATE INDEX llm_usage_ticket_idx ON llm_usage (ticket_id) WHERE ticket_id IS NOT NULL;
 
 -- 连通记录：push / 测试投递只更新这里，不进投递表
 CREATE TABLE webhook_pings (
