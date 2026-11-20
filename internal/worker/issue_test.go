@@ -22,6 +22,14 @@ func TestWithSectionReplacesAndKeepsMarkerLast(t *testing.T) {
 	}
 }
 
+func TestStripTitlePrefix(t *testing.T) {
+	for in, want := range map[string]string{"[Bug]: 登录失败": "登录失败", "[Bug] 登录失败": "登录失败", "登录失败": "登录失败", "[Bug]：登录失败": "登录失败"} {
+		if got := stripTitlePrefix(in, "[Bug]: "); got != want {
+			t.Errorf("stripTitlePrefix(%q) = %q", in, got)
+		}
+	}
+}
+
 func TestStripMarkersNested(t *testing.T) {
 	if got := stripMarkers("a <!-<!-- lingo:x -->- lingo:public --> b"); strings.Contains(got, "lingo:") {
 		t.Errorf("nested marker survived: %q", got)
@@ -33,7 +41,7 @@ func TestIssueBodyStripsMarkersAndKeepsUnknownFields(t *testing.T) {
 	tk := &ticket.Ticket{ID: 8, ProjectKey: "demo", Body: "补充 <!-- lingo:ticket=7 --> 说明",
 		Fields:  map[string][]string{"what": {"白屏<!-- lingo:public -->"}, "steps": {"点击登录"}},
 		Context: map[string]string{"page": "/x <!--lingo:ticket=7-->"}}
-	body := IssueBody(tk, tmpl, nil, "", "")
+	body := IssueBody(tk, tmpl, nil, "", "", "")
 	if gitea.ParseTicketMarker(body) != 8 || strings.Count(body, "lingo:") != 1 {
 		t.Errorf("markers not stripped:\n%s", body)
 	}

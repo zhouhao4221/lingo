@@ -12,6 +12,7 @@ Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a
 
 - **Feedback tickets** — consult / bug / feature with text, form fields, screenshots and attachments; APIs designed for a popup widget built by the host
 - **Triage** — staff forward to Gitea, answer, merge or reject; auto/manual switch per project and ticket type; overdue reminders
+- **Issue drafting** — an optional light model writes a clear title, fills the issue form fields from free text and tidies the description (validated against the template; the original text is kept)
 - **Gitea integration** — issues created from the repository's issue form templates, two-way comments, PR-merge detection, release linking (by commit containment) and deployment signals (Actions workflow, commit status or `MarkDeployed`)
 - **Reliable sync** — signed, de-duplicated webhooks processed asynchronously; periodic reconciliation recovers missed deliveries; startup self-check and optional webhook auto-registration
 - **Progress notifications** — events delivered to your `Notifier` (at-least-once, with event IDs) plus an event feed; merged tickets follow their target
@@ -35,7 +36,7 @@ if err := lingo.Migrate(ctx, db); err != nil { ... } // run in your release proc
 
 l, err := lingo.New(lingo.Config{
 	DB:           db,       // *sql.DB (PostgreSQL)
-	Model:        model,    // implements lingo.Model (used by the upcoming Q&A agent)
+	LightModel:   light,    // optional: a cheap, fast lingo.Model that tidies tickets before issues are created
 	Gitea:        lingo.GiteaConfig{BaseURL: url, Token: botToken, WebhookSecret: secret},
 	Projects:     projects, // projects and their Gitea repositories
 	Authenticate: authn,    // resolves lingo.User (ID, role, projects) from a request

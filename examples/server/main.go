@@ -33,8 +33,10 @@ func main() {
 	}
 
 	l, err := lingo.New(lingo.Config{
-		DB:    db,
-		Model: placeholderModel{}, // 替换为自己的 lingo.Model 实现（知识问答使用）
+		DB: db,
+		// LightModel：建 Issue 前用轻量模型整理工单（标题、模板字段、描述）；不配置时按原内容建单。
+		// Model：主模型，供知识问答使用（尚未实现），可不配置。
+		LightModel: nil, // 替换为自己的 lingo.Model 实现，如接入便宜、快速的对话模型
 		Gitea: lingo.GiteaConfig{
 			BaseURL:       os.Getenv("LINGO_GITEA_URL"),
 			Token:         os.Getenv("LINGO_GITEA_TOKEN"), // 机器人账号：write:issue、read:repository、read:user
@@ -98,15 +100,4 @@ type logNotifier struct{}
 func (logNotifier) Notify(ctx context.Context, e lingo.Event) error {
 	slog.InfoContext(ctx, "lingo event", "id", e.ID, "kind", e.Kind, "ticket", e.TicketID, "status", e.Status, "user", e.UserID)
 	return nil
-}
-
-// placeholderModel 是占位实现：工单流程不调用模型。
-type placeholderModel struct{}
-
-func (placeholderModel) Chat(context.Context, []lingo.Message) (string, error) {
-	return "", errors.New("model not configured")
-}
-
-func (placeholderModel) Embed(context.Context, []string) ([][]float32, error) {
-	return nil, errors.New("model not configured")
 }

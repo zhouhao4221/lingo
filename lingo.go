@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
+	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/notify"
 	"github.com/zhouhao4221/lingo/internal/project"
 	"github.com/zhouhao4221/lingo/internal/release"
@@ -22,8 +24,12 @@ import (
 
 // Config 是 lingo 的全部配置，由接入方在代码中构造。
 type Config struct {
-	DB           *sql.DB // PostgreSQL，驱动由接入方选择
-	Model        Model
+	DB *sql.DB // PostgreSQL，驱动由接入方选择
+	// Model 是主模型（对话 + 向量），供知识问答使用（尚未实现）；可空。
+	Model Model
+	// LightModel 是轻量模型（只用 Chat），用于建 Issue 前整理工单：生成标题、从描述中抽取模板字段、整理描述。
+	// 为空时用 Model；两者都为空时按原内容建单。整理失败不影响建单，Issue 末尾附提交人原始描述。
+	LightModel   Model
 	Gitea        GiteaConfig
 	Projects     []Project // 第一个为默认项目（请求未指定 project 时使用）
 	Authenticate Authenticator
@@ -74,8 +80,6 @@ func New(cfg Config) (*Lingo, error) {
 	switch {
 	case cfg.DB == nil:
 		return nil, errors.New("lingo: Config.DB is required")
-	case cfg.Model == nil:
-		return nil, errors.New("lingo: Config.Model is required")
 	case cfg.Gitea.BaseURL == "" || cfg.Gitea.Token == "":
 		return nil, errors.New("lingo: Config.Gitea.BaseURL and Token are required")
 	case cfg.Authenticate == nil:
@@ -141,6 +145,37 @@ func (l *Lingo) labelPrefix() string {
 		return l.cfg.Gitea.LabelPrefix
 	}
 	return "lingo"
+}
+
+// drafter 返回建单前整理工单用的模型：优先 LightModel，其次 Model；都没有时为 nil（按原内容建单）。
+func (l *Lingo) drafter() worker.Drafter {
+	m := l.cfg.LightModel
+	if isNil(m) {
+		m = l.cfg.Model
+	}
+	if isNil(m) {
+		return nil
+	}
+	return &llm.Drafter{Chat: func(ctx context.Context, ms []llm.Message) (string, error) {
+		in := make([]Message, 0, len(ms))
+		for _, x := range ms {
+			in = append(in, Message{Role: x.Role, Content: x.Content})
+		}
+		return m.Chat(ctx, in)
+	}}
+}
+
+// isNil 报告接口值是否为 nil，含装着 nil 指针的接口（如 var m *MyModel; cfg.LightModel = m）。
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // reconcileLockKey 是定时对账的 advisory lock 键。
@@ -216,6 +251,7 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Issues:      l.gitea,
 		Drafts:      l.tickets,
 		Forwarding:  l.store,
+		Drafter:     l.drafter(),
 		Repos:       l.repoConfig,
 		LabelPrefix: l.labelPrefix(),
 		Templates:   l.tmpls,

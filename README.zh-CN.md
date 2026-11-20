@@ -12,6 +12,7 @@
 
 - **反馈工单**：咨询 / Bug / 需求，支持文字、表单字段、截图与附件；接口按接入方自建的弹窗组件设计
 - **后台确认**：转出到 Gitea、直接答复、合并或驳回；按项目与类型的自动 / 手动开关；超时提醒
+- **工单整理**：可选的轻量模型生成清晰标题、从自由描述中抽取表单字段、整理描述（按模板逐项校验，并保留原始描述）
 - **Gitea 对接**：按仓库 Issue 表单模板建单、评论双向同步、识别 PR 合并、按提交包含关系关联版本、上线信号（Actions 工作流、提交状态或 `MarkDeployed`）
 - **可靠同步**：Webhook 验签、去重、异步处理；定时对账补齐漏掉的投递；启动自检与可选的 Webhook 自动注册
 - **进展通知**：事件投递给你的 `Notifier`（至少一次，带事件 ID），并提供变更流；被合并工单的提交人随目标工单收到进展
@@ -35,7 +36,7 @@ if err := lingo.Migrate(ctx, db); err != nil { ... } // 在发布流程中执行
 
 l, err := lingo.New(lingo.Config{
 	DB:           db,       // *sql.DB（PostgreSQL）
-	Model:        model,    // 实现 lingo.Model（供即将实现的知识问答使用）
+	LightModel:   light,    // 可选：便宜、快速的 lingo.Model，建 Issue 前整理工单
 	Gitea:        lingo.GiteaConfig{BaseURL: url, Token: botToken, WebhookSecret: secret},
 	Projects:     projects, // 项目及其 Gitea 仓库
 	Authenticate: authn,    // 从请求解析 lingo.User（ID、角色、项目）
