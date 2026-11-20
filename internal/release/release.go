@@ -73,7 +73,8 @@ type Store interface {
 
 // Query 是版本列表的条件。
 type Query struct {
-	Projects []string // 调用者可访问的项目，必填
+	All      bool     // 不限项目（调用者未限定项目范围）
+	Projects []string // All 为假时调用者可访问的项目
 	Project  string
 	Repo     string
 	BeforeID int64
@@ -121,10 +122,13 @@ func (s *Service) List(ctx context.Context, p auth.Principal, q Query) ([]*Relea
 	if !p.Known() {
 		return nil, fmt.Errorf("%w: unknown role", ticket.ErrForbidden)
 	}
+	if q.Repo != "" && !strings.Contains(q.Repo, "/") {
+		return nil, fmt.Errorf("%w: repo must be owner/name", ticket.ErrInvalid)
+	}
 	if q.Project != "" && !p.InProject(q.Project) {
 		return nil, nil
 	}
-	q.Projects = p.Projects
+	q.All, q.Projects = len(p.Projects) == 0, p.Projects
 	q.Limit = ticket.Limit(q.Limit, ticket.DefaultLimit)
 	return s.o.Store.ListReleases(ctx, q)
 }

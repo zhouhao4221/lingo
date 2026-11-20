@@ -416,6 +416,23 @@ func commentAuthor(c *ticket.Comment) string {
 	return "灵问后台"
 }
 
+// commentHeading 是补充评论在 Gitea 中的标题：研发 Agent 的回复标明已回复提交人，其余为“补充（署名）”。
+func commentHeading(c *ticket.Comment) string {
+	if c.Source == "agent" {
+		return "研发已回复提交人"
+	}
+	return "补充（" + commentAuthor(c) + "）"
+}
+
+// commentText 是机器人发到 Issue 的评论正文；研发 Agent 的回复带对外标记，研发在 Gitea 里能看出这条已转给提交人。
+func commentText(c *ticket.Comment) string {
+	text := "**" + commentHeading(c) + "：**\n\n" + stripMarkers(c.Body)
+	if c.Source == "agent" {
+		text += "\n\n" + gitea.PublicMarker
+	}
+	return text
+}
+
 // commentWait 是补充评论等待 Issue 建好时的推迟间隔：建单任务可能在退避重试，不必频繁空转。
 const commentWait = time.Minute
 
@@ -448,11 +465,7 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 		return nil // 工单未转出（或建单失败）：补充留在灵问
 	}
 	owner, name, _ := strings.Cut(t.Repo, "/")
-	body := "**来自" + commentAuthor(c) + "的补充：**\n\n" + stripMarkers(c.Body)
-	if c.Source == "agent" {
-		// 研发 Agent 经灵问回复提交人：带对外标记，研发在 Gitea 里能看出这条已转给提交人
-		body = "**已回复提交人：**\n\n" + stripMarkers(c.Body) + "\n\n" + gitea.PublicMarker
-	}
+	body := commentText(c)
 	giteaID := c.PostedID
 	if giteaID == 0 {
 		gc, err := w.o.Issues.CreateComment(ctx, owner, name, t.IssueNumber, body)
@@ -533,7 +546,7 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Co
 		b.WriteString("### " + id + "\n\n" + strings.Join(fields[id], "\n") + "\n\n")
 	}
 	for _, c := range comments {
-		b.WriteString("### 补充（" + commentAuthor(&c) + "，" + c.At.UTC().Format("2006-01-02 15:04 UTC") + "）\n\n" + stripMarkers(c.Body) + "\n\n")
+		b.WriteString("### " + commentHeading(&c) + "（" + c.At.UTC().Format("2006-01-02 15:04 UTC") + "）\n\n" + stripMarkers(c.Body) + "\n\n")
 	}
 	b.WriteString("---\n\n")
 	b.WriteString("- 项目：" + t.ProjectKey + "\n")

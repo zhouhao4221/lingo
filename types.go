@@ -208,7 +208,7 @@ type Ticket struct {
 // Comment 是工单评论：提交人补充、后台答复、研发在 Gitea 的回复。external 只能看到对外评论。
 type Comment struct {
 	ID         int64     `json:"id"`
-	Source     string    `json:"source"` // user | staff | gitea
+	Source     string    `json:"source"` // user（提交人）| staff（后台人员）| agent（研发 Agent 经 MCP 回复）| gitea（Gitea 评论）
 	AuthorID   string    `json:"author_id,omitempty"`
 	AuthorName string    `json:"author_name,omitempty"` // 来自 Gitea 时为研发账号 login
 	Body       string    `json:"body"`

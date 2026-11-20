@@ -80,6 +80,9 @@ func TestProtocol(t *testing.T) {
 	if w, _ := post(t, s, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, nil); w.Code != 202 {
 		t.Errorf("notification: %d", w.Code)
 	}
+	if w, _ := post(t, s, `{"jsonrpc":"2.0","id":9,"method":"ping"}`, nil); !strings.Contains(w.Body.String(), `"result":{}`) {
+		t.Errorf("ping response = %s", w.Body)
+	}
 	if w, _ := post(t, s, `{"jsonrpc":"2.0","id":"srv-1","result":{}}`, nil); w.Code != 202 {
 		t.Errorf("client response: %d", w.Code)
 	}

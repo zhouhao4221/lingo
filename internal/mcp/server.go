@@ -75,11 +75,32 @@ type request struct {
 	Error   json.RawMessage `json:"error,omitempty"`
 }
 
+// response 是 JSON-RPC 响应：恰好含 result 与 error 之一（成功时 result 即使为空对象也要输出）。
 type response struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
+	JSONRPC string
+	ID      json.RawMessage
+	Result  any
+	Error   *rpcError
+}
+
+// MarshalJSON 实现 json.Marshaler。
+func (r response) MarshalJSON() ([]byte, error) {
+	if r.Error != nil {
+		return json.Marshal(struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Error   *rpcError       `json:"error"`
+		}{r.JSONRPC, r.ID, r.Error})
+	}
+	result := r.Result
+	if result == nil {
+		result = map[string]any{}
+	}
+	return json.Marshal(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  any             `json:"result"`
+	}{r.JSONRPC, r.ID, result})
 }
 
 type rpcError struct {
@@ -116,7 +137,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.o.MaxBody))
 	if err != nil {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "read request body failed", http.StatusBadRequest)
+		}
 		return
 	}
 	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '[' {

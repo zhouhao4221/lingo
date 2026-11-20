@@ -37,10 +37,14 @@ func (l *Lingo) ListProjects(ctx context.Context, u User) ([]ProjectInfo, error)
 // ListReleases 返回 u 可访问项目的版本记录，新的在前；project、repo 可空；beforeID 为上一页最后一条的 ID；
 // limit 为 0 时默认 50，最多 200。
 func (l *Lingo) ListReleases(ctx context.Context, u User, project, repo string, beforeID int64, limit int) ([]Release, error) {
+	p := l.principal(u)
+	if !p.Known() {
+		return nil, ErrForbidden
+	}
 	if err := l.ensureProjects(ctx); err != nil {
 		return nil, err
 	}
-	rs, err := l.releases.List(ctx, l.principal(u), release.Query{Project: project, Repo: repo, BeforeID: beforeID, Limit: limit})
+	rs, err := l.releases.List(ctx, p, release.Query{Project: project, Repo: repo, BeforeID: beforeID, Limit: limit})
 	if err != nil {
 		return nil, publicErr(err)
 	}
@@ -54,6 +58,12 @@ func (l *Lingo) ListReleases(ctx context.Context, u User, project, repo string, 
 // GetRelease 返回版本详情：关联工单只含 u 可见的；版本所在项目不可访问时返回 ErrNotFound。
 func (l *Lingo) GetRelease(ctx context.Context, u User, id int64) (ReleaseDetail, error) {
 	p := l.principal(u)
+	if !p.Known() {
+		return ReleaseDetail{}, ErrNotFound
+	}
+	if err := l.ensureProjects(ctx); err != nil {
+		return ReleaseDetail{}, err
+	}
 	d, err := l.releases.Get(ctx, p, id, l.tickets.GetMany)
 	if errors.Is(err, release.ErrNotFound) {
 		return ReleaseDetail{}, ErrNotFound

@@ -148,7 +148,7 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 	})
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.comments) != 1 || !strings.Contains(g.comments[0], "来自提交人的补充") || !strings.Contains(g.comments[0], "补充日志") {
+	if len(g.comments) != 1 || !strings.Contains(g.comments[0], "补充（提交人）") || !strings.Contains(g.comments[0], "补充日志") {
 		t.Errorf("comments = %v", g.comments)
 	}
 	if len(g.assets) != 3 || !strings.HasPrefix(g.assets[2], "/repos/demo/api/issues/comments/501/assets:app.log") {

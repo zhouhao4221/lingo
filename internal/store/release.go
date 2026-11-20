@@ -26,11 +26,11 @@ func (s *Store) ListReleases(ctx context.Context, q release.Query) ([]*release.R
 	owner, name, _ := strings.Cut(q.Repo, "/")
 	rows, err := s.db.QueryContext(ctx, "SELECT "+releaseColumns+`, rp.owner || '/' || rp.name FROM releases r
 		JOIN repos rp ON rp.id = r.repo_id JOIN projects p ON p.id = rp.project_id
-		WHERE p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
+		WHERE ($7 OR p.key = ANY(($1::text)::text[])) AND ($2 = '' OR p.key = $2)
 		  AND ($3 = '' OR (lower(rp.owner) = lower($3) AND lower(rp.name) = lower($4)))
 		  AND ($5::bigint = 0 OR r.id < $5::bigint)
 		ORDER BY r.id DESC LIMIT $6`,
-		textArray(q.Projects), q.Project, owner, name, q.BeforeID, q.Limit)
+		textArray(q.Projects), q.Project, owner, name, q.BeforeID, q.Limit, q.All)
 	if err != nil {
 		return nil, fmt.Errorf("store: list releases: %w", err)
 	}
