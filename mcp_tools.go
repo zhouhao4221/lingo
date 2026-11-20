@@ -17,12 +17,21 @@ func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵问（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
 进展回传给提交人。研发 Agent 可用 get_ticket 读取工单上下文（含提交人的补充与附件列表），用 reply_ticket 回复提交人
-（会同步到 Issue，并通知提交人）；Gitea 中的普通评论不会转给提交人。所有数据按调用者身份隔离。`
+（会同步到 Issue，并通知提交人）。所有数据按调用者身份隔离。`
+
+// replyModeNote 说明 Gitea 评论是否会转给提交人，随 GiteaConfig.ReplyMode 变化。
+func (l *Lingo) replyModeNote() string {
+	if l.cfg.Gitea.ReplyMode == ReplyAll {
+		return "\n注意：本实例把 Gitea 中所有非机器人评论都转给提交人，内部讨论不要写在工单 Issue 下。"
+	}
+	return "\nGitea 中的普通评论不会转给提交人；以 /reply 开头的评论会转给提交人。"
+}
 
 func (l *Lingo) newMCPHandler() http.Handler {
 	return mcp.New(mcp.Options{
-		Name: "lingo", Version: "0.1.0", Instructions: mcpInstructions,
-		Authenticate: func(r *http.Request) (any, error) { return l.cfg.Authenticate(r) },
+		Name: "lingo", Version: "0.1.0", Instructions: mcpInstructions + l.replyModeNote(),
+		AllowedOrigins: l.cfg.MCPAllowedOrigins,
+		Authenticate:   func(r *http.Request) (any, error) { return l.cfg.Authenticate(r) },
 		ErrorText: func(err error) (string, bool) {
 			if status, _ := restError(err); status != 0 {
 				return err.Error(), true
@@ -62,11 +71,11 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 	return []mcp.Tool{
 		tool("list_projects", "列出可对接的项目及其仓库。提交工单、查询版本时用 project（项目 key）与 repo（owner/name）指定范围。",
 			`{"type":"object","properties":{}}`,
-			func(ctx context.Context, u User, _ none) (any, error) { return wrap(l.ListProjects(ctx, u)) }),
+			func(ctx context.Context, u User, _ none) (any, error) { return list(l.ListProjects(ctx, u)) }),
 		tool("list_ticket_types", "列出可提交的工单类型与各自的表单字段（取自仓库 Issue 模板）。create_ticket 的 fields 按字段 id 填写。",
 			`{"type":"object","properties":{"project":{"type":"string"},"repo":{"type":"string"}}}`,
 			func(ctx context.Context, u User, a struct{ Project, Repo string }) (any, error) {
-				return wrap(l.TicketTypes(ctx, u, a.Project, a.Repo))
+				return list(l.TicketTypes(ctx, u, a.Project, a.Repo))
 			}),
 		tool("create_ticket", "以当前用户身份提交工单（咨询 / Bug / 需求）。按项目设置自动转出到 Gitea，或进入待后台确认。",
 			`{"type":"object","required":["type"],"properties":{
@@ -113,7 +122,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				Before int64
 				Limit  int
 			}) (any, error) {
-				return wrap(l.ListMyTickets(ctx, u, a.Status, a.Before, a.Limit))
+				return list(l.ListMyTickets(ctx, u, a.Status, a.Before, a.Limit))
 			}),
 		tool("reply_ticket", "在工单上留言，对提交人可见：提交人补充说明、后台人员答复，或研发 Agent 回复提交人（同步到 Gitea Issue 并通知提交人）。",
 			`{"type":"object","required":["id","body"],"properties":{"id":{"type":"integer"},"body":{"type":"string"}}}`,
@@ -132,7 +141,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				After int64
 				Limit int
 			}) (any, error) {
-				return wrap(l.ListEvents(ctx, u, a.After, a.Limit))
+				return list(l.ListEvents(ctx, u, a.After, a.Limit))
 			}),
 		tool("list_triage", "列出待后台确认的工单（reviewer / admin），按进入待确认的先后。",
 			`{"type":"object","properties":{"project":{"type":"string"},"type":`+typeEnum+`,"after":{"type":"integer"},"limit":{"type":"integer"}}}`,
@@ -142,7 +151,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				After   int64
 				Limit   int
 			}) (any, error) {
-				return wrap(l.ListTriage(ctx, u, TriageFilter{ProjectKey: a.Project, Type: a.Type, AfterID: a.After, Limit: a.Limit}))
+				return list(l.ListTriage(ctx, u, TriageFilter{ProjectKey: a.Project, Type: a.Type, AfterID: a.After, Limit: a.Limit}))
 			}),
 		tool("forward_ticket", "把待确认工单转出到 Gitea（reviewer / admin），可修改标题、类型、仓库并附说明；attachment_ids 省略表示附件全部转出。",
 			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"},"title":{"type":"string"},"type":`+typeEnum+`,
@@ -200,7 +209,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				Before        int64
 				Limit         int
 			}) (any, error) {
-				return wrap(l.ListReleases(ctx, u, a.Project, a.Repo, a.Before, a.Limit))
+				return list(l.ListReleases(ctx, u, a.Project, a.Repo, a.Before, a.Limit))
 			}),
 		tool("get_release", "查看版本：说明、关联的工单（按调用者可见性过滤）与上线记录。",
 			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}`,
@@ -211,15 +220,4 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				return l.GetRelease(ctx, u, a.ID)
 			}),
 	}
-}
-
-// wrap 把列表结果包成对象（MCP structuredContent 须为对象），空列表为 []。
-func wrap[T any](v []T, err error) (any, error) {
-	if err != nil {
-		return nil, err
-	}
-	if v == nil {
-		v = []T{}
-	}
-	return map[string]any{"items": v}, nil
 }

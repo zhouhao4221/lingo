@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/zhouhao4221/lingo/internal/release"
-	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
 // ListProjects 返回 u 可访问的项目及其仓库（Config 中声明的项目，按 User.Projects 过滤）。
@@ -55,9 +54,7 @@ func (l *Lingo) ListReleases(ctx context.Context, u User, project, repo string, 
 // GetRelease 返回版本详情：关联工单只含 u 可见的；版本所在项目不可访问时返回 ErrNotFound。
 func (l *Lingo) GetRelease(ctx context.Context, u User, id int64) (ReleaseDetail, error) {
 	p := l.principal(u)
-	d, err := l.releases.Get(ctx, p, id, func(ctx context.Context, id int64) (*ticket.Ticket, error) {
-		return l.tickets.Get(ctx, p, id)
-	})
+	d, err := l.releases.Get(ctx, p, id, l.tickets.GetMany)
 	if errors.Is(err, release.ErrNotFound) {
 		return ReleaseDetail{}, ErrNotFound
 	}

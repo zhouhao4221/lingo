@@ -114,6 +114,14 @@ func (s *Store) Get(ctx context.Context, id int64) (*ticket.Ticket, error) {
 	return scanTicket(s.db.QueryRowContext(ctx, "SELECT "+ticketColumns+" WHERE t.id = $1", id))
 }
 
+// GetMany 实现 ticket.Store。
+func (s *Store) GetMany(ctx context.Context, ids []int64) ([]*ticket.Ticket, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.tickets(ctx, "SELECT "+ticketColumns+" WHERE t.id = ANY(($1::text)::bigint[]) ORDER BY t.id", textArrayInt(ids))
+}
+
 func (x *ticketTx) lock(ctx context.Context, where string, args ...any) (*ticket.Ticket, error) {
 	return scanTicket(x.tx.QueryRowContext(ctx, "SELECT "+ticketColumns+" WHERE "+where+" FOR UPDATE OF t", args...))
 }

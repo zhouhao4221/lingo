@@ -61,7 +61,7 @@ type Tx interface {
 // Store 是版本仓储，由 internal/store 实现。
 type Store interface {
 	InReleaseTx(ctx context.Context, fn func(Tx) error) error
-	// ListReleases 返回项目范围内的版本（新的在前）；project / repo 为空不过滤，beforeID 为游标。
+	// ListReleases 返回项目范围内的版本（按记录 ID 倒序，新的在前）；project / repo 为空不过滤，beforeID 为游标。
 	ListReleases(ctx context.Context, q Query) ([]*Release, error)
 	// GetRelease 返回版本及其项目 key；不存在返回 ErrNotFound。
 	GetRelease(ctx context.Context, id int64) (*Release, string, error)
@@ -125,22 +125,19 @@ func (s *Service) List(ctx context.Context, p auth.Principal, q Query) ([]*Relea
 		return nil, nil
 	}
 	q.Projects = p.Projects
-	if q.Limit <= 0 || q.Limit > ticket.MaxLimit {
-		q.Limit = ticket.DefaultLimit
-	}
+	q.Limit = ticket.Limit(q.Limit, ticket.DefaultLimit)
 	return s.o.Store.ListReleases(ctx, q)
 }
 
 // Detail 是版本详情。
 type Detail struct {
 	*Release
-	ProjectKey  string
 	Tickets     []*ticket.Ticket // 调用者可见的关联工单
 	Deployments []DeploymentRecord
 }
 
-// Get 返回版本详情；版本所在项目不在调用者范围内时返回 ErrNotFound。关联工单按 tickets 的可见性过滤。
-func (s *Service) Get(ctx context.Context, p auth.Principal, id int64, tickets func(ctx context.Context, id int64) (*ticket.Ticket, error)) (*Detail, error) {
+// Get 返回版本详情；版本所在项目不在调用者范围内时返回 ErrNotFound。关联工单经 tickets 一次读出，按 ticket.Visible 过滤。
+func (s *Service) Get(ctx context.Context, p auth.Principal, id int64, tickets func(ctx context.Context, ids []int64) ([]*ticket.Ticket, error)) (*Detail, error) {
 	r, key, err := s.o.Store.GetRelease(ctx, id)
 	if err != nil {
 		return nil, err
@@ -148,20 +145,19 @@ func (s *Service) Get(ctx context.Context, p auth.Principal, id int64, tickets f
 	if !p.Known() || !p.InProject(key) {
 		return nil, ErrNotFound
 	}
-	d := &Detail{Release: r, ProjectKey: key}
+	d := &Detail{Release: r}
 	ids, err := s.o.Store.ReleaseTicketIDs(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	for _, tid := range ids {
-		t, err := tickets(ctx, tid)
-		if errors.Is(err, ticket.ErrNotFound) {
-			continue
+	ts, err := tickets(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range ts {
+		if ticket.Visible(p, t) {
+			d.Tickets = append(d.Tickets, t)
 		}
-		if err != nil {
-			return nil, err
-		}
-		d.Tickets = append(d.Tickets, t)
 	}
 	if d.Deployments, err = s.o.Store.ReleaseDeployments(ctx, id); err != nil {
 		return nil, err

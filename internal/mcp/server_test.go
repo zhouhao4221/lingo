@@ -80,6 +80,9 @@ func TestProtocol(t *testing.T) {
 	if w, _ := post(t, s, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, nil); w.Code != 202 {
 		t.Errorf("notification: %d", w.Code)
 	}
+	if w, _ := post(t, s, `{"jsonrpc":"2.0","id":"srv-1","result":{}}`, nil); w.Code != 202 {
+		t.Errorf("client response: %d", w.Code)
+	}
 	_, list := post(t, s, `{"jsonrpc":"2.0","id":"a","method":"tools/list"}`, nil)
 	if tools := list["result"].(map[string]any)["tools"].([]any); len(tools) != 4 || list["id"] != "a" {
 		t.Errorf("tools/list = %v", list)
@@ -126,6 +129,10 @@ func TestTransportChecks(t *testing.T) {
 	}
 	if w, _ := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"ping"}`, map[string]string{"Origin": "http://example.com"}); w.Code != 200 {
 		t.Errorf("same origin: %d", w.Code) // httptest 的 Host 为 example.com
+	}
+	s.o.AllowedOrigins = []string{"https://app.example.com/"}
+	if w, _ := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"ping"}`, map[string]string{"Origin": "https://app.example.com"}); w.Code != 200 {
+		t.Errorf("allowed origin: %d", w.Code)
 	}
 	r := httptest.NewRequest("GET", "/mcp", nil)
 	w := httptest.NewRecorder()

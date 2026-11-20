@@ -15,6 +15,8 @@ type Store interface {
 	HasIssue(ctx context.Context, repo string, number int64) (bool, error)
 	// Get 读取工单（不加锁），含修复版本与上线时间；不存在返回 ErrNotFound。
 	Get(ctx context.Context, id int64) (*Ticket, error)
+	// GetMany 一次读取多张工单（不加锁），不存在的跳过，按 ID 升序。
+	GetMany(ctx context.Context, ids []int64) ([]*Ticket, error)
 }
 
 // Tx 是事务内的工单操作。Lock* 以 SELECT … FOR UPDATE 锁定工单，同一工单的并发更新串行执行。

@@ -21,7 +21,7 @@ func (s *Store) InReleaseTx(ctx context.Context, fn func(release.Tx) error) erro
 	return s.inTx(ctx, func(x *ticketTx) error { return fn(releaseTx{x}) })
 }
 
-// ListReleases 实现 release.Store。
+// ListReleases 实现 release.Store：按记录 ID 倒序（与 before 游标一致，翻页不重不漏），通常即发布先后。
 func (s *Store) ListReleases(ctx context.Context, q release.Query) ([]*release.Release, error) {
 	owner, name, _ := strings.Cut(q.Repo, "/")
 	rows, err := s.db.QueryContext(ctx, "SELECT "+releaseColumns+`, rp.owner || '/' || rp.name FROM releases r
@@ -29,7 +29,7 @@ func (s *Store) ListReleases(ctx context.Context, q release.Query) ([]*release.R
 		WHERE p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
 		  AND ($3 = '' OR (lower(rp.owner) = lower($3) AND lower(rp.name) = lower($4)))
 		  AND ($5::bigint = 0 OR r.id < $5::bigint)
-		ORDER BY COALESCE(r.published_at, r.synced_at) DESC, r.id DESC LIMIT $6`,
+		ORDER BY r.id DESC LIMIT $6`,
 		textArray(q.Projects), q.Project, owner, name, q.BeforeID, q.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: list releases: %w", err)

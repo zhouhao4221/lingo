@@ -403,7 +403,11 @@ func escapeMarkdown(s string) string { return mdEscaper.Replace(s) }
 
 // commentAuthor 是补充评论在 Gitea 中的署名：提交人不具名（PRD 3.2.0.6），后台人员注明姓名。
 func commentAuthor(c *ticket.Comment) string {
-	if c.Source != "staff" {
+	switch c.Source {
+	case "agent":
+		return "研发"
+	case "staff":
+	default:
 		return "提交人"
 	}
 	if c.AuthorName != "" {

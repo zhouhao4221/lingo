@@ -37,6 +37,8 @@ type Options struct {
 	Tools     []Tool
 	Logger    *slog.Logger
 	MaxBody   int64 // 默认 1 MB
+	// AllowedOrigins 是额外允许的浏览器来源（如 "https://app.example.com"），用于前端与 MCP 不同源或经反向代理改写 Host 的部署。
+	AllowedOrigins []string
 }
 
 // Server 是 MCP Streamable HTTP 服务端：只接受 POST 的 JSON-RPC 请求并直接返回 JSON 响应，不开 SSE 流、不维护会话
@@ -69,6 +71,8 @@ type request struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"` // 客户端发来的响应
+	Error   json.RawMessage `json:"error,omitempty"`
 }
 
 type response struct {
@@ -94,18 +98,12 @@ const (
 
 // ServeHTTP 实现 http.Handler。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) {
+	if !s.allowedOrigin(r) {
 		http.Error(w, "forbidden origin", http.StatusForbidden)
 		return
 	}
-	switch r.Method {
-	case http.MethodPost:
-	case http.MethodGet, http.MethodDelete:
-		// 不提供服务端推送流，也没有会话可终止
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	default:
+	if r.Method != http.MethodPost {
+		// GET（服务端推送流）与 DELETE（终止会话）都不提供：无状态服务端
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -130,13 +128,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{codeParse, "parse error"}})
 		return
 	}
-	if req.JSONRPC != "2.0" || req.Method == "" {
-		writeJSON(w, response{JSONRPC: "2.0", ID: idOrNull(req.ID), Error: &rpcError{codeInvalidRequest, "invalid request"}})
+	if req.JSONRPC == "2.0" && (req.Method == "" && (len(req.Result) > 0 || len(req.Error) > 0) || req.Method != "" && len(req.ID) == 0) {
+		// 客户端发来的响应与通知（如 notifications/initialized）：按规范回 202，不回内容
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	if len(req.ID) == 0 {
-		// 通知（如 notifications/initialized）与客户端发来的响应：无需回复
-		w.WriteHeader(http.StatusAccepted)
+	if req.JSONRPC != "2.0" || req.Method == "" {
+		writeJSON(w, response{JSONRPC: "2.0", ID: idOrNull(req.ID), Error: &rpcError{codeInvalidRequest, "invalid request"}})
 		return
 	}
 	result, rerr := s.dispatch(r.Context(), user, &req)
@@ -161,11 +159,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// sameOrigin 校验浏览器请求的 Origin 与 Host 一致（MCP 规范要求防 DNS 重绑定）；非浏览器客户端不带 Origin，放行。
-func sameOrigin(r *http.Request) bool {
+// allowedOrigin 校验浏览器请求的 Origin（MCP 规范要求防 DNS 重绑定）：与 Host 同源，或在 AllowedOrigins 中；
+// 非浏览器客户端不带 Origin，放行。
+func (s *Server) allowedOrigin(r *http.Request) bool {
 	o := r.Header.Get("Origin")
 	if o == "" {
 		return true
+	}
+	for _, a := range s.o.AllowedOrigins {
+		if strings.EqualFold(strings.TrimRight(a, "/"), o) {
+			return true
+		}
 	}
 	u, err := url.Parse(o)
 	return err == nil && strings.EqualFold(u.Host, r.Host)
@@ -249,7 +253,7 @@ func (s *Server) call(ctx context.Context, user any, t Tool, args json.RawMessag
 		return toolError("internal error")
 	}
 	res = map[string]any{"content": []map[string]any{{"type": "text", "text": string(b)}}}
-	// structuredContent 须为对象；列表包一层
+	// structuredContent 须为对象：列表结果在这里统一包成 {"items": [...]}
 	if len(b) > 0 && b[0] == '{' {
 		res["structuredContent"] = json.RawMessage(b)
 	} else {

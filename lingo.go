@@ -34,6 +34,9 @@ type Config struct {
 	// TriageRemindAfter 是待确认工单的提醒间隔：超过该时长未处理发出 triage.overdue，之后按同样间隔重复；
 	// 0 表示默认 24 小时，负数关闭提醒（接入方可用 ListTriage 的 PendingBefore 自行实现）。
 	TriageRemindAfter time.Duration
+	// MCPAllowedOrigins 是 MCPHandler 额外允许的浏览器来源（如 "https://app.example.com"）。默认只允许与请求 Host
+	// 同源的浏览器请求（防 DNS 重绑定）；前端与 MCP 不同源、或反向代理改写了 Host 时在此列出。非浏览器客户端不受影响。
+	MCPAllowedOrigins []string
 	// Logger 为空时使用 slog.Default()。
 	Logger *slog.Logger
 }
