@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
@@ -34,10 +33,8 @@ type TicketInput struct {
 	Fields  map[string][]string
 	Context map[string]string // 页面 URL、页面标题、浏览器等，转出时附在 Issue 末尾；不要放个人身份信息
 	Version string            // 提交人正在使用的版本
-	// ConversationID 是从问答转出时的会话 ID。
-	ConversationID int64
-	// AttachmentIDs 是经 UploadAttachment 上传、尚未关联工单的附件（最多 10 个）。
-	AttachmentIDs []int64
+	// Attachments 是接入方附件系统中的附件引用（单个工单含补充最多 10 个）。
+	Attachments []Attachment
 }
 
 // ForwardOptions 是后台人员转出工单时可修改的内容；零值表示不修改。
@@ -46,8 +43,9 @@ type ForwardOptions struct {
 	Type  TicketType
 	Repo  string // "owner/name"，须属于工单所在项目
 	Note  string // 补充说明，写入 Issue
-	// AttachmentIDs 是要随 Issue 转出的工单附件（截图可能含敏感信息，由后台人员勾选）；nil 表示全部，空切片表示不转出。
-	AttachmentIDs *[]int64
+	// AttachmentIDs 是要随 Issue 转出的附件 ID（截图可能含敏感信息，由后台人员勾选；含转出前补充评论的附件，附件 ID
+	// 在整个工单内唯一）；nil 表示全部，空切片表示不转出。转出之后提交人再补充的附件不受勾选限制。
+	AttachmentIDs *[]string
 }
 
 // CreateTicket 以 u 的身份提交工单。按项目与类型的自动转出开关（Project.AutoForward，可被 SetAutoForward 覆盖）
@@ -61,7 +59,7 @@ func (l *Lingo) CreateTicket(ctx context.Context, u User, in TicketInput) (Ticke
 	}
 	t, err := l.tickets.Create(ctx, l.principal(u), ticket.NewTicket{Project: in.Project, Repo: in.Repo, Type: string(in.Type),
 		Title: in.Title, Body: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version,
-		Conversation: in.ConversationID, Attachments: in.AttachmentIDs})
+		Attachments: internalAttachments(in.Attachments)})
 	return l.ticketResult(t, err)
 }
 
@@ -105,7 +103,11 @@ func (l *Lingo) SetAutoForward(ctx context.Context, u User, project string, t Ti
 	if err := l.ensureProjects(ctx); err != nil {
 		return err
 	}
-	return publicErr(l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), &on))
+	if err := l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), &on); err != nil {
+		return publicErr(err)
+	}
+	l.log.Info("auto-forward override set", "project", project, "type", t, "on", on, "by", u.ID) // 开关变更留痕
+	return nil
 }
 
 // ResetAutoForward 删除运行时覆盖，恢复为 Project.AutoForward 的默认值（仅 admin）。
@@ -113,7 +115,11 @@ func (l *Lingo) ResetAutoForward(ctx context.Context, u User, project string, t 
 	if err := l.ensureProjects(ctx); err != nil {
 		return err
 	}
-	return publicErr(l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), nil))
+	if err := l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), nil); err != nil {
+		return publicErr(err)
+	}
+	l.log.Info("auto-forward override reset", "project", project, "type", t, "by", u.ID)
+	return nil
 }
 
 // ListMyTickets 返回 u 本人提交的工单，新的在前；status 可空；beforeID 为上一页最后一条的 ID（首页传 0）；
@@ -136,57 +142,31 @@ func (l *Lingo) ticketDetail(ctx context.Context, u User, id int64) (Ticket, []C
 	return l.publicTicket(t), publicComments(cs), out, nil
 }
 
-func publicAttachment(a *ticket.Attachment) Attachment {
-	return Attachment{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType, Size: a.Size, CommentID: a.CommentID,
-		Forwarded: a.Forwarded, CreatedAt: a.CreatedAt}
+func publicAttachment(a ticket.Attachment) Attachment {
+	return Attachment{ID: a.ID, Name: a.Name, URL: a.URL, ContentType: a.ContentType, Size: a.Size, CommentID: a.CommentID,
+		Forwarded: a.Forwarded(), GiteaURL: a.GiteaURL, Error: a.Error}
 }
 
-// UploadAttachment 以 u 的身份上传附件（截图、日志、文件），之后在 CreateTicket / AddTicketComment 中按 ID 引用；
-// 24 小时内未关联工单的附件会被清理。类型限 png / jpg / gif / webp / pdf / txt / log / zip（图片按内容校验），
-// 大小上限 Config.MaxAttachmentBytes（默认 10 MB）。
-func (l *Lingo) UploadAttachment(ctx context.Context, u User, filename string, r io.Reader) (Attachment, error) {
-	data, err := io.ReadAll(io.LimitReader(r, l.maxAttachmentBytes()+1))
-	if err != nil {
-		return Attachment{}, fmt.Errorf("lingo: read attachment: %w", err)
+func internalAttachments(as []Attachment) []ticket.Attachment {
+	if len(as) == 0 {
+		return nil
 	}
-	return l.uploadBytes(ctx, u, filename, data)
-}
-
-// uploadBytes 保存已读入内存的附件（REST 上传已读出内容，避免再复制一次）。
-func (l *Lingo) uploadBytes(ctx context.Context, u User, filename string, data []byte) (Attachment, error) {
-	a, err := l.tickets.Upload(ctx, l.principal(u), filename, data, l.maxAttachmentBytes())
-	if err != nil {
-		return Attachment{}, publicErr(err)
+	out := make([]ticket.Attachment, 0, len(as))
+	for _, a := range as {
+		out = append(out, ticket.Attachment{ID: a.ID, Name: a.Name, URL: a.URL, ContentType: a.ContentType, Size: a.Size})
 	}
-	return publicAttachment(a), nil
+	return out
 }
 
-// GetAttachment 返回附件元数据与内容：上传人本人，或能看到所属工单的人（随内部评论上传的附件 external 看不到）；
-// 无权访问时返回 ErrNotFound。
-func (l *Lingo) GetAttachment(ctx context.Context, u User, id int64) (Attachment, []byte, error) {
-	a, err := l.tickets.Download(ctx, l.principal(u), id)
-	if err != nil {
-		return Attachment{}, nil, publicErr(err)
-	}
-	return publicAttachment(a), a.Data, nil
-}
-
-// AddTicketComment 在工单上写一条对提交人可见的评论：提交人本人补充、reviewer / admin 答复（二者可带已上传的附件），
+// AddTicketComment 在工单上写一条对提交人可见的评论：提交人本人补充、reviewer / admin 答复（二者可带附件引用），
 // 或研发 Agent 回复提交人（agent 只能回复已有 Gitea Issue 的工单，否则返回 ErrConflict；不能带附件）。
 // 工单已转出时由机器人同步为 Issue 评论；提交人在 need_info 时补充，工单回到 in_progress。
-func (l *Lingo) AddTicketComment(ctx context.Context, u User, id int64, body string, attachmentIDs []int64) (Comment, error) {
-	c, err := l.tickets.AddComment(ctx, l.principal(u), id, body, attachmentIDs)
+func (l *Lingo) AddTicketComment(ctx context.Context, u User, id int64, body string, attachments []Attachment) (Comment, error) {
+	c, err := l.tickets.AddComment(ctx, l.principal(u), id, body, internalAttachments(attachments))
 	if err != nil {
 		return Comment{}, publicErr(err)
 	}
 	return publicComments([]ticket.Comment{*c})[0], nil
-}
-
-func (l *Lingo) maxAttachmentBytes() int64 {
-	if l.cfg.MaxAttachmentBytes > 0 {
-		return l.cfg.MaxAttachmentBytes
-	}
-	return 10 << 20
 }
 
 func publicComments(cs []ticket.Comment) []Comment {

@@ -75,10 +75,10 @@ func TestWebhookHandlerStoresDeliveries(t *testing.T) {
 	if w := deliver(h, "d-4", "push", `{"repository":{"full_name":"demo/api"}}`, "s3cret"); w.Body.String() != "pong" {
 		t.Errorf("ping: %d %s", w.Code, w.Body)
 	}
-	if n := count("SELECT count(*) FROM webhook_deliveries WHERE kind = 'comment.created' AND repo = 'demo/api' AND issue_number = 12"); n != 1 {
+	if n := count("SELECT count(*) FROM lingo_webhook_deliveries WHERE kind = 'comment.created' AND repo = 'demo/api' AND issue_number = 12"); n != 1 {
 		t.Errorf("stored deliveries = %d", n)
 	}
-	if n := count("SELECT count(*) FROM webhook_pings WHERE repo = 'demo/api'"); n != 1 {
+	if n := count("SELECT count(*) FROM lingo_repo_state WHERE repo = 'demo/api' AND kind = 'ping'"); n != 1 {
 		t.Errorf("pings = %d", n)
 	}
 }
@@ -88,7 +88,7 @@ func TestWebhookHandlerWithoutSecretRejects(t *testing.T) {
 	if w := deliver(l.WebhookHandler(), "d-1", "issue_comment", commentPayload, ""); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("no secret: %d", w.Code)
 	}
-	if n := count("SELECT count(*) FROM webhook_deliveries"); n != 0 {
+	if n := count("SELECT count(*) FROM lingo_webhook_deliveries"); n != 0 {
 		t.Errorf("stored without secret: %d", n)
 	}
 }

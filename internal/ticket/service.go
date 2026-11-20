@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,8 +33,6 @@ func sourceOf(ctx context.Context) string {
 type ServiceOptions struct {
 	Store   Store
 	Queries QueryStore // 列表与变更流查询；为空时用 Store（若其实现了 QueryStore）
-	// Attachments 是附件仓储；为空时用 Store（若其实现了 AttachmentStore）。
-	Attachments AttachmentStore
 	// AutoForward 返回代码中声明的默认值（lingo.Project.AutoForward），运行时覆盖优先；为空时一律手动确认。
 	AutoForward func(projectKey, typ string) bool
 	IssueURL    func(repo string, number int64) string
@@ -68,11 +67,6 @@ func NewService(o ServiceOptions) (*Service, error) {
 		}
 		o.Queries = q
 	}
-	if o.Attachments == nil {
-		if a, ok := o.Store.(AttachmentStore); ok {
-			o.Attachments = a
-		}
-	}
 	if o.Declared == nil {
 		o.Declared = func(string, string) bool { return true }
 	}
@@ -81,17 +75,16 @@ func NewService(o ServiceOptions) (*Service, error) {
 
 // NewTicket 是提交工单的输入。
 type NewTicket struct {
-	Project      string // 项目 key，必填（根包负责缺省为默认项目）
-	Repo         string // "owner/name"，可选，须属于该项目；为空取项目默认仓库
-	Type         string
-	Title        string // 为空时取正文首行
-	Body         string
-	Fields       map[string][]string
-	Context      map[string]string
-	Version      string
-	Conversation int64
-	Source       string  // api | mcp | go
-	Attachments  []int64 // 调用者已上传、尚未关联的附件
+	Project     string // 项目 key，必填（根包负责缺省为默认项目）
+	Repo        string // "owner/name"，可选，须属于该项目；为空取项目默认仓库
+	Type        string
+	Title       string // 为空时取正文首行
+	Body        string
+	Fields      map[string][]string
+	Context     map[string]string
+	Version     string
+	Source      string       // api | mcp | go
+	Attachments []Attachment // 接入方附件系统中的附件引用
 }
 
 const (
@@ -114,6 +107,10 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 	if in.Body == "" && !textutil.AnyValue(in.Fields) {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
 	}
+	atts, err := CleanAttachments(in.Attachments)
+	if err != nil {
+		return nil, err
+	}
 	titleAuto := in.Title == ""
 	if titleAuto {
 		in.Title = summarize(in.Body, in.Fields)
@@ -122,23 +119,13 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		in.Source = sourceOf(ctx)
 	}
 	var t *Ticket
-	err := s.o.Store.InTx(ctx, func(tx Tx) error {
+	err = s.o.Store.InTx(ctx, func(tx Tx) error {
 		proj, err := tx.Project(ctx, in.Project)
 		if err != nil {
 			return err
 		}
-		if in.Conversation != 0 {
-			owner, err := tx.ConversationOwner(ctx, in.Conversation)
-			if errors.Is(err, ErrNotFound) || (err == nil && owner != p.ID) {
-				return fmt.Errorf("%w: conversation %d", ErrInvalid, in.Conversation)
-			}
-			if err != nil {
-				return err
-			}
-		}
 		t = &Ticket{ProjectID: proj.ID, ProjectKey: proj.Key, Type: in.Type, Title: in.Title, Body: in.Body,
-			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email,
-			Conversation: in.Conversation, TitleAuto: titleAuto}
+			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email, TitleAuto: titleAuto, Attachments: atts}
 		if err := s.setRepo(ctx, tx, t, proj, in.Repo); err != nil {
 			return err
 		}
@@ -159,9 +146,6 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 			t.Status, t.TriageSince = StatusPendingTriage, &now
 		}
 		if err := tx.Insert(ctx, t); err != nil {
-			return err
-		}
-		if err := linkAttachments(ctx, tx, p, t.ID, 0, in.Attachments); err != nil {
 			return err
 		}
 		if err := tx.AddHistory(ctx, History{TicketID: t.ID, ActorID: p.ID, Source: in.Source, Kind: string(notify.TicketCreated),
@@ -214,19 +198,26 @@ func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, 
 	return nil
 }
 
-// enqueueCreate 入队建 Issue；attachments 为要转出的工单附件，nil 表示全部。
-func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, attachments *[]int64, retry time.Time) error {
+// enqueueCreate 入队建 Issue；attachments 为后台人员勾选转出的附件 ID，nil 表示全部。
+func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, attachments *[]string, retry time.Time) error {
 	key := OpCreateIssue + ":ticket:" + strconv.FormatInt(t.ID, 10)
 	if !retry.IsZero() {
 		key += ":retry:" + strconv.FormatInt(retry.UnixNano(), 10) // 上次建单已放弃，重新入队需要新键
 	}
 	payload := map[string]any{"forwarded_by": forwardedBy, "note": note}
 	if attachments != nil {
-		ids := dedupIDs(*attachments)
-		if ids == nil {
-			ids = []int64{} // 指向空切片表示一个都不转出，不能编码成 null（null 表示全部）
+		// 记下未勾选的附件（含建单前补充评论的）：之后才补充的附件不受这次勾选限制
+		have, err := tx.AttachmentIDs(ctx, t.ID)
+		if err != nil {
+			return err
 		}
-		payload["attachment_ids"] = ids
+		exclude := []string{}
+		for _, id := range have {
+			if !slices.Contains(*attachments, id) {
+				exclude = append(exclude, id)
+			}
+		}
+		payload["exclude_attachment_ids"] = exclude
 	}
 	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue, Payload: payload})
 }
@@ -262,7 +253,7 @@ type ForwardInput struct {
 	Repo  string
 	Note  string // 补充说明，写入 Issue
 	// Attachments 是要随 Issue 转出的工单附件（截图可能含敏感信息，由后台人员勾选）；nil 表示全部，空切片表示不转出。
-	Attachments *[]int64
+	Attachments *[]string // 附件 ID
 }
 
 // Forward 把待确认工单转出到 Gitea（reviewer / admin）；建 Issue 失败而变为 abnormal 的工单也可再次转出。
@@ -270,7 +261,7 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 	if in.Type != "" && !ValidType(in.Type) {
 		return nil, fmt.Errorf("%w: type %q", ErrInvalid, in.Type)
 	}
-	return s.triage(ctx, p, id, "forward", func(tx Tx, t *Ticket) (string, error) {
+	return s.triage(ctx, p, id, "forward", func(tx Tx, t *Ticket) (string, string, error) {
 		retry := time.Time{}
 		if t.Status == StatusAbnormal {
 			retry = s.o.Now()
@@ -283,23 +274,20 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 		}
 		proj, err := tx.Project(ctx, t.ProjectKey)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if err := s.setRepo(ctx, tx, t, proj, in.Repo); err != nil {
-			return "", err
+			return "", "", err
 		}
 		if t.RepoID == 0 {
-			return "", fmt.Errorf("%w: repo is required (project has no default repo)", ErrInvalid)
+			return "", "", fmt.Errorf("%w: repo is required (project has no default repo)", ErrInvalid)
 		}
 		t.Status = StatusSubmitted
-		if err := tx.AddTriage(ctx, Triage{TicketID: t.ID, ActorID: p.ID, Action: "forward", Note: in.Note}); err != nil {
-			return "", err
-		}
 		name := p.Name
 		if name == "" {
 			name = p.ID
 		}
-		return "", enqueueCreate(ctx, tx, t, name, in.Note, in.Attachments, retry)
+		return "", in.Note, enqueueCreate(ctx, tx, t, name, in.Note, in.Attachments, retry)
 	})
 }
 
@@ -308,13 +296,13 @@ func (s *Service) Answer(ctx context.Context, p auth.Principal, id int64, answer
 	if answer = strings.TrimSpace(answer); answer == "" {
 		return nil, fmt.Errorf("%w: answer is required", ErrInvalid)
 	}
-	return s.triage(ctx, p, id, "answer", func(tx Tx, t *Ticket) (string, error) {
+	return s.triage(ctx, p, id, "answer", func(tx Tx, t *Ticket) (string, string, error) {
 		t.Status = StatusAnswered
 		if _, err := tx.AddComment(ctx, Comment{TicketID: t.ID, Source: "staff", AuthorID: p.ID, AuthorName: p.Name, Body: answer,
 			Public: true, At: s.o.Now()}); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return answer, tx.AddTriage(ctx, Triage{TicketID: t.ID, ActorID: p.ID, Action: "answer", Note: answer})
+		return answer, "", nil // 答复已作为评论保存
 	})
 }
 
@@ -323,9 +311,9 @@ func (s *Service) Reject(ctx context.Context, p auth.Principal, id int64, reason
 	if reason = strings.TrimSpace(reason); reason == "" {
 		return nil, fmt.Errorf("%w: reason is required", ErrInvalid)
 	}
-	return s.triage(ctx, p, id, "reject", func(tx Tx, t *Ticket) (string, error) {
+	return s.triage(ctx, p, id, "reject", func(tx Tx, t *Ticket) (string, string, error) {
 		t.Status = StatusRejected
-		return reason, tx.AddTriage(ctx, Triage{TicketID: t.ID, ActorID: p.ID, Action: "reject", Note: reason})
+		return reason, reason, nil
 	})
 }
 
@@ -334,32 +322,33 @@ func (s *Service) Merge(ctx context.Context, p auth.Principal, id, target int64,
 	if target == id || target <= 0 {
 		return nil, fmt.Errorf("%w: invalid merge target", ErrInvalid)
 	}
-	return s.triageWith(ctx, p, id, target, "merge", func(tx Tx, t, dst *Ticket) (string, error) {
+	return s.triageWith(ctx, p, id, target, "merge", func(tx Tx, t, dst *Ticket) (string, string, error) {
 		// 目标在同一事务中按 ID 顺序加锁：两张工单互相合并时只有一个能成功
 		if dst == nil || dst.ProjectID != t.ProjectID {
-			return "", fmt.Errorf("%w: merge target %d not found in project", ErrInvalid, target)
+			return "", "", fmt.Errorf("%w: merge target %d not found in project", ErrInvalid, target)
 		}
 		if dst.Status == StatusMerged || dst.Status == StatusRejected {
-			return "", fmt.Errorf("%w: merge target %d is %s", ErrConflict, target, dst.Status)
+			return "", "", fmt.Errorf("%w: merge target %d is %s", ErrConflict, target, dst.Status)
 		}
 		t.Status, t.MergedInto = StatusMerged, target
 		// 之前合并到本工单的重复工单改为跟随最终目标
 		if err := tx.RepointMerged(ctx, t.ID, target); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return note, tx.AddTriage(ctx, Triage{TicketID: t.ID, ActorID: p.ID, Action: "merge", Note: note, TargetID: target})
+		return note, note, nil
 	})
 }
 
-// triage 是四种后台处理的公共流程：鉴权、锁定待确认工单、执行 apply、留痕并发出 ticket.status 与 triage.resolved。
+// triage 是四种后台处理的公共流程：鉴权、锁定待确认工单、执行 apply、留痕（审计 triage.<action>，含备注与合并目标）
+// 并发出 ticket.status 与 triage.resolved。apply 返回事件正文 body 与写入审计的备注 note。
 func (s *Service) triage(ctx context.Context, p auth.Principal, id int64, action string,
-	apply func(tx Tx, t *Ticket) (body string, err error)) (*Ticket, error) {
-	return s.triageWith(ctx, p, id, 0, action, func(tx Tx, t, _ *Ticket) (string, error) { return apply(tx, t) })
+	apply func(tx Tx, t *Ticket) (body, note string, err error)) (*Ticket, error) {
+	return s.triageWith(ctx, p, id, 0, action, func(tx Tx, t, _ *Ticket) (string, string, error) { return apply(tx, t) })
 }
 
 // triageWith 同 triage，另在同一事务内按 ID 顺序锁定关联工单 other（不存在时传给 apply 的为 nil）。
 func (s *Service) triageWith(ctx context.Context, p auth.Principal, id, other int64, action string,
-	apply func(tx Tx, t, other *Ticket) (body string, err error)) (*Ticket, error) {
+	apply func(tx Tx, t, other *Ticket) (body, note string, err error)) (*Ticket, error) {
 	if !p.Staff() {
 		return nil, fmt.Errorf("%w: triage requires reviewer or admin", ErrForbidden)
 	}
@@ -398,7 +387,7 @@ func (s *Service) triageWith(ctx context.Context, p auth.Principal, id, other in
 			return fmt.Errorf("%w: ticket %d is %s, not pending_triage", ErrConflict, id, t.Status)
 		}
 		prev := t.Status
-		body, err := apply(tx, t, o)
+		body, note, err := apply(tx, t, o)
 		if err != nil {
 			return err
 		}
@@ -407,7 +396,7 @@ func (s *Service) triageWith(ctx context.Context, p auth.Principal, id, other in
 			return err
 		}
 		if err := tx.AddHistory(ctx, History{TicketID: t.ID, ActorID: p.ID, Source: sourceOf(ctx), Kind: "triage." + action,
-			Payload: map[string]any{"status": string(t.Status), "prev_status": string(prev)}}); err != nil {
+			Payload: triagePayload(t, prev, note)}); err != nil {
 			return err
 		}
 		if err := tx.Emit(ctx, s.event(t, notify.TicketStatus, prev, p.ID, body)); err != nil {
@@ -547,4 +536,15 @@ func (s *Service) event(t *Ticket, kind notify.Kind, prev Status, actor, body st
 		e.URL = s.o.IssueURL(t.Repo, t.IssueNumber)
 	}
 	return e
+}
+
+func triagePayload(t *Ticket, prev Status, note string) map[string]any {
+	p := map[string]any{"status": string(t.Status), "prev_status": string(prev)}
+	if note != "" {
+		p["note"] = note
+	}
+	if t.MergedInto != 0 {
+		p["merged_into"] = t.MergedInto
+	}
+	return p
 }

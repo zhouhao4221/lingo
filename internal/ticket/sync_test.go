@@ -22,17 +22,14 @@ type memStore struct {
 	repos    map[int64][]RepoRef // project → repos
 	auto     map[string]bool     // "project:type"
 	notes    []Comment
-	triages  []Triage
 	tasks    map[string]Task
 	reminded map[int64]time.Time
 
 	lastEventQuery EventQuery
-	uploads        map[int64]string // 未关联的附件 → 上传人
-	attached       map[int64]int    // 工单 → 已关联附件数
 }
 
 func newMem(ts ...Ticket) *memStore {
-	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{}, reminded: map[int64]time.Time{}, uploads: map[int64]string{}, attached: map[int64]int{},
+	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{}, reminded: map[int64]time.Time{},
 		projects: map[string]*Project{"demo": {ID: 1, Key: "demo", DefaultRepo: &RepoRef{ID: 10, Name: "demo/api"}}, "empty": {ID: 2, Key: "empty"}},
 		repos:    map[int64][]RepoRef{1: {{ID: 10, Name: "demo/api"}, {ID: 11, Name: "demo/web"}}}}
 	for _, t := range ts {
@@ -46,7 +43,7 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 	for id, t := range m.tickets {
 		saved[id] = *t
 	}
-	nh, ne, nn, nt := len(m.history), len(m.events), len(m.notes), len(m.triages)
+	nh, ne, nn := len(m.history), len(m.events), len(m.notes)
 	if err := fn(m); err != nil {
 		for id := range m.tickets {
 			if t, ok := saved[id]; ok {
@@ -55,7 +52,7 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 				delete(m.tickets, id)
 			}
 		}
-		m.history, m.events, m.notes, m.triages = m.history[:nh], m.events[:ne], m.notes[:nn], m.triages[:nt]
+		m.history, m.events, m.notes = m.history[:nh], m.events[:ne], m.notes[:nn]
 		return err
 	}
 	return nil
@@ -154,18 +151,11 @@ func (m *memStore) AutoForwardOverrides(context.Context, []string) (map[string]m
 	return nil, nil
 }
 
-func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]*Attachment, error) {
+func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]Attachment, error) {
 	return nil, nil
 }
 
 func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }
-
-func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {
-	if id == 1 {
-		return "u1", nil
-	}
-	return "", ErrNotFound
-}
 
 func (m *memStore) AddComment(_ context.Context, c Comment) (int64, error) {
 	m.notes = append(m.notes, c)
@@ -174,24 +164,21 @@ func (m *memStore) AddComment(_ context.Context, c Comment) (int64, error) {
 
 func (m *memStore) MarkCommentsForwarded(context.Context, int64, []int64) error { return nil }
 
-func (m *memStore) CountAttachments(_ context.Context, id int64) (int, error) {
-	return m.attached[id], nil
-}
-
-func (m *memStore) LinkAttachments(_ context.Context, ids []int64, user string, ticketID, _ int64) (int, error) {
-	n := 0
-	for _, id := range ids {
-		if owner, ok := m.uploads[id]; ok && owner == user {
-			delete(m.uploads, id)
-			n++
+func (m *memStore) AttachmentIDs(_ context.Context, id int64) ([]string, error) {
+	var out []string
+	if t, ok := m.tickets[id]; ok {
+		for _, a := range t.Attachments {
+			out = append(out, a.ID)
 		}
 	}
-	m.attached[ticketID] += n
-	return n, nil
-}
-func (m *memStore) AddTriage(_ context.Context, a Triage) error {
-	m.triages = append(m.triages, a)
-	return nil
+	for _, c := range m.notes {
+		if c.TicketID == id {
+			for _, a := range c.Attachments {
+				out = append(out, a.ID)
+			}
+		}
+	}
+	return out, nil
 }
 func (m *memStore) Enqueue(_ context.Context, t Task) error {
 	if _, ok := m.tasks[t.Key]; !ok {

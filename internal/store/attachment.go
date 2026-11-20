@@ -3,169 +3,119 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+	"slices"
 
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
-var _ ticket.AttachmentStore = (*Store)(nil)
+// 附件引用存在 lingo_tickets.attachments（工单本身）与 lingo_ticket_comments.attachments（补充评论）两个 jsonb 列中，
+// 元素为 ticket.Attachment；转出结果由 MarkAttachment 按附件 ID 原地更新。
 
-// SaveAttachment 实现 ticket.AttachmentStore。
-func (s *Store) SaveAttachment(ctx context.Context, a *ticket.Attachment) error {
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO attachments (user_id, filename, content_type, size, sha256, data) VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, created_at`, a.UserID, a.Filename, a.ContentType, a.Size, a.SHA256, a.Data).Scan(&a.ID, &a.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("store: save attachment: %w", err)
+func marshalAttachments(as []ticket.Attachment) ([]byte, error) {
+	if as == nil {
+		as = []ticket.Attachment{}
 	}
-	return nil
+	return json.Marshal(as)
 }
 
-const attachmentColumns = `id, user_id, COALESCE(ticket_id, 0), COALESCE(comment_id, 0), filename, content_type, size, sha256,
-	forwarded, gitea_attachment_uuid, created_at`
-
-func scanAttachment(row rowScanner, withData bool) (*ticket.Attachment, error) {
-	var a ticket.Attachment
-	dest := []any{&a.ID, &a.UserID, &a.TicketID, &a.CommentID, &a.Filename, &a.ContentType, &a.Size, &a.SHA256,
-		&a.Forwarded, &a.GiteaUUID, &a.CreatedAt}
-	if withData {
-		dest = append(dest, &a.Data)
-	}
-	if err := row.Scan(dest...); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ticket.ErrNotFound
-		}
-		return nil, fmt.Errorf("store: read attachment: %w", err)
-	}
-	return &a, nil
-}
-
-// GetAttachment 实现 ticket.AttachmentStore。
-func (s *Store) GetAttachment(ctx context.Context, id int64, withData bool) (*ticket.Attachment, error) {
-	cols := attachmentColumns
-	if withData {
-		cols += ", data"
-	}
-	return scanAttachment(s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM attachments WHERE id = $1", id), withData)
-}
-
-// CommentPublic 实现 ticket.AttachmentStore。
-func (s *Store) CommentPublic(ctx context.Context, commentID int64) (bool, error) {
-	var pub bool
-	err := s.db.QueryRowContext(ctx, "SELECT public AND deleted_at IS NULL FROM ticket_comments WHERE id = $1", commentID).Scan(&pub)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("store: comment %d: %w", commentID, err)
-	}
-	return pub, nil
-}
-
-// DeleteOrphanAttachments 实现 ticket.AttachmentStore。
-func (s *Store) DeleteOrphanAttachments(ctx context.Context, before time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < $1", before)
-	if err != nil {
-		return 0, fmt.Errorf("store: delete orphan attachments: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
-}
-
-// TicketAttachments 实现 ticket.QueryStore。
-func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]*ticket.Attachment, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM attachments a
-		LEFT JOIN ticket_comments c ON c.id = a.comment_id
-		WHERE a.ticket_id = $1 AND (NOT $2 OR a.comment_id IS NULL OR (c.public AND c.deleted_at IS NULL))
-		  AND (NOT $3 OR a.forwarded)
-		ORDER BY a.id`, ticketID, publicOnly, forwardedOnly)
+// queryAttachments 列出工单的附件：工单本身的（CommentID = 0）与各补充评论的，按评论、序号排序，并回填提交人。
+// commentID 非 0 时只取该评论的；publicOnly 时排除内部评论与已删除评论的附件。
+func (s *Store) queryAttachments(ctx context.Context, ticketID, commentID int64, publicOnly bool) ([]scannedAttachment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT comment_id, user_id, a, in_body FROM (
+			SELECT 0::bigint AS comment_id, t.user_id, x.ord, x.a, true AS in_body
+			FROM lingo_tickets t, jsonb_array_elements(t.attachments) WITH ORDINALITY x(a, ord)
+			WHERE t.id = $1 AND $2 = 0
+			UNION ALL
+			SELECT c.id, c.author_id, x.ord, x.a, c.forwarded_at IS NOT NULL
+			FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) WITH ORDINALITY x(a, ord)
+			WHERE c.ticket_id = $1 AND ($2 = 0 OR c.id = $2) AND (NOT $3 OR (c.public AND c.deleted_at IS NULL))
+		) q ORDER BY comment_id, ord`, ticketID, commentID, publicOnly)
 	if err != nil {
 		return nil, fmt.Errorf("store: ticket attachments: %w", err)
 	}
 	defer rows.Close()
-	var out []*ticket.Attachment
+	var out []scannedAttachment
 	for rows.Next() {
-		a, err := scanAttachment(rows, false)
-		if err != nil {
+		var a scannedAttachment
+		var raw []byte
+		if err := rows.Scan(&a.CommentID, &a.UserID, &raw, &a.inBody); err != nil {
 			return nil, err
 		}
+		cid, uid := a.CommentID, a.UserID
+		if err := json.Unmarshal(raw, &a.Attachment); err != nil {
+			return nil, fmt.Errorf("store: decode attachment: %w", err)
+		}
+		a.CommentID, a.UserID = cid, uid
 		out = append(out, a)
 	}
 	return out, rows.Err()
 }
 
-// attachmentColumnsA 同 attachmentColumns，带表别名 a。
-const attachmentColumnsA = `a.id, a.user_id, COALESCE(a.ticket_id, 0), COALESCE(a.comment_id, 0), a.filename, a.content_type, a.size,
-	a.sha256, a.forwarded, a.gitea_attachment_uuid, a.created_at`
+type scannedAttachment struct {
+	ticket.Attachment
+	inBody bool // 工单本身的附件，或已随 Issue 正文转出的补充评论的附件
+}
 
-// ForwardableAttachments 返回待上传到 Gitea 的附件（含内容）：未上传过、未被 Gitea 拒绝。commentID 为 0 时取
-// 随 Issue 转出的附件：工单本身的附件，以及已写进 Issue 正文的补充评论的附件；否则取该评论的附件。
-// ids 非 nil 时工单本身的附件只取其中的（后台人员转出时勾选的）；补充评论的附件是之后由提交人加的，不受勾选限制。
-// 只返回元数据，内容由调用方逐个用 GetAttachment 读取，避免一次把全部附件读进内存。
-func (s *Store) ForwardableAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64) ([]*ticket.Attachment, error) {
-	all, filter := true, "{}"
-	if ids != nil {
-		all, filter = false, textArrayInt(*ids)
-	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM attachments a
-		LEFT JOIN ticket_comments c ON c.id = a.comment_id
-		WHERE a.ticket_id = $1 AND NOT a.forwarded AND a.forward_error = ''
-		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
-		  AND ($3 OR a.comment_id IS NOT NULL OR a.id = ANY(($4::text)::bigint[]))
-		ORDER BY a.id`, ticketID, commentID, all, filter)
+// TicketAttachments 实现 ticket.QueryStore。
+func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]ticket.Attachment, error) {
+	all, err := s.queryAttachments(ctx, ticketID, 0, publicOnly)
 	if err != nil {
-		return nil, fmt.Errorf("store: forwardable attachments: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	var out []*ticket.Attachment
-	for rows.Next() {
-		a, err := scanAttachment(rows, false)
-		if err != nil {
-			return nil, err
+	out := []ticket.Attachment{}
+	for _, a := range all {
+		if !forwardedOnly || a.Forwarded() {
+			out = append(out, a.Attachment)
 		}
-		out = append(out, a)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-// AttachmentLink 是已处理（上传成功或被拒）的附件，用于在正文中引用。
-type AttachmentLink struct {
-	Filename    string
-	ContentType string
-	URL         string // 被 Gitea 拒绝时为空
-}
-
-// AttachmentLinks 返回已处理的附件（范围同 ForwardableAttachments，不按勾选过滤），按 ID 顺序；
-// 正文中的附件段落每次都按它整体重写，重试与部分失败后引用也不会丢。
-func (s *Store) AttachmentLinks(ctx context.Context, ticketID, commentID int64) ([]AttachmentLink, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.filename, a.content_type, a.gitea_url FROM attachments a
-		LEFT JOIN ticket_comments c ON c.id = a.comment_id
-		WHERE a.ticket_id = $1 AND (a.forwarded OR a.forward_error <> '')
-		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
-		ORDER BY a.id`, ticketID, commentID)
+// ForwardAttachments 返回一次转出涉及的附件（含已处理的），按顺序：commentID 为 0 时为随 Issue 转出的附件——工单本身的，
+// 以及已写进 Issue 正文的补充评论的；否则为该评论的附件。exclude 是后台人员转出时未勾选的附件 ID，尚未处理的跳过。
+func (s *Store) ForwardAttachments(ctx context.Context, ticketID, commentID int64, exclude []string) ([]ticket.Attachment, error) {
+	all, err := s.queryAttachments(ctx, ticketID, commentID, false)
 	if err != nil {
-		return nil, fmt.Errorf("store: attachment links: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	var out []AttachmentLink
-	for rows.Next() {
-		var l AttachmentLink
-		if err := rows.Scan(&l.Filename, &l.ContentType, &l.URL); err != nil {
-			return nil, err
+	var out []ticket.Attachment
+	for _, a := range all {
+		if commentID == 0 && !a.inBody {
+			continue
 		}
-		out = append(out, l)
+		if !a.Forwarded() && slices.Contains(exclude, a.ID) {
+			continue
+		}
+		out = append(out, a.Attachment)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-// MarkAttachmentForwarded 记录附件已上传到 Gitea（uuid、下载地址），或被 Gitea 拒绝的原因（reason 非空，不再重试）。
-func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url, reason string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE attachments SET forwarded = ($4 = ''), gitea_attachment_uuid = $2, gitea_url = $3,
-		forward_error = $4 WHERE id = $1`, id, uuid, url, reason)
+// MarkAttachment 记录附件的转出结果（按所属工单 / 评论与附件 ID 原地更新）。不修改 updated_at：建单整理的缓存以它为键。
+func (s *Store) MarkAttachment(ctx context.Context, ticketID int64, a ticket.Attachment) error {
+	patch, err := json.Marshal(map[string]any{"state": a.State, "gitea_url": a.GiteaURL, "error": a.Error})
 	if err != nil {
-		return fmt.Errorf("store: mark attachment %d: %w", id, err)
+		return err
+	}
+	const update = ` SET attachments = (SELECT COALESCE(jsonb_agg(CASE WHEN x.a->>'id' = $2 THEN x.a || $3::jsonb ELSE x.a END ORDER BY x.ord), '[]')
+		FROM jsonb_array_elements(attachments) WITH ORDINALITY x(a, ord))`
+	const hasID = `attachments @> jsonb_build_array(jsonb_build_object('id', $2::text))` // 确实有这个附件，否则报错而不是静默成功
+	var res sql.Result
+	if a.CommentID == 0 {
+		res, err = s.db.ExecContext(ctx, "UPDATE lingo_tickets"+update+" WHERE id = $1 AND "+hasID, ticketID, a.ID, patch)
+	} else {
+		res, err = s.db.ExecContext(ctx, "UPDATE lingo_ticket_comments"+update+" WHERE id = $1 AND ticket_id = $4 AND "+hasID,
+			a.CommentID, a.ID, patch, ticketID)
+	}
+	if err != nil {
+		return fmt.Errorf("store: mark attachment %s: %w", a.ID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: mark attachment %s: %w", a.ID, ticket.ErrNotFound)
 	}
 	return nil
 }
@@ -173,7 +123,7 @@ func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url
 // PendingComments 返回工单中尚未同步到 Gitea 的对外补充评论（用户与后台），按时间顺序。
 func (s *Store) PendingComments(ctx context.Context, ticketID int64) ([]ticket.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, ticket_id, source, author_id, author_name, body, public, created_at FROM ticket_comments
+		SELECT id, ticket_id, source, author_id, author_name, body, public, created_at FROM lingo_ticket_comments
 		WHERE ticket_id = $1 AND source IN ('user', 'staff', 'agent') AND public AND gitea_posted_id IS NULL AND forwarded_at IS NULL
 		  AND deleted_at IS NULL
 		ORDER BY created_at, id`, ticketID)
@@ -197,7 +147,7 @@ func (s *Store) Comment(ctx context.Context, id int64) (*ticket.Comment, error) 
 	var c ticket.Comment
 	var fwd sql.NullTime
 	err := s.db.QueryRowContext(ctx, `SELECT id, ticket_id, COALESCE(gitea_posted_id, 0), source, author_id, author_name, body, public,
-		created_at, forwarded_at FROM ticket_comments WHERE id = $1 AND deleted_at IS NULL`, id).Scan(
+		created_at, forwarded_at FROM lingo_ticket_comments WHERE id = $1 AND deleted_at IS NULL`, id).Scan(
 		&c.ID, &c.TicketID, &c.PostedID, &c.Source, &c.AuthorID, &c.AuthorName, &c.Body, &c.Public, &c.At, &fwd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
@@ -211,7 +161,7 @@ func (s *Store) Comment(ctx context.Context, id int64) (*ticket.Comment, error) 
 
 // CommentPosted 记录评论已由机器人发到 Gitea。
 func (s *Store) CommentPosted(ctx context.Context, id, giteaID int64) error {
-	if _, err := s.db.ExecContext(ctx, "UPDATE ticket_comments SET gitea_posted_id = $2 WHERE id = $1", id, giteaID); err != nil {
+	if _, err := s.db.ExecContext(ctx, "UPDATE lingo_ticket_comments SET gitea_posted_id = $2 WHERE id = $1", id, giteaID); err != nil {
 		return fmt.Errorf("store: comment posted %d: %w", id, err)
 	}
 	return nil
@@ -221,31 +171,29 @@ func (x *ticketTx) MarkCommentsForwarded(ctx context.Context, ticketID int64, id
 	if len(ids) == 0 {
 		return nil
 	}
-	if _, err := x.tx.ExecContext(ctx, `UPDATE ticket_comments SET forwarded_at = now()
+	if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_ticket_comments SET forwarded_at = now()
 		WHERE ticket_id = $1 AND id = ANY(($2::text)::bigint[])`, ticketID, textArrayInt(ids)); err != nil {
 		return fmt.Errorf("store: mark comments forwarded: %w", err)
 	}
 	return nil
 }
 
-func (x *ticketTx) CountAttachments(ctx context.Context, ticketID int64) (int, error) {
-	var n int
-	if err := x.tx.QueryRowContext(ctx, "SELECT count(*) FROM attachments WHERE ticket_id = $1", ticketID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("store: count attachments: %w", err)
-	}
-	return n, nil
-}
-
-func (x *ticketTx) LinkAttachments(ctx context.Context, ids []int64, userID string, ticketID, commentID int64) (int, error) {
-	res, err := x.tx.ExecContext(ctx, `UPDATE attachments SET ticket_id = $3, comment_id = $4
-		WHERE id = ANY(($1::text)::bigint[]) AND user_id = $2 AND ticket_id IS NULL`,
-		textArrayInt(ids), userID, ticketID, nullInt64(commentID))
+func (x *ticketTx) AttachmentIDs(ctx context.Context, ticketID int64) ([]string, error) {
+	rows, err := x.tx.QueryContext(ctx, `
+		SELECT a->>'id' FROM lingo_tickets t, jsonb_array_elements(t.attachments) a WHERE t.id = $1
+		UNION ALL
+		SELECT a->>'id' FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) a WHERE c.ticket_id = $1`, ticketID)
 	if err != nil {
-		return 0, fmt.Errorf("store: link attachments: %w", err)
+		return nil, fmt.Errorf("store: attachment ids: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("store: link attachments: %w", err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
-	return int(n), nil
+	return out, rows.Err()
 }

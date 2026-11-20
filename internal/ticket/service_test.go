@@ -162,8 +162,17 @@ func TestTriageActions(t *testing.T) {
 			resolved = append(resolved, e.Action)
 		}
 	}
-	if len(resolved) != 4 || resolved[0] != "forward" || resolved[3] != "merge" || len(m.triages) != 4 {
-		t.Errorf("resolved = %v triages %d", resolved, len(m.triages))
+	notes := map[string]any{} // 审计 triage.*：备注与合并目标
+	for _, h := range m.history {
+		if strings.HasPrefix(h.Kind, "triage.") {
+			notes[h.Kind] = h.Payload["note"]
+			if h.Kind == "triage.merge" && h.Payload["merged_into"] == nil {
+				t.Errorf("merge history = %+v", h.Payload)
+			}
+		}
+	}
+	if len(resolved) != 4 || resolved[0] != "forward" || resolved[3] != "merge" || len(notes) != 4 {
+		t.Errorf("resolved = %v triage history %v", resolved, notes)
 	}
 	if len(m.tasks) != 1 {
 		t.Errorf("tasks = %d", len(m.tasks))
@@ -277,15 +286,9 @@ func TestReforwardAfterIssueFailed(t *testing.T) {
 	}
 }
 
-func TestCreateConversationAndEmptyFields(t *testing.T) {
+func TestCreateEmptyFields(t *testing.T) {
 	s := newService(t, newMem(), nil)
 	ctx := context.Background()
-	if _, err := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x", Conversation: 1}); err != nil {
-		t.Errorf("own conversation: %v", err)
-	}
-	if _, err := s.Create(ctx, bob, NewTicket{Project: "demo", Type: TypeBug, Body: "x", Conversation: 1}); !errors.Is(err, ErrInvalid) {
-		t.Errorf("other's conversation: %v", err)
-	}
 	if _, err := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Fields: map[string][]string{"a": {" "}}}); !errors.Is(err, ErrInvalid) {
 		t.Errorf("blank fields: %v", err)
 	}

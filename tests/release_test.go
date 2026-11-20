@@ -52,14 +52,14 @@ func seedRelease(t *testing.T, db *sql.DB) (byCommit, byRef, untouched int64) {
 		issue  int
 		commit string
 	}{{12, "ABC123"}, {13, ""}, {14, "yyy"}} {
-		if err := db.QueryRow(`INSERT INTO tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, fixed_commit)
-			SELECT 'u1', p.id, r.id, 'bug', 't', 'fixed', $1, $2 FROM projects p JOIN repos r ON r.project_id = p.id
+		if err := db.QueryRow(`INSERT INTO lingo_tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, fixed_commit)
+			SELECT 'u1', p.id, r.id, 'bug', 't', 'fixed', $1, $2 FROM lingo_projects p JOIN lingo_repos r ON r.project_id = p.id
 			WHERE p.key = 'demo' AND r.name = 'api' RETURNING id`, c.issue, c.commit).Scan(&ids[i]); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec(`INSERT INTO releases (repo_id, tag, published_at, commit_sha)
-		SELECT id, 'v1.0.0', now() - interval '7 days', 'sha100' FROM repos WHERE name = 'api'`); err != nil {
+	if _, err := db.Exec(`INSERT INTO lingo_releases (repo_id, tag, published_at, commit_sha)
+		SELECT id, 'v1.0.0', now() - interval '7 days', 'sha100' FROM lingo_repos WHERE name = 'api'`); err != nil {
 		t.Fatal(err)
 	}
 	return ids[0], ids[1], ids[2]
@@ -116,12 +116,12 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 		t.Errorf("released = %v", got)
 	}
 	var fixedTag, commitSHA string
-	if err := db.QueryRow(`SELECT rel.tag, rel.commit_sha FROM tickets t JOIN releases rel ON rel.id = t.fixed_release_id WHERE t.id = $1`, byCommit).
+	if err := db.QueryRow(`SELECT rel.tag, rel.commit_sha FROM lingo_tickets t JOIN lingo_releases rel ON rel.id = t.fixed_release_id WHERE t.id = $1`, byCommit).
 		Scan(&fixedTag, &commitSHA); err != nil || fixedTag != "v1.1.0" || commitSHA != "tagsha110" {
 		t.Errorf("fixed release = %s %s %v", fixedTag, commitSHA, err)
 	}
 	var links int
-	if err := db.QueryRow("SELECT count(*) FROM release_tickets").Scan(&links); err != nil || links != 3 {
+	if err := db.QueryRow("SELECT count(*) FROM lingo_release_tickets").Scan(&links); err != nil || links != 3 {
 		t.Errorf("release_tickets = %d %v", links, err) // rc 关联 #13，正式版关联 #12 #13
 	}
 
@@ -135,7 +135,7 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 		}
 	}
 	var deployed int
-	if err := db.QueryRow("SELECT count(*) FROM tickets WHERE status = 'deployed' AND deployed_at IS NOT NULL").Scan(&deployed); err != nil || deployed != 2 {
+	if err := db.QueryRow("SELECT count(*) FROM lingo_tickets WHERE status = 'deployed' AND deployed_at IS NOT NULL").Scan(&deployed); err != nil || deployed != 2 {
 		t.Errorf("deployed = %d %v", deployed, err)
 	}
 	// 重复的上线信号（提交状态、手动）幂等
@@ -148,7 +148,7 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 		t.Errorf("duplicate deploy events: %d", len(got))
 	}
 	// 版本已上线后才关联上的工单（如 Release 更新时补上）：发布即上线
-	if _, err := db.Exec("UPDATE tickets SET fixed_commit = 'abc123' WHERE id = $1", untouched); err != nil {
+	if _, err := db.Exec("UPDATE lingo_tickets SET fixed_commit = 'abc123' WHERE id = $1", untouched); err != nil {
 		t.Fatal(err)
 	}
 	send("r2", "release", `{"action":"updated","release":{"id":10,"tag_name":"v1.1.0","name":"1.1","body":"修复 #13","prerelease":false,
@@ -160,8 +160,8 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 
 	// 跨仓库修复：后端工单由前端仓库的 PR 修复，随前端版本发布
 	var cross int64
-	if err := db.QueryRow(`INSERT INTO tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, fixed_commit, fixed_repo)
-		SELECT 'u1', project_id, id, 'bug', 't', 'fixed', 15, 'webfix', 'demo/web' FROM repos WHERE name = 'api' RETURNING id`).Scan(&cross); err != nil {
+	if err := db.QueryRow(`INSERT INTO lingo_tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, fixed_commit, fixed_repo)
+		SELECT 'u1', project_id, id, 'bug', 't', 'fixed', 15, 'webfix', 'demo/web' FROM lingo_repos WHERE name = 'api' RETURNING id`).Scan(&cross); err != nil {
 		t.Fatal(err)
 	}
 	send("r3", "release", `{"action":"published","release":{"id":20,"tag_name":"v2.0.0","name":"web 2","body":"","prerelease":false,

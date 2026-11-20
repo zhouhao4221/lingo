@@ -30,7 +30,7 @@ func TestEmitWithoutNotifyOnlyWritesEvents(t *testing.T) {
 	s, _ := store.New(db)
 	emit(t, s, notify.Event{Kind: notify.TicketStatus, TicketID: id, Status: "in_progress"})
 	var events, outbox int
-	if err := db.QueryRow("SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM outbox)").Scan(&events, &outbox); err != nil {
+	if err := db.QueryRow("SELECT (SELECT count(*) FROM lingo_events), (SELECT count(*) FROM lingo_outbox)").Scan(&events, &outbox); err != nil {
 		t.Fatal(err)
 	}
 	if events != 1 || outbox != 0 {
@@ -42,8 +42,8 @@ func TestClaimNotificationsPerTicketOrder(t *testing.T) {
 	db := testDB(t, true)
 	a := seedTicket(t, db, "open")
 	var b int64
-	if err := db.QueryRow(`INSERT INTO tickets (user_id, project_id, type, title, status)
-		SELECT 'u2', project_id, 'bug', 'B', 'pending_triage' FROM tickets WHERE id = $1 RETURNING id`, a).Scan(&b); err != nil {
+	if err := db.QueryRow(`INSERT INTO lingo_tickets (user_id, project_id, type, title, status)
+		SELECT 'u2', project_id, 'bug', 'B', 'pending_triage' FROM lingo_tickets WHERE id = $1 RETURNING id`, a).Scan(&b); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := store.New(db, store.WithNotify())
@@ -114,7 +114,7 @@ func TestGiteaCommentStore(t *testing.T) {
 	// 乱序到达的旧编辑不覆盖
 	save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "old", At: t1})
 	var body string
-	if err := db.QueryRow("SELECT body FROM ticket_comments WHERE gitea_comment_id = 9").Scan(&body); err != nil || body != "v2" {
+	if err := db.QueryRow("SELECT body FROM lingo_ticket_comments WHERE gitea_comment_id = 9").Scan(&body); err != nil || body != "v2" {
 		t.Errorf("body = %q %v", body, err)
 	}
 	if err := s.InTx(ctx, func(tx ticket.Tx) error { return tx.DeleteGiteaComment(ctx, 9, t1.Add(2*time.Minute)) }); err != nil {
@@ -123,7 +123,7 @@ func TestGiteaCommentStore(t *testing.T) {
 	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "late", Public: true, At: t1.Add(3 * time.Minute)}); p == nil || !p.Public {
 		t.Errorf("edit after delete prev = %+v", p)
 	}
-	if err := db.QueryRow("SELECT body FROM ticket_comments WHERE gitea_comment_id = 9").Scan(&body); err != nil || body != "v2" {
+	if err := db.QueryRow("SELECT body FROM lingo_ticket_comments WHERE gitea_comment_id = 9").Scan(&body); err != nil || body != "v2" {
 		t.Errorf("deleted comment rewritten: %q %v", body, err)
 	}
 }

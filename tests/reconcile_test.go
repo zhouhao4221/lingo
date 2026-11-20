@@ -69,14 +69,14 @@ func TestReconcileRecoversMissedWebhooks(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		var n int
-		_ = db.QueryRow("SELECT count(*) FROM sync_cursors").Scan(&n)
+		_ = db.QueryRow("SELECT count(*) FROM lingo_repo_state WHERE kind <> 'ping'").Scan(&n)
 		return n == 4
 	})
 	time.Sleep(2500 * time.Millisecond) // 再对账几轮
 	if got := rec.waitFor(t, 3); len(got) != 3 {
 		t.Errorf("repeated reconcile produced extra events: %d", len(got))
 	}
-	rows, _ := db.Query("SELECT kind FROM ticket_events WHERE ticket_id = $1 ORDER BY id", id)
+	rows, _ := db.Query("SELECT kind FROM lingo_ticket_events WHERE ticket_id = $1 ORDER BY id", id)
 	var hk []string
 	for rows.Next() {
 		var k string
@@ -88,7 +88,7 @@ func TestReconcileRecoversMissedWebhooks(t *testing.T) {
 		t.Errorf("ticket_events = %v (want no duplicates from repeated runs)", hk)
 	}
 	var comments int
-	if err := db.QueryRow("SELECT count(*) FROM ticket_comments WHERE ticket_id = $1", id).Scan(&comments); err != nil || comments != 2 {
+	if err := db.QueryRow("SELECT count(*) FROM lingo_ticket_comments WHERE ticket_id = $1", id).Scan(&comments); err != nil || comments != 2 {
 		t.Errorf("comments = %d %v (bot comment skipped)", comments, err)
 	}
 }
@@ -98,10 +98,10 @@ func seedTicketSynced(t *testing.T, db *sql.DB) int64 {
 	t.Helper()
 	var id int64
 	err := db.QueryRow(`
-		WITH p AS (INSERT INTO projects (key, name) VALUES ('demo', 'Demo') ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name RETURNING id),
-		     r AS (INSERT INTO repos (project_id, owner, name) SELECT id, 'demo', 'api' FROM p
+		WITH p AS (INSERT INTO lingo_projects (key, name) VALUES ('demo', 'Demo') ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name RETURNING id),
+		     r AS (INSERT INTO lingo_repos (project_id, owner, name) SELECT id, 'demo', 'api' FROM p
 		           ON CONFLICT (lower(owner), lower(name)) DO UPDATE SET owner = EXCLUDED.owner RETURNING id, project_id)
-		INSERT INTO tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, gitea_updated_at)
+		INSERT INTO lingo_tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, gitea_updated_at)
 		SELECT 'u1', project_id, id, 'bug', '导出报错', 'in_progress', 12, '2026-11-20T01:00:00Z' FROM r RETURNING id`).Scan(&id)
 	if err != nil {
 		t.Fatal(err)

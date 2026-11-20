@@ -56,7 +56,7 @@ func (s *Store) ListTriage(ctx context.Context, q ticket.TriageQuery) ([]*ticket
 func (s *Store) TriageCounts(ctx context.Context, sc ticket.Scope, overdueBefore time.Time) ([]ticket.TriageCount, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT p.key, count(t.id), count(t.id) FILTER (WHERE t.triage_since < $3)
-		FROM projects p LEFT JOIN tickets t ON t.project_id = p.id AND t.status = 'pending_triage'
+		FROM lingo_projects p LEFT JOIN lingo_tickets t ON t.project_id = p.id AND t.status = 'pending_triage'
 		WHERE p.enabled AND `+scopeSQL(1)+`
 		GROUP BY p.key ORDER BY p.key`, append(scopeArgs(sc), overdueBefore)...)
 	if err != nil {
@@ -89,7 +89,7 @@ func (s *Store) Events(ctx context.Context, q ticket.EventQuery) ([]notify.Event
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.kind, e.created_at, COALESCE(e.project_id, 0), COALESCE(p.key, ''), COALESCE(e.ticket_id, 0),
 		       e.status, e.prev_status, e.action, e.user_id, e.actor_id, e.payload
-		FROM events e LEFT JOIN projects p ON p.id = e.project_id
+		FROM lingo_events e LEFT JOIN lingo_projects p ON p.id = e.project_id
 		WHERE e.id > $3 AND (e.txid < pg_snapshot_xmin(pg_current_snapshot()) OR e.created_at < now() - $8 * interval '1 second')
 		  AND `+scopeSQL(1)+`
 		  AND ($4 = '' OR e.user_id = $4)
@@ -125,7 +125,7 @@ func (s *Store) Events(ctx context.Context, q ticket.EventQuery) ([]notify.Event
 func (s *Store) Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]ticket.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ticket_id, COALESCE(gitea_comment_id, 0), source, author_id, author_name, body, public, created_at
-		FROM ticket_comments WHERE ticket_id = $1 AND deleted_at IS NULL AND (NOT $2 OR public)
+		FROM lingo_ticket_comments WHERE ticket_id = $1 AND deleted_at IS NULL AND (NOT $2 OR public)
 		ORDER BY created_at, id`, ticketID, publicOnly)
 	if err != nil {
 		return nil, fmt.Errorf("store: comments %d: %w", ticketID, err)
@@ -144,8 +144,8 @@ func (s *Store) Comments(ctx context.Context, ticketID int64, publicOnly bool) (
 
 // AutoForwardOverrides 实现 ticket.QueryStore：返回 project key → 类型 → 覆盖值，一次查询。
 func (s *Store) AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT p.key, ps.ticket_type, ps.auto_forward FROM project_settings ps
-		JOIN projects p ON p.id = ps.project_id WHERE p.key = ANY(($1::text)::text[])`, textArray(keys))
+	rows, err := s.db.QueryContext(ctx, `SELECT p.key, e.key, e.value::boolean FROM lingo_projects p, jsonb_each_text(p.auto_forward) e
+		WHERE p.key = ANY(($1::text)::text[])`, textArray(keys))
 	if err != nil {
 		return nil, fmt.Errorf("store: auto forward overrides: %w", err)
 	}
@@ -186,7 +186,7 @@ func (x *ticketTx) LockOverdue(ctx context.Context, s ticket.Scope, before time.
 }
 
 func (x *ticketTx) MarkReminded(ctx context.Context, id int64, at time.Time) error {
-	if _, err := x.tx.ExecContext(ctx, "UPDATE tickets SET triage_reminded_at = $2 WHERE id = $1", id, at); err != nil {
+	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_tickets SET triage_reminded_at = $2 WHERE id = $1", id, at); err != nil {
 		return fmt.Errorf("store: mark reminded %d: %w", id, err)
 	}
 	return nil

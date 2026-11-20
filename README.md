@@ -10,7 +10,7 @@ Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a
 
 ## Features
 
-- **Feedback tickets** — consult / bug / feature with text, form fields, screenshots and attachments; APIs designed for a popup widget built by the host
+- **Feedback tickets** — consult / bug / feature with text, form fields, screenshots and attachments (lingo stores references only; files live in the host's own attachment system and are uploaded to Gitea via the optional `Config.FetchAttachment`, which receives the submitter's ID so the host can check ownership); APIs designed for a popup widget built by the host
 - **Triage** — staff forward to Gitea, answer, merge or reject; auto/manual switch per project and ticket type; overdue reminders
 - **Issue drafting** — an optional light model writes a clear title, fills the issue form fields from free text and tidies the description (validated against the template; the original text is kept)
 - **Gitea integration** — issues created from the repository's issue form templates, two-way comments, PR-merge detection, release linking (by commit containment) and deployment signals (Actions workflow, commit status or `MarkDeployed`)
@@ -67,7 +67,6 @@ Your `Authenticate` maps each user to one of four fixed roles: `external` (end u
 | Endpoint | Description |
 |---|---|
 | `GET /projects`, `GET /ticket-types` | Projects and repositories; ticket types with issue-template form fields |
-| `POST /attachments` (multipart `file`), `GET /attachments/{id}` | Upload and download attachments |
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
 | `GET /events?after=` | Event feed (same events as the `Notifier`) |

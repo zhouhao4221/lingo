@@ -156,13 +156,13 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 			}),
 		tool("forward_ticket", "把待确认工单转出到 Gitea（reviewer / admin），可修改标题、类型、仓库并附说明；attachment_ids 省略表示附件全部转出。",
 			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"},"title":{"type":"string"},"type":`+typeEnum+`,
-				"repo":{"type":"string"},"note":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"integer"}}}}`,
+				"repo":{"type":"string"},"note":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}}}}`,
 			func(ctx context.Context, u User, a struct {
 				ID            int64
 				Title         string
 				Type          TicketType
 				Repo, Note    string
-				AttachmentIDs *[]int64 `json:"attachment_ids"`
+				AttachmentIDs *[]string `json:"attachment_ids"`
 			}) (any, error) {
 				if err := requireID(a.ID); err != nil {
 					return nil, err

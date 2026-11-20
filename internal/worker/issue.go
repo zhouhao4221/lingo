@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -51,10 +50,8 @@ type IssueWriter interface {
 // Forwarding 是转出 Issue 时读取的补充评论与附件，由 store.Store 实现。
 type Forwarding interface {
 	PendingComments(ctx context.Context, ticketID int64) ([]ticket.Comment, error)
-	ForwardableAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64) ([]*ticket.Attachment, error)
-	GetAttachment(ctx context.Context, id int64, withData bool) (*ticket.Attachment, error)
-	MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url, reason string) error
-	AttachmentLinks(ctx context.Context, ticketID, commentID int64) ([]store.AttachmentLink, error)
+	ForwardAttachments(ctx context.Context, ticketID, commentID int64, exclude []string) ([]ticket.Attachment, error)
+	MarkAttachment(ctx context.Context, ticketID int64, a ticket.Attachment) error
 	Comment(ctx context.Context, id int64) (*ticket.Comment, error)
 	CommentPosted(ctx context.Context, id, giteaID int64) error
 }
@@ -152,14 +149,14 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 	switch t.Op {
 	case ticket.OpCreateIssue:
 		var p struct {
-			ForwardedBy   string   `json:"forwarded_by"`
-			Note          string   `json:"note"`
-			AttachmentIDs *[]int64 `json:"attachment_ids"`
+			ForwardedBy string   `json:"forwarded_by"`
+			Note        string   `json:"note"`
+			Exclude     []string `json:"exclude_attachment_ids"` // 后台人员未勾选的附件
 		}
 		if err := json.Unmarshal(t.Payload, &p); err != nil {
 			return permanent(fmt.Errorf("task payload: %w", err))
 		}
-		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note, p.AttachmentIDs, t.Attempts > 1)
+		return w.createIssue(withFailures(ctx, t.Failures), t.TicketID, p.ForwardedBy, p.Note, p.Exclude, t.Attempts > 1)
 	case ticket.OpRemoveLabel:
 		var p struct {
 			Label string `json:"label"`
@@ -175,7 +172,7 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 		if err := json.Unmarshal(t.Payload, &p); err != nil || p.CommentID == 0 {
 			return permanent(fmt.Errorf("task payload: %s", t.Payload))
 		}
-		return w.createComment(ctx, t.TicketID, p.CommentID)
+		return w.createComment(withFailures(ctx, t.Failures), t.TicketID, p.CommentID)
 	}
 	return permanent(fmt.Errorf("unknown task op %q", t.Op))
 }
@@ -191,7 +188,7 @@ func giteaErr(what string, err error) error {
 
 // createIssue 建 Issue 并上传附件；retried 为真表示任务此前被领取过（可能已建好 Issue 但未保存），需先查重。
 // Issue 已存在（上次建好后附件未传完）时只继续上传附件。
-func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string, attachments *[]int64, retried bool) error {
+func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string, exclude []string, retried bool) error {
 	t, err := w.o.Drafts.Draft(ctx, id)
 	if errors.Is(err, ticket.ErrNotFound) {
 		return nil
@@ -200,7 +197,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		return err
 	}
 	if t.IssueNumber != 0 {
-		return w.uploadIssueAttachments(ctx, t, attachments)
+		return w.uploadIssueAttachments(ctx, t, exclude)
 	}
 	if t.Status != ticket.StatusSubmitted {
 		return nil // 工单已不再待建
@@ -243,7 +240,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 					return err
 				}
 				t.IssueNumber = is.Number
-				return w.uploadIssueAttachments(ctx, t, attachments)
+				return w.uploadIssueAttachments(ctx, t, exclude)
 			}
 		}
 	}
@@ -291,7 +288,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		return err // 重试时会按标记查到这个 Issue，不会重复建
 	}
 	t.IssueNumber = is.Number
-	return w.uploadIssueAttachments(ctx, t, attachments)
+	return w.uploadIssueAttachments(ctx, t, exclude)
 }
 
 // draftTimeout 是整理工单的时限；draftReserve 是留给建单本身的任务时间，剩余不足时不整理。
@@ -420,18 +417,19 @@ func commentIDs(cs []ticket.Comment) []int64 {
 	return ids
 }
 
-// uploadIssueAttachments 把随 Issue 转出的附件（attachments 为后台人员勾选的工单附件，nil 表示全部）上传为 Issue 附件，
-// 并重写正文中的附件段落。段落按全部已处理的附件整体生成，重试或部分失败后已上传的引用也不会丢。
-func (w *Worker) uploadIssueAttachments(ctx context.Context, t *ticket.Ticket, attachments *[]int64) error {
+// uploadIssueAttachments 转出随 Issue 的附件（exclude 为后台人员未勾选的附件 ID），并重写正文中的附件段落。
+// 段落按全部已处理的附件整体生成，重试或部分失败后已转出的引用也不会丢。
+func (w *Worker) uploadIssueAttachments(ctx context.Context, t *ticket.Ticket, exclude []string) error {
 	owner, name, _ := strings.Cut(t.Repo, "/")
-	if err := w.uploadAttachments(ctx, t.ID, 0, attachments, func(a *ticket.Attachment) (*gitea.Attachment, error) {
-		return w.o.Issues.CreateIssueAttachment(ctx, owner, name, t.IssueNumber, a.Filename, bytes.NewReader(a.Data))
-	}); err != nil {
+	as, err := w.forwardAttachments(ctx, t.ID, 0, exclude, func(a ticket.Attachment, r io.Reader) (*gitea.Attachment, error) {
+		return w.o.Issues.CreateIssueAttachment(ctx, owner, name, t.IssueNumber, a.Name, r)
+	})
+	if err != nil {
 		return err
 	}
-	section, err := w.attachmentSection(ctx, t.ID, 0)
-	if err != nil || section == "" {
-		return err
+	section := attachmentSection(as)
+	if section == "" {
+		return nil
 	}
 	is, err := w.o.Issues.GetIssue(ctx, owner, name, t.IssueNumber)
 	if err != nil {
@@ -447,67 +445,157 @@ func (w *Worker) uploadIssueAttachments(ctx context.Context, t *ticket.Ticket, a
 	return nil
 }
 
-// uploadAttachments 逐个上传待转出的附件（每次只读入一个的内容）。Gitea 按内容拒收的附件（400 / 413 / 415 / 422：
-// 类型、大小限制）记下原因不再重试；可重试的错误返回给调用方重试；其他错误（权限、证书等配置问题）让任务失败，
-// 不把附件误记为被拒。已上传的不会重复上传。
-func (w *Worker) uploadAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64,
-	upload func(a *ticket.Attachment) (*gitea.Attachment, error)) error {
-	as, err := w.o.Forwarding.ForwardableAttachments(ctx, ticketID, commentID, ids)
+// forwardAttachments 逐个转出待处理的附件，返回本次涉及的全部附件（含之前已处理的）。配置了 FetchAttachment 时读取内容
+// 上传为 Gitea 附件，否则只把地址写进正文（linked）。已处理的不会重复处理。
+func (w *Worker) forwardAttachments(ctx context.Context, ticketID, commentID int64, exclude []string,
+	upload func(a ticket.Attachment, r io.Reader) (*gitea.Attachment, error)) ([]ticket.Attachment, error) {
+	as, err := w.o.Forwarding.ForwardAttachments(ctx, ticketID, commentID, exclude)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, meta := range as {
-		a, err := w.o.Forwarding.GetAttachment(ctx, meta.ID, true)
-		if err != nil {
-			return err
+	for i := range as {
+		a := &as[i]
+		if a.Forwarded() {
+			continue
 		}
-		ga, err := upload(a)
-		var ae *gitea.APIError
-		switch {
-		case err == nil:
-			err = w.o.Forwarding.MarkAttachmentForwarded(ctx, a.ID, ga.UUID, ga.BrowserDownloadURL, "")
-		case errors.As(err, &ae) && rejectedByContent(ae.StatusCode):
-			w.log.Warn("attachment rejected by gitea", "attachment", a.ID, "file", a.Filename, "err", err)
-			err = w.o.Forwarding.MarkAttachmentForwarded(ctx, a.ID, "", "", err.Error())
-		default:
-			return giteaErr(fmt.Sprintf("upload attachment %d", a.ID), err)
+		if err := w.forwardAttachment(ctx, a, upload); err != nil {
+			return nil, err
 		}
+		// 上传可能耗尽了任务时限：记录结果不受影响，否则重试时会重复上传
+		mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+		err := w.o.Forwarding.MarkAttachment(mctx, ticketID, *a)
+		cancel()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return as, nil
 }
 
-func rejectedByContent(status int) bool {
+const (
+	// maxAttachmentBytes 是从接入方读取的单个附件上限（Gitea 另有自己的限制）。
+	maxAttachmentBytes = 100 << 20
+	// fetchAttempts 是读取 / 上传附件出现临时错误时随任务重试的次数，之后记为失败（Issue 中写链接）。
+	fetchAttempts = 3
+)
+
+var errAttachmentTooLarge = errors.New("attachment exceeds 100 MB")
+
+// forwardAttachment 转出一个附件并把结果写进 a。读取被接入方拒绝（ErrNotFound / ErrForbidden）、超过大小上限、
+// 被 Gitea 拒收（400 / 403 / 404 / 413 / 415 / 422：类型、大小限制或实例关闭了附件）的记为失败；临时错误返回给调用方
+// 随任务重试，重试 fetchAttempts 次后记为失败；其他上传错误（证书等配置问题）让任务失败。
+func (w *Worker) forwardAttachment(ctx context.Context, a *ticket.Attachment, upload func(a ticket.Attachment, r io.Reader) (*gitea.Attachment, error)) error {
+	if w.o.FetchAttachment == nil {
+		a.State = ticket.AttachmentLinked
+		return nil
+	}
+	fail := func(reason string) error {
+		w.log.Warn("attachment not uploaded", "attachment", a.ID, "file", a.Name, "reason", reason)
+		a.State, a.Error = ticket.AttachmentFailed, textutil.Clip(reason, 500)
+		return nil
+	}
+	// transient 处理临时错误：还能重试时返回错误（任务按退避重试），否则记为失败；进程退出时不记
+	transient := func(what string, err error) error {
+		if parent, ok := ctx.Value(parentCtxKey{}).(context.Context); ok && parent.Err() != nil {
+			return parent.Err()
+		}
+		if taskFailures(ctx)+1 < fetchAttempts {
+			return fmt.Errorf("%s attachment %s: %w", what, a.ID, err)
+		}
+		return fail(what + ": " + err.Error())
+	}
+	if a.Size > maxAttachmentBytes {
+		return fail(errAttachmentTooLarge.Error())
+	}
+	rc, err := w.o.FetchAttachment(ctx, *a)
+	switch {
+	case errors.Is(err, ticket.ErrNotFound) || errors.Is(err, ticket.ErrForbidden):
+		return fail("fetch: " + err.Error())
+	case err != nil:
+		return transient("fetch", err)
+	}
+	lr := &limitedReader{r: rc, n: maxAttachmentBytes}
+	ga, err := upload(*a, lr)
+	_ = rc.Close()
+	var ae *gitea.APIError
+	switch {
+	case lr.over:
+		return fail(errAttachmentTooLarge.Error())
+	case err == nil:
+		a.State, a.GiteaURL = ticket.AttachmentUploaded, ga.BrowserDownloadURL
+		return nil
+	case errors.As(err, &ae) && rejectedUpload(ae.StatusCode):
+		return fail(err.Error())
+	case gitea.IsRetryable(err) || ctx.Err() != nil:
+		return transient("upload", err)
+	default:
+		return giteaErr("upload attachment "+a.ID, err)
+	}
+}
+
+// limitedReader 读到超过 n 字节时报错（而不是像 io.LimitReader 那样静默截断，截断的文件不能上传）。
+type limitedReader struct {
+	r    io.Reader
+	n    int64
+	over bool
+}
+
+func (l *limitedReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	if l.n -= int64(n); l.n < 0 {
+		l.over = true
+		return n, errAttachmentTooLarge
+	}
+	return n, err
+}
+
+// rejectedUpload 报告 Gitea 是否按内容或设置拒收了附件：Issue 已由同一机器人创建，403 / 404 只可能是实例关闭了附件。
+func rejectedUpload(status int) bool {
 	switch status {
-	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusRequestEntityTooLarge,
+		http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity:
 		return true
 	}
 	return false
 }
 
-// attachmentSection 按已处理的附件生成正文中的附件段落；没有附件时为空。
-func (w *Worker) attachmentSection(ctx context.Context, ticketID, commentID int64) (string, error) {
-	ls, err := w.o.Forwarding.AttachmentLinks(ctx, ticketID, commentID)
-	if err != nil || len(ls) == 0 {
-		return "", err
-	}
+type failuresKey struct{}
+
+// withFailures 记下任务此前的失败次数，供附件读取判断是否还要重试。
+func withFailures(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, failuresKey{}, n)
+}
+
+func taskFailures(ctx context.Context) int {
+	n, _ := ctx.Value(failuresKey{}).(int)
+	return n
+}
+
+// attachmentSection 按已处理的附件生成正文中的附件段落；没有时为空。
+func attachmentSection(as []ticket.Attachment) string {
 	var b strings.Builder
-	b.WriteString(sectionStart + "\n### 附件\n\n")
-	for _, l := range ls {
-		name := escapeMarkdown(l.Filename)
+	for _, a := range as {
+		if !a.Forwarded() {
+			continue
+		}
+		name := escapeMarkdown(a.Name)
 		switch {
-		case l.URL == "":
-			b.WriteString("- " + name + "（未能上传到 Gitea，请在灵问后台查看）\n")
-		case strings.HasPrefix(l.ContentType, "image/"):
-			b.WriteString("- ![" + name + "](" + l.URL + ")\n")
+		case a.State == ticket.AttachmentUploaded && strings.HasPrefix(a.ContentType, "image/"):
+			b.WriteString("- ![" + name + "](<" + a.GiteaURL + ">)\n")
+		case a.State == ticket.AttachmentUploaded:
+			b.WriteString("- [" + name + "](<" + a.GiteaURL + ">)\n")
+		case a.URL != "" && a.State == ticket.AttachmentFailed:
+			b.WriteString("- [" + name + "](<" + a.URL + ">)（未能上传到 Gitea）\n")
+		case a.URL != "":
+			b.WriteString("- [" + name + "](<" + a.URL + ">)\n")
 		default:
-			b.WriteString("- [" + name + "](" + l.URL + ")\n")
+			b.WriteString("- " + name + "（请在业务系统中查看）\n")
 		}
 	}
-	b.WriteString(sectionEnd)
-	return b.String(), nil
+	if b.Len() == 0 {
+		return ""
+	}
+	return sectionStart + "\n### 附件\n\n" + b.String() + sectionEnd
 }
 
 const (
@@ -640,14 +728,15 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 		}
 		giteaID = gc.ID
 	}
-	if err := w.uploadAttachments(ctx, t.ID, c.ID, nil, func(a *ticket.Attachment) (*gitea.Attachment, error) {
-		return w.o.Issues.CreateCommentAttachment(ctx, owner, name, giteaID, a.Filename, bytes.NewReader(a.Data))
-	}); err != nil {
-		return err // 评论已发出并记录：重试时跳过发评论，继续上传剩余附件
+	as, err := w.forwardAttachments(ctx, t.ID, c.ID, nil, func(a ticket.Attachment, r io.Reader) (*gitea.Attachment, error) {
+		return w.o.Issues.CreateCommentAttachment(ctx, owner, name, giteaID, a.Name, r)
+	})
+	if err != nil {
+		return err // 评论已发出并记录：重试时跳过发评论，继续处理剩余附件
 	}
-	section, err := w.attachmentSection(ctx, t.ID, c.ID)
-	if err != nil || section == "" {
-		return err
+	section := attachmentSection(as)
+	if section == "" {
+		return nil
 	}
 	if _, err := w.o.Issues.EditComment(ctx, owner, name, giteaID, body+"\n\n"+section); err != nil {
 		return giteaErr("edit comment", err)

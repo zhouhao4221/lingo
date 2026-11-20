@@ -126,7 +126,7 @@ func Run(ctx context.Context, o Options) []Result {
 	if as, err := o.Gitea.GetAttachmentSettings(ctx); err != nil {
 		add("", "attachments", Warn, "cannot read attachment settings: %v", err)
 	} else if !as.Enabled {
-		add("", "attachments", Warn, "attachments are disabled in Gitea: ticket attachments stay in lingo")
+		add("", "attachments", Warn, "attachments are disabled in Gitea: uploads are rejected, attachments are linked in the issue body instead")
 	} else {
 		add("", "attachments", OK, "attachments enabled, max %d MB, types %s", as.MaxSize, orAny(as.AllowedTypes))
 	}

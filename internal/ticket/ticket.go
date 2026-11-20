@@ -70,7 +70,8 @@ type Ticket struct {
 	Repo           string // "owner/name"，未选定仓库时为空
 	Type           string // consult | bug | feature
 	Title          string
-	TitleAuto      bool // 标题由灵问从正文生成（提交人未填写），建 Issue 时可由模型改写
+	TitleAuto      bool         // 标题由灵问从正文生成（提交人未填写），建 Issue 时可由模型改写
+	Attachments    []Attachment // 提交时的附件引用（写入时使用；读取工单时不回填，见 Detail）
 	Body           string
 	Fields         map[string][]string // Issue 表单模板字段取值（按字段 ID）
 	Context        map[string]string   // 页面 URL、浏览器等提交环境
@@ -79,7 +80,6 @@ type Ticket struct {
 	UserID         string // 提交人（接入方用户 ID）
 	UserName       string // 提交人姓名快照，仅展示
 	UserEmail      string
-	Conversation   int64 // 从问答转出时的会话 ID
 	IssueNumber    int64 // 主 Issue 编号，Issue 创建前为 0
 	MergedInto     int64
 	TriageSince    *time.Time
