@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
+	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/notify"
 	"github.com/zhouhao4221/lingo/internal/store"
 	"github.com/zhouhao4221/lingo/internal/ticket"
@@ -59,10 +60,12 @@ type Options struct {
 	Notify        func(ctx context.Context, e notify.Event) error
 
 	// Tasks、Issues、Drafts 同时非空时运行 Gitea 写操作循环（建 Issue 等）。
-	Tasks       TaskStore
-	Issues      IssueWriter
-	Drafts      Drafts
-	Forwarding  Forwarding
+	Tasks      TaskStore
+	Issues     IssueWriter
+	Drafts     Drafts
+	Forwarding Forwarding
+	// Drafter 非空时建 Issue 前用轻量模型整理工单内容（失败时按原内容建单）。
+	Drafter     Drafter
 	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
 	LabelPrefix string                       // 默认 "lingo"
 	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
@@ -88,6 +91,11 @@ type Options struct {
 	// 剩余租约不足以再处理一条时，其余条目释放回队列，避免租约过期后被其他实例重复处理。
 	TaskTimeout time.Duration
 	Now         func() time.Time
+}
+
+// Drafter 整理待建 Issue 的工单内容，由 llm.Drafter 实现。
+type Drafter interface {
+	DraftIssue(ctx context.Context, in llm.DraftInput) (*llm.Draft, error)
 }
 
 // Reminder 发出待确认超时提醒并清理孤儿附件，由 ticket.Service 实现。

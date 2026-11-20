@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
+	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/store"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -258,9 +259,10 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return err
 	}
-	opt := gitea.CreateIssueOption{Title: t.Title, Body: IssueBody(t, tmpl, comments, forwardedBy, note), Labels: labels, Assignees: cfg.Assignees}
-	if tmpl != nil && tmpl.Title != "" && !strings.HasPrefix(t.Title, tmpl.Title) {
-		opt.Title = tmpl.Title + t.Title
+	draft, original := w.draftIssue(ctx, t, tmpl, forwardedBy != "")
+	opt := gitea.CreateIssueOption{Title: draft.Title, Body: IssueBody(draft, tmpl, comments, forwardedBy, note, original), Labels: labels, Assignees: cfg.Assignees}
+	if tmpl != nil && tmpl.Title != "" && !strings.HasPrefix(opt.Title, tmpl.Title) {
+		opt.Title = tmpl.Title + opt.Title
 	}
 	opt.Title = clipRunes(opt.Title, maxIssueTitle)
 	is, err := w.o.Issues.CreateIssue(ctx, owner, name, opt)
@@ -285,6 +287,43 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	}
 	t.IssueNumber = is.Number
 	return w.uploadIssueAttachments(ctx, t, attachments)
+}
+
+// draftTimeout 是整理工单的时限：超时按原内容建单。
+const draftTimeout = 45 * time.Second
+
+// draftIssue 用轻量模型整理工单（标题、模板字段、描述），返回用于建单的副本与原始描述；未配置模型或整理失败时
+// 返回原工单与空串（按原内容建单，不影响建单）。keepTitle 为真（后台人员已确认过标题）时不改标题。
+func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.IssueTemplate, keepTitle bool) (*ticket.Ticket, string) {
+	if w.o.Drafter == nil {
+		return t, ""
+	}
+	in := llm.DraftInput{Type: t.Type, Title: t.Title, Body: t.Body, Fields: t.Fields, Context: t.Context, Version: t.Version}
+	if tmpl != nil && tmpl.IsForm() {
+		in.TitlePrefix = tmpl.Title
+		for _, f := range tmpl.Fields {
+			if f.IsInput() && f.ID != "" {
+				in.Template = append(in.Template, llm.FieldSpec{ID: f.ID, Label: f.Label(), Kind: f.Type, Description: f.Description(),
+					Required: f.Required(), Options: f.Options(), Multiple: f.Multiple()})
+			}
+		}
+	}
+	dctx, cancel := context.WithTimeout(ctx, draftTimeout)
+	defer cancel()
+	d, err := w.o.Drafter.DraftIssue(dctx, in)
+	if err != nil {
+		w.log.Warn("issue drafting failed, using original content", "ticket", t.ID, "err", err)
+		return t, ""
+	}
+	out := *t
+	if !keepTitle {
+		out.Title = d.Title
+	}
+	if d.Description != "" {
+		out.Body = d.Description
+	}
+	out.Fields = d.Fields
+	return &out, t.Body
 }
 
 func commentIDs(cs []ticket.Comment) []int64 {
@@ -554,7 +593,8 @@ func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg Repo
 
 // IssueBody 生成 Issue 正文：有表单模板且提交了字段时按 Gitea 表单格式渲染，否则用内置结构；
 // 末尾附项目、版本、提交环境、确认人与隐藏标记。不写入提交人姓名、邮箱等身份信息（PRD 3.2.0.6）。
-func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Comment, forwardedBy, note string) string {
+// original 非空时（内容经模型整理过）在末尾附上提交人原始描述，整理有误时研发仍能看到原话。
+func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Comment, forwardedBy, note, original string) string {
 	var b strings.Builder
 	fields := map[string][]string{}
 	for k, vs := range t.Fields {
@@ -588,6 +628,9 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Co
 	}
 	for _, c := range comments {
 		b.WriteString("### " + commentHeading(&c) + "（" + c.At.UTC().Format("2006-01-02 15:04 UTC") + "）\n\n" + stripMarkers(c.Body) + "\n\n")
+	}
+	if original = strings.TrimSpace(stripMarkers(original)); original != "" {
+		b.WriteString("<details><summary>提交人原始描述</summary>\n\n" + original + "\n\n</details>\n\n")
 	}
 	b.WriteString("---\n\n")
 	b.WriteString("- 项目：" + t.ProjectKey + "\n")
