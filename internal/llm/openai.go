@@ -80,8 +80,23 @@ type APIError struct {
 
 func (e *APIError) Error() string { return fmt.Sprintf("llm: HTTP %d: %s", e.StatusCode, e.Message) }
 
+// Usage 是一次调用消耗的 token（接口未返回时为 0）。Cached 是输入中命中服务端前缀缓存的部分
+// （OpenAI 的 prompt_tokens_details.cached_tokens、DeepSeek 的 prompt_cache_hit_tokens），用来观察提示词前缀是否稳定。
+type Usage struct {
+	Model  string
+	Input  int
+	Output int
+	Cached int
+}
+
 // Chat 调用 /chat/completions，返回第一个候选的文本。
 func (c *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
+	s, _, err := c.ChatUsage(ctx, messages)
+	return s, err
+}
+
+// ChatUsage 同 Chat，另返回 token 用量（出错时为已知部分）。
+func (c *OpenAI) ChatUsage(ctx context.Context, messages []Message) (string, Usage, error) {
 	type msg struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
@@ -96,27 +111,46 @@ func (c *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
 		req.Messages = append(req.Messages, msg{m.Role, m.Content})
 	}
 	var resp struct {
+		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"` // DeepSeek
+		} `json:"usage"`
 	}
+	u := Usage{Model: c.o.Model}
 	if err := c.post(ctx, "/chat/completions", req, &resp); err != nil {
-		return "", err
+		return "", u, err
+	}
+	if resp.Model != "" {
+		u.Model = resp.Model
+	}
+	if x := resp.Usage; x != nil {
+		u.Input, u.Output, u.Cached = x.PromptTokens, x.CompletionTokens, x.PromptCacheHitTokens
+		if d := x.PromptTokensDetails; d != nil && d.CachedTokens > 0 {
+			u.Cached = d.CachedTokens
+		}
 	}
 	if len(resp.Choices) == 0 {
-		return "", errors.New("llm: empty choices")
+		return "", u, errors.New("llm: empty choices")
 	}
 	ch := resp.Choices[0]
 	switch {
 	case ch.FinishReason == "length":
-		return "", ErrTruncated
+		return "", u, ErrTruncated
 	case strings.TrimSpace(ch.Message.Content) == "":
-		return "", ErrEmptyContent
+		return "", u, ErrEmptyContent
 	}
-	return ch.Message.Content, nil
+	return ch.Message.Content, u, nil
 }
 
 // Embed 调用 /embeddings，按输入顺序返回向量。

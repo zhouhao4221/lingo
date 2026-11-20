@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.22 | 2026-11-21 | haiqing | 模型用量与缓存：解析接口返回的 token 用量（含命中服务端前缀缓存的部分：OpenAI `cached_tokens`、DeepSeek `prompt_cache_hit_tokens`），每次调用写入 `llm_usage` 并记日志；`l.LLMUsage` / `GET /usage` / MCP `get_llm_usage`（admin）按天、用途、模型汇总并给出缓存命中率；自定义模型可实现 `UsageModel` 报告用量；建单整理的提示词按“不变在前、变化在后”排布；进程内缓存（Issue 模板、标签、整理结果）统一为带过期时间与容量上限的 `internal/cache` |
 | v1.21 | 2026-11-21 | haiqing | 内置模型适配：`NewOpenAIModel`（OpenAI 及兼容接口，Chat Completions + Embeddings）、`NewDeepSeekModel`（DeepSeek，无向量接口）；标准库 HTTP 实现，429 / 5xx / 网络错误重试两次 |
 | v1.20 | 2026-11-21 | haiqing | 建 Issue 前用轻量模型整理工单：新增 `Config.LightModel`（为空时用 `Model`，都为空按原内容建单），`Config.Model` 改为可选；生成标题（只改写灵问从正文生成的标题；提交人自己写的、后台确认转出的保留）、从描述中抽取模板字段（只采纳模板中的字段与选项，提交人已填的不改）、整理描述；Issue 末尾附提交人原始描述；模型失败或超时按原内容建单；不向模型发送提交人身份。后台预览留待下一步 |
 | v1.19 | 2026-11-20 | haiqing | 提交人在 need_info 时补充后由机器人移除 Issue 上的需补充标签；被合并工单的提交人随目标工单收到对外进展（事件挂在各自工单上）；README 与接入示例更新 |

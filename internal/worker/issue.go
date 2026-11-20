@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zhouhao4221/lingo/internal/cache"
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/store"
@@ -302,10 +303,10 @@ const (
 // parentCtxKey 在任务 context 中携带可取消的上层 context：退出时停止整理（按原内容建单），不等模型。
 type parentCtxKey struct{}
 
-// draftCache 缓存整理结果（按工单与其更新时间），建单重试时不重复调用模型、内容保持一致。
+// draftCache 缓存整理结果（按工单与其更新时间，1 小时），建单重试时不重复调用模型、内容保持一致。
 type draftCache struct {
-	mu sync.Mutex
-	m  map[string]drafted
+	once sync.Once
+	c    *cache.Cache[string, drafted]
 }
 
 type drafted struct {
@@ -313,35 +314,21 @@ type drafted struct {
 	original string
 }
 
+func (c *draftCache) cache() *cache.Cache[string, drafted] {
+	c.once.Do(func() { c.c = cache.New[string, drafted](time.Hour, 1000) })
+	return c.c
+}
+
 func (c *draftCache) key(t *ticket.Ticket) string {
 	return strconv.FormatInt(t.ID, 10) + "@" + strconv.FormatInt(t.UpdatedAt.UnixNano(), 10)
 }
 
-func (c *draftCache) get(t *ticket.Ticket) (drafted, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	d, ok := c.m[c.key(t)]
-	return d, ok
-}
-
-func (c *draftCache) put(t *ticket.Ticket, d drafted) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.m == nil || len(c.m) > 1000 {
-		c.m = map[string]drafted{} // 上限保护：只为短期重试服务
-	}
-	c.m[c.key(t)] = d
-}
+func (c *draftCache) get(t *ticket.Ticket) (drafted, bool) { return c.cache().Get(c.key(t)) }
+func (c *draftCache) put(t *ticket.Ticket, d drafted)      { c.cache().Put(c.key(t), d) }
 
 func (c *draftCache) drop(id int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	prefix := strconv.FormatInt(id, 10) + "@"
-	for k := range c.m {
-		if strings.HasPrefix(k, prefix) {
-			delete(c.m, k)
-		}
-	}
+	c.cache().DeleteFunc(func(k string) bool { return strings.HasPrefix(k, prefix) })
 }
 
 // draftIssue 用轻量模型整理工单（标题、模板字段、描述），返回用于建单的副本与原始描述（只有描述被改写时非空）。
@@ -378,7 +365,9 @@ func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.I
 		stop := context.AfterFunc(parent, cancel)
 		defer stop()
 	}
-	d, err := w.o.Drafter.DraftIssue(dctx, in)
+	start := time.Now()
+	d, usage, err := w.o.Drafter.DraftIssue(dctx, in)
+	w.recordUsage(ctx, "draft_issue", t.ID, usage, err == nil, time.Since(start))
 	if err != nil {
 		w.log.Warn("issue drafting failed, using original content", "ticket", t.ID, "err", err)
 		return t, ""
@@ -393,6 +382,19 @@ func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.I
 	out.Fields = d.Fields
 	w.drafts.put(t, drafted{t: &out, original: original})
 	return &out, original
+}
+
+// recordUsage 记录一次模型调用的用量（写库失败只记日志），并在日志中给出前缀缓存命中情况，便于观察提示词前缀是否稳定。
+func (w *Worker) recordUsage(ctx context.Context, kind string, ticketID int64, u llm.Usage, ok bool, latency time.Duration) {
+	w.log.Info("llm usage", "kind", kind, "ticket", ticketID, "model", u.Model, "input", u.Input, "cached", u.Cached,
+		"output", u.Output, "ok", ok, "latency_ms", latency.Milliseconds())
+	if w.o.Usage == nil {
+		return
+	}
+	if err := w.o.Usage.RecordLLMUsage(context.WithoutCancel(ctx), store.LLMUsage{Kind: kind, Model: u.Model, TicketID: ticketID,
+		Input: u.Input, Output: u.Output, Cached: u.Cached, OK: ok, Latency: latency}); err != nil {
+		w.log.Warn("record llm usage failed", "err", err)
+	}
 }
 
 // stripTitlePrefix 去掉模型可能自带的模板标题前缀（如 "[Bug]: "、"[Bug]"），避免拼成 "[Bug]: [Bug] …"。
@@ -755,64 +757,56 @@ func stripMarkers(s string) string {
 // maxIssueTitle 是 Gitea Issue 标题上限（字符）。
 const maxIssueTitle = 255
 
-// labelCache 缓存各仓库标签 name → id，缺的标签创建后加入缓存。
+// labelCache 缓存各仓库标签 name（小写）→ id（10 分钟），缺的标签创建后更新缓存。
 type labelCache struct {
-	mu     sync.Mutex
-	byRepo map[string]map[string]int64
+	once sync.Once
+	c    *cache.Cache[string, map[string]int64]
 }
 
-// lookup 返回仓库中标签 label 的 ID（不创建）；缓存未命中时重新列出标签。
+func (c *labelCache) cache() *cache.Cache[string, map[string]int64] {
+	c.once.Do(func() { c.c = cache.New[string, map[string]int64](10*time.Minute, 500) })
+	return c.c
+}
+
+// lookup 返回仓库中标签 label 的 ID（不创建）；缓存未命中时重新列出标签（在锁外进行，不阻塞其他仓库）。
 func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, label string) (int64, bool, error) {
 	key := strings.ToLower(owner + "/" + name)
-	c.mu.Lock()
-	id, ok := c.byRepo[key][strings.ToLower(label)]
-	c.mu.Unlock()
-	if ok {
-		return id, true, nil
+	if ids, ok := c.cache().Get(key); ok {
+		if id, ok := ids[strings.ToLower(label)]; ok {
+			return id, true, nil
+		}
 	}
-	// 列标签在锁外进行，不阻塞其他仓库的建单
 	ids, _, err := gitea.EnsureLabels(ctx, g, owner, name, nil)
 	if err != nil {
 		return 0, false, giteaErr("list labels", err)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.byRepo == nil {
-		c.byRepo = map[string]map[string]int64{}
-	}
-	c.byRepo[key] = ids
-	id, ok = ids[strings.ToLower(label)]
+	c.cache().Put(key, ids)
+	id, ok := ids[strings.ToLower(label)]
 	return id, ok, nil
 }
 
 func (c *labelCache) forget(owner, name string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.byRepo, strings.ToLower(owner+"/"+name))
+	c.cache().Delete(strings.ToLower(owner + "/" + name))
 }
 
+// ensure 返回 want 中各标签的 ID，缺的创建。
 func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name string, want []gitea.CreateLabelOption) ([]int64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	key := strings.ToLower(owner + "/" + name)
-	if c.byRepo == nil {
-		c.byRepo = map[string]map[string]int64{}
-	}
-	ids := c.byRepo[key]
-	have := func() bool {
+	ids, ok := c.cache().Get(key)
+	if ok {
 		for _, l := range want {
-			if _, ok := ids[strings.ToLower(l.Name)]; !ok {
-				return false
+			if _, has := ids[strings.ToLower(l.Name)]; !has {
+				ok = false
+				break
 			}
 		}
-		return ids != nil
 	}
-	if !have() {
+	if !ok {
 		var err error
 		if ids, _, err = gitea.EnsureLabels(ctx, g, owner, name, want); err != nil {
 			return nil, giteaErr("ensure labels", err)
 		}
-		c.byRepo[key] = ids
+		c.cache().Put(key, ids)
 	}
 	out := make([]int64, 0, len(want))
 	for _, l := range want {

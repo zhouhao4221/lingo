@@ -157,14 +157,19 @@ func (l *Lingo) drafter() worker.Drafter {
 		return nil
 	}
 	if om, ok := m.(openAIModel); ok {
-		return &llm.Drafter{Chat: om.c.Chat} // 内置适配器：直接调用，免去消息类型来回转换
+		return &llm.Drafter{Chat: om.c.ChatUsage} // 内置适配器：直接调用，免去消息类型来回转换
 	}
-	return &llm.Drafter{Chat: func(ctx context.Context, ms []llm.Message) (string, error) {
+	return &llm.Drafter{Chat: func(ctx context.Context, ms []llm.Message) (string, llm.Usage, error) {
 		in := make([]Message, 0, len(ms))
 		for _, x := range ms {
 			in = append(in, Message{Role: x.Role, Content: x.Content})
 		}
-		return m.Chat(ctx, in)
+		if um, ok := m.(UsageModel); ok {
+			s, u, err := um.ChatUsage(ctx, in)
+			return s, llm.Usage(u), err
+		}
+		s, err := m.Chat(ctx, in)
+		return s, llm.Usage{}, err
 	}}
 }
 
@@ -255,6 +260,7 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Drafts:      l.tickets,
 		Forwarding:  l.store,
 		Drafter:     l.drafter(),
+		Usage:       l.store,
 		Repos:       l.repoConfig,
 		LabelPrefix: l.labelPrefix(),
 		Templates:   l.tmpls,

@@ -73,12 +73,13 @@ light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
 | `GET /events?after=` | 变更流（与 `Notifier` 同源） |
 | `GET /releases`、`GET /releases/{id}` | 版本记录、关联工单与上线记录 |
 | `GET` / `PUT /settings/auto-forward` | 自动转出开关（修改需 admin） |
+| `GET /usage?from=&to=` | 模型 token 用量，按天、用途、模型汇总，含前缀缓存命中率（admin） |
 
 写操作须使用 `Content-Type: application/json`（防 CSRF）；错误响应为 `{"error":{"code","message"}}`。
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`list_releases`、`get_release`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`list_releases`、`get_release`、`get_llm_usage`。
 
 ### 事件
 

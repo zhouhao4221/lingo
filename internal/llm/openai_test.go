@@ -29,7 +29,8 @@ func TestOpenAIChatAndEmbed(t *testing.T) {
 				http.Error(w, "bad request", 400)
 				return
 			}
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"你好"},"finish_reason":"stop"}]}`))
+			_, _ = w.Write([]byte(`{"model":"gpt-test-0601","choices":[{"message":{"role":"assistant","content":"你好"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":1200,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":1024}}}`))
 		case "/v1/embeddings":
 			_, _ = w.Write([]byte(`{"data":[{"index":1,"embedding":[0.2]},{"index":0,"embedding":[0.1]}]}`))
 		}
@@ -43,6 +44,10 @@ func TestOpenAIChatAndEmbed(t *testing.T) {
 	out, err := c.Chat(context.Background(), []Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}})
 	if err != nil || out != "你好" {
 		t.Errorf("chat = %q %v", out, err)
+	}
+	_, u, err := c.ChatUsage(context.Background(), []Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}})
+	if err != nil || u != (Usage{Model: "gpt-test-0601", Input: 1200, Output: 30, Cached: 1024}) {
+		t.Errorf("usage = %+v %v", u, err)
 	}
 	vs, err := c.Embed(context.Background(), []string{"a", "b"})
 	if err != nil || len(vs) != 2 || vs[0][0] != 0.1 || vs[1][0] != 0.2 {
@@ -104,10 +109,14 @@ func TestOpenAIRetries(t *testing.T) {
 			http.Error(w, `{"error":{"message":"busy"}}`, 503)
 			return
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":8}}`))
 	}))
 	defer srv.Close()
 	c, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m"})
+	if _, u, err := c.ChatUsage(context.Background(), nil); err != nil || u.Cached != 8 { // DeepSeek 的缓存命中字段
+		t.Errorf("deepseek usage = %+v %v", u, err)
+	}
+	calls.Store(0)
 	if out, err := c.Chat(context.Background(), nil); err != nil || out != "ok" || calls.Load() != 2 {
 		t.Errorf("retry = %q %v calls=%d", out, err, calls.Load())
 	}
