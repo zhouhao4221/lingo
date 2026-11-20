@@ -60,7 +60,63 @@ See [examples/server](examples/server/main.go) for a complete example.
 
 ### Roles
 
-Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions (`user`, `business`, `expert`, `leader`): feature tickets can be supplemented per perspective via `AddPerspective`, the issue body shows them in layered sections and gets `<prefix>/视角/<name>` labels, and `Config.RequiredPerspectives` flags missing ones. `Config.AuthorizePerspective` decides who may add to or read which requirement (by default the normal ticket visibility applies: external users only their own); contributor and submitter names are written to the issue.
+Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions; see below.
+
+### Requirement perspectives
+
+A requirement (`feature` ticket) can be supplemented by people in different positions: the user (`user`: symptoms and needs), the business side (`business`: scope and impact), experts (`expert`: proposed solutions) and decision makers (`leader`: go/no-go and priority). Once forwarded, the issue body shows the supplements grouped by perspective (each with name and time) and gets `<prefix>/视角/<name>` labels; later supplements make the bot rewrite that block and post a short notice comment. Perspectives only classify content and grant no permissions.
+
+Integration takes four steps (full examples in [example_perspective_test.go](example_perspective_test.go) and [examples/server](examples/server/main.go)):
+
+```go
+lingo.Config{
+	// 1. Map the perspective from your own user model in Authenticate (empty means user)
+	Authenticate: func(r *http.Request) (lingo.User, error) {
+		u := currentUser(r)
+		return lingo.User{ID: u.ID, Name: u.Name, Role: lingo.RoleExternal, Perspective: perspectiveOf(u)}, nil
+	},
+	// 2. Who may add to (write) or read which requirement. If unset, normal ticket visibility applies: external
+	//    users only their own, agents only forwarded ones, reviewer / admin everything in their projects.
+	//    Allow business people and others to join other users' requirements here
+	AuthorizePerspective: func(ctx context.Context, u lingo.User, t lingo.Ticket, write bool) error {
+		if u.Perspective != "" || t.UserID == u.ID {
+			return nil
+		}
+		return lingo.ErrNotFound // or lingo.ErrForbidden
+	},
+	// 3. Required perspectives (optional): forwarding without them emits ticket.perspective_missing and the issue
+	//    block notes what is missing; Project.RequiredPerspectives overrides, an empty slice disables the check
+	RequiredPerspectives: []lingo.Perspective{lingo.PerspectiveBusiness, lingo.PerspectiveLeader},
+	// 4. In your Notifier, use Event.Perspectives to decide whom to notify
+}
+```
+
+Calls (Go, REST and MCP share the same checks):
+
+| Go | REST | MCP |
+|---|---|---|
+| `l.AddPerspective(ctx, u, id, content)` | `POST /tickets/{id}/perspectives` `{"content":"…"}` → 201 | `add_perspective {id, content}` |
+| `l.ListPerspectives(ctx, u, id)` | `GET /tickets/{id}/perspectives` → 200 | `list_perspectives {id}` |
+
+```json
+// POST returns the supplement
+{"id": 7, "perspective": "business", "author_name": "Zhang San", "content": "Affects 30 stores", "at": "2026-11-21T09:30:00Z"}
+// GET returns supplements grouped by perspective (fixed order, non-empty groups only) and missing required perspectives;
+// the first entry is the original submission (original, id 0)
+{"ticket_id": 42,
+ "groups": [{"perspective": "user", "title": "使用者反馈", "entries": [{"id": 0, "perspective": "user", "author_name": "Wang Wu", "content": "Export to Excel", "at": "…", "original": true}]},
+            {"perspective": "business", "title": "业务补充", "entries": [{"id": 7, "…": "…"}]}],
+ "missing": ["leader"]}
+```
+
+Errors: `invalid_input` (400: not a feature ticket, invalid perspective, empty content or over 10,000 characters), `forbidden` (403), `not_found` (404: missing, outside the user's projects or not visible) and `conflict` (409: ticket answered, merged, rejected or closed).
+
+Notes:
+
+- Supplements are append-only; fixed, released and deployed requirements still accept them.
+- Contributor and submitter names (`User.Name`) are written to the Gitea issue; emails and user IDs are not.
+- `ticket.perspective_added` (`Perspectives` holds the contributor's perspective, `Body` a notice without the content) and `ticket.perspective_missing` (`Perspectives` holds the missing ones) follow the visibility of other ticket events.
+- The bot token must be able to create labels (`write:issue`); perspective labels are created by the startup self-check.
 
 ### REST API
 
@@ -68,6 +124,7 @@ Your `Authenticate` maps each user to one of four fixed roles: `external` (end u
 |---|---|
 | `GET /projects`, `GET /ticket-types` | Projects and repositories; ticket types with issue-template form fields |
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
+| `POST` / `GET /tickets/{id}/perspectives` | Requirement perspectives: add, list grouped by perspective (see above) |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
 | `GET /events?after=` | Event feed (same events as the `Notifier`) |
 | `GET /releases`, `GET /releases/{id}` | Releases with linked tickets and deployments |

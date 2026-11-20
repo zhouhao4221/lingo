@@ -59,7 +59,17 @@ func main() {
 			AutoForward: map[lingo.TicketType]bool{lingo.TicketBug: true}, // Bug 自动转出，其余待后台确认
 		}},
 		Authenticate: authenticate,
-		Notifier:     logNotifier{},
+		// 需求视角（可选）：谁能给哪条需求补充 / 查看视角补充。不配置时同工单可见范围（external 只能是本人的需求）；
+		// 这里放行有视角的人（业务方、专家、决策者）参与项目内全部需求。
+		AuthorizePerspective: func(ctx context.Context, u lingo.User, t lingo.Ticket, write bool) error {
+			if u.Perspective != "" || t.UserID == u.ID {
+				return nil
+			}
+			return lingo.ErrNotFound
+		},
+		// 需求转出时缺少这些视角会发 ticket.perspective_missing，并在 Issue 的视角区块标注
+		RequiredPerspectives: []lingo.Perspective{lingo.PerspectiveBusiness, lingo.PerspectiveLeader},
+		Notifier:             logNotifier{},
 		// 附件存在业务系统自己的附件服务中，提交工单时只传引用（ID、文件名、地址）。可选配置 FetchAttachment：
 		// 转出时读取内容上传为 Gitea 附件；不配置时只把附件地址写进 Issue。
 		// 读取时须校验附件属于 userID（附件 ID 由前端传入），否则返回 lingo.ErrNotFound：
@@ -110,20 +120,23 @@ func lightModel() lingo.Model {
 	return m
 }
 
-// authenticate 替换为业务项目自己的登录态解析（如校验会话 cookie 或令牌），并按服务端记录的用户身份映射固定角色。
-// 示例从请求头取用户 ID 仅为演示，生产环境不能信任客户端自报的身份或角色。
+// authenticate 替换为业务项目自己的登录态解析（如校验会话 cookie 或令牌），并按服务端记录的用户身份映射固定角色
+// 与需求视角（user / business / expert / leader，与权限无关）。示例从请求头取用户 ID 与视角仅为演示，
+// 生产环境不能信任客户端自报的身份、角色或视角。
 func authenticate(r *http.Request) (lingo.User, error) {
 	id := r.Header.Get("X-User-ID")
 	if id == "" {
 		return lingo.User{}, errors.New("unauthenticated")
 	}
-	return lingo.User{ID: id, Role: lingo.RoleExternal}, nil
+	return lingo.User{ID: id, Name: r.Header.Get("X-User-Name"), Role: lingo.RoleExternal,
+		Perspective: lingo.Perspective(r.Header.Get("X-User-Perspective"))}, nil
 }
 
 // logNotifier 把进展事件写日志；实际项目中发邮件、站内信或推送到前端。返回错误会重试，接入方按 Event.ID 去重。
 type logNotifier struct{}
 
 func (logNotifier) Notify(ctx context.Context, e lingo.Event) error {
-	slog.InfoContext(ctx, "lingo event", "id", e.ID, "kind", e.Kind, "ticket", e.TicketID, "status", e.Status, "user", e.UserID)
+	slog.InfoContext(ctx, "lingo event", "id", e.ID, "kind", e.Kind, "ticket", e.TicketID, "status", e.Status, "user", e.UserID,
+		"perspectives", e.Perspectives) // perspective_added：本次补充的视角；perspective_missing：缺失的必填视角，据此提醒相应的人
 	return nil
 }

@@ -60,7 +60,61 @@ light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
 
 ### 角色
 
-`Authenticate` 把用户映射为四个固定角色之一：`external`（终端用户，只看本人工单）、`agent`（研发 Agent，看所属项目已转出的工单）、`reviewer`（后台确认，看所属项目全部工单）、`admin`。`User.Projects` 可选，用于限制可访问的项目。`User.Perspective` 可选，是与权限无关的需求视角（`user` 使用者 / `business` 业务方 / `expert` 专家 / `leader` 决策者）：需求工单可由各视角用 `AddPerspective` 追加补充，Issue 正文按视角分层展示并打 `<前缀>/视角/<视角名>` 标签；`Config.RequiredPerspectives` 可设必填视角。谁能补充、查看哪条需求由 `Config.AuthorizePerspective` 决定（未配置时同工单可见范围：external 只能是本人的需求），补充人与提交人姓名会写入 Issue。
+`Authenticate` 把用户映射为四个固定角色之一：`external`（终端用户，只看本人工单）、`agent`（研发 Agent，看所属项目已转出的工单）、`reviewer`（后台确认，看所属项目全部工单）、`admin`。`User.Projects` 可选，用于限制可访问的项目。`User.Perspective` 可选，是与权限无关的需求视角，见下节。
+
+### 需求视角
+
+同一条需求（`feature` 工单）可以由不同身份的人分别补充：使用者 `user` 说现象与诉求、业务方 `business` 说影响范围、专家 `expert` 给方案建议、决策者 `leader` 定做不做与优先级。转出后 Issue 正文按视角分段展示（每段标注姓名与时间），并打 `<前缀>/视角/<视角名>` 标签；转出后的补充由机器人重写正文区块并发一条提示评论。视角只用于给内容归类，不授予任何权限。
+
+接入分四步（完整示例见 [example_perspective_test.go](example_perspective_test.go)、[examples/server](examples/server/main.go)）：
+
+```go
+lingo.Config{
+	// 1. 在 Authenticate 中按自己的用户身份映射视角（为空视为 user）
+	Authenticate: func(r *http.Request) (lingo.User, error) {
+		u := currentUser(r)
+		return lingo.User{ID: u.ID, Name: u.Name, Role: lingo.RoleExternal, Perspective: perspectiveOf(u)}, nil
+	},
+	// 2. 谁能补充（write）/ 查看哪条需求。不配置时同工单可见范围：external 只能是本人的需求，
+	//    agent 只能是已转出的，reviewer / admin 为项目内全部。要让业务方等参与他人的需求，在这里放行
+	AuthorizePerspective: func(ctx context.Context, u lingo.User, t lingo.Ticket, write bool) error {
+		if u.Perspective != "" || t.UserID == u.ID {
+			return nil
+		}
+		return lingo.ErrNotFound // 或 lingo.ErrForbidden
+	},
+	// 3. 必填视角（可选）：转出时缺失发 ticket.perspective_missing，Issue 区块标注“缺少：…”；
+	//    Project.RequiredPerspectives 可覆盖，空切片表示该项目不检查
+	RequiredPerspectives: []lingo.Perspective{lingo.PerspectiveBusiness, lingo.PerspectiveLeader},
+	// 4. Notifier 按 Event.Perspectives 提醒相应的人（推给谁由你决定）
+}
+```
+
+调用方式（Go / REST / MCP 同一套校验）：
+
+| Go | REST | MCP |
+|---|---|---|
+| `l.AddPerspective(ctx, u, id, content)` | `POST /tickets/{id}/perspectives` `{"content":"…"}` → 201 | `add_perspective {id, content}` |
+| `l.ListPerspectives(ctx, u, id)` | `GET /tickets/{id}/perspectives` → 200 | `list_perspectives {id}` |
+
+```json
+// POST 返回一段补充
+{"id": 7, "perspective": "business", "author_name": "张三", "content": "影响华东 30 家门店", "at": "2026-11-21T09:30:00Z"}
+// GET 返回按视角分组的补充（固定顺序，只含有内容的视角）与缺失的必填视角；首段为工单原始提交（original，id 为 0）
+{"ticket_id": 42,
+ "groups": [{"perspective": "user", "title": "使用者反馈", "entries": [{"id": 0, "perspective": "user", "author_name": "王五", "content": "希望支持导出 Excel", "at": "…", "original": true}]},
+            {"perspective": "business", "title": "业务补充", "entries": [{"id": 7, "…": "…"}]}],
+ "missing": ["leader"]}
+```
+
+错误：`invalid_input`（400，非需求工单、视角非法、内容为空或超过 10000 字）、`forbidden`（403）、`not_found`（404，不存在、项目外或无权查看）、`conflict`（409，工单已答复 / 合并 / 驳回 / 关闭）。
+
+注意：
+
+- 补充只能追加，不能修改或撤回；已修复、已发布、已上线的需求仍可补充。
+- 补充人与首段提交人的姓名（`User.Name`）会写入 Gitea Issue，邮箱与用户 ID 不会。
+- 事件 `ticket.perspective_added`（`Perspectives` 为本次视角，`Body` 为“业务方 · 张三 补充了内容”，不含补充内容）与 `ticket.perspective_missing`（`Perspectives` 为缺失视角）的可见范围同其他工单事件。
+- 机器人令牌需能创建标签（`write:issue`）；视角标签在启动自检时补齐。
 
 ### REST 接口
 
@@ -68,6 +122,7 @@ light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
 |---|---|
 | `GET /projects`、`GET /ticket-types` | 项目与仓库；工单类型及 Issue 模板表单字段 |
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
+| `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
 | `GET /events?after=` | 变更流（与 `Notifier` 同源） |
 | `GET /releases`、`GET /releases/{id}` | 版本记录、关联工单与上线记录 |
