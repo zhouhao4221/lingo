@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
@@ -149,10 +150,10 @@ func (l *Lingo) labelPrefix() string {
 // drafter 返回建单前整理工单用的模型：优先 LightModel，其次 Model；都没有时为 nil（按原内容建单）。
 func (l *Lingo) drafter() worker.Drafter {
 	m := l.cfg.LightModel
-	if m == nil {
+	if isNil(m) {
 		m = l.cfg.Model
 	}
-	if m == nil {
+	if isNil(m) {
 		return nil
 	}
 	return &llm.Drafter{Chat: func(ctx context.Context, ms []llm.Message) (string, error) {
@@ -162,6 +163,19 @@ func (l *Lingo) drafter() worker.Drafter {
 		}
 		return m.Chat(ctx, in)
 	}}
+}
+
+// isNil 报告接口值是否为 nil，含装着 nil 指针的接口（如 var m *MyModel; cfg.LightModel = m）。
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // reconcileLockKey 是定时对账的 advisory lock 键。

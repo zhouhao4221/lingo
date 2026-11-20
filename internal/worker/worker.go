@@ -119,6 +119,7 @@ type Worker struct {
 	log       *slog.Logger
 	labels    labelCache
 	templates *gitea.TemplateCache
+	drafts    draftCache
 }
 
 // New 校验配置并创建 Worker。

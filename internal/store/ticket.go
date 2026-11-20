@@ -57,7 +57,7 @@ type ticketTx struct {
 	notify bool
 }
 
-const ticketColumns = `t.id, t.project_id, p.key, COALESCE(t.repo_id, 0), COALESCE(r.owner || '/' || r.name, ''), t.type, t.title,
+const ticketColumns = `t.id, t.project_id, p.key, COALESCE(t.repo_id, 0), COALESCE(r.owner || '/' || r.name, ''), t.type, t.title, t.title_auto,
 	t.body, t.fields, t.context, t.reported_version, t.status, t.user_id, t.user_name, t.user_email, COALESCE(t.conversation_id, 0),
 	COALESCE(t.gitea_issue_number, 0), COALESCE(t.merged_into_ticket_id, 0), t.triage_since, t.created_at, t.updated_at,
 	t.gitea_updated_at, COALESCE(t.fixed_pr, 0), t.fixed_commit, t.milestone, t.due_date, t.deployed_at, COALESCE(rel.tag, ''),
@@ -71,7 +71,7 @@ func scanTicket(row rowScanner) (*ticket.Ticket, error) {
 	var t ticket.Ticket
 	var fields, tctx []byte
 	var triage, updated, due, deployed sql.NullTime
-	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.RepoID, &t.Repo, &t.Type, &t.Title,
+	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.RepoID, &t.Repo, &t.Type, &t.Title, &t.TitleAuto,
 		&t.Body, &fields, &tctx, &t.Version, &t.Status, &t.UserID, &t.UserName, &t.UserEmail, &t.Conversation,
 		&t.IssueNumber, &t.MergedInto, &triage, &t.CreatedAt, &t.UpdatedAt,
 		&updated, &t.FixedPR, &t.FixedCommit, &t.Milestone, &due, &deployed, &t.FixedTag, &t.FixedReleaseID, &t.FixedRepo)
@@ -145,12 +145,12 @@ func (x *ticketTx) Update(ctx context.Context, t *ticket.Ticket) error {
 	}
 	err := x.tx.QueryRowContext(ctx, `
 		UPDATE tickets SET status = $2, gitea_issue_number = $3, gitea_updated_at = $4, fixed_pr = $5, fixed_commit = $6,
-		    milestone = $7, due_date = $8, repo_id = $9, type = $10, title = $11, merged_into_ticket_id = $12,
+		    milestone = $7, due_date = $8, repo_id = $9, type = $10, title = $11, title_auto = $17, merged_into_ticket_id = $12,
 		    triage_since = $13, fixed_release_id = $14, deployed_at = $15, fixed_repo = lower($16), updated_at = now()
 		WHERE id = $1 RETURNING updated_at`,
 		t.ID, string(t.Status), nullInt64(t.IssueNumber), updated, nullInt64(t.FixedPR), t.FixedCommit, t.Milestone, nullTime(t.DueDate),
 		nullInt64(t.RepoID), t.Type, t.Title, nullInt64(t.MergedInto), nullTime(t.TriageSince), nullInt64(t.FixedReleaseID),
-		nullTime(t.DeployedAt), t.FixedRepo).Scan(&t.UpdatedAt)
+		nullTime(t.DeployedAt), t.FixedRepo, t.TitleAuto).Scan(&t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: update ticket %d: %w", t.ID, err)
 	}
@@ -168,11 +168,11 @@ func (x *ticketTx) Insert(ctx context.Context, t *ticket.Ticket) error {
 	}
 	err = x.tx.QueryRowContext(ctx, `
 		INSERT INTO tickets (user_id, user_name, user_email, conversation_id, project_id, repo_id, type, title, body, status,
-		    context, fields, reported_version, triage_since)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		    context, fields, reported_version, triage_since, title_auto)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id, created_at, updated_at`,
 		t.UserID, t.UserName, t.UserEmail, nullInt64(t.Conversation), t.ProjectID, nullInt64(t.RepoID), t.Type, t.Title, t.Body,
-		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince)).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
+		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince), t.TitleAuto).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: insert ticket: %w", err)
 	}

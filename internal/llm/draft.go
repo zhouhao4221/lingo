@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/zhouhao4221/lingo/internal/textutil"
 )
 
 // Message 是对话消息，与 lingo.Message 对应（由根包转换）。
@@ -106,8 +108,8 @@ func draftPrompt(in DraftInput) (string, error) {
 	}
 	b, err := json.MarshalIndent(map[string]any{
 		"type":            in.Type,
-		"title":           clip(in.Title, maxTitleRunes*2),
-		"content":         clip(in.Body, maxInputRunes),
+		"title":           textutil.Clip(in.Title, maxTitleRunes*2),
+		"content":         textutil.Clip(in.Body, maxInputRunes),
 		"filled_fields":   in.Fields,
 		"environment":     in.Context,
 		"version":         in.Version,
@@ -121,23 +123,34 @@ func draftPrompt(in DraftInput) (string, error) {
 
 // parseDraft 解析并校验模型输出。
 func parseDraft(out string, in DraftInput) (*Draft, error) {
-	start, end := strings.Index(out, "{"), strings.LastIndex(out, "}")
-	if start < 0 || end <= start {
-		return nil, errors.New("llm: draft is not JSON")
-	}
-	var raw struct {
+	type rawDraft struct {
 		Title       string         `json:"title"`
 		Description string         `json:"description"`
 		Fields      map[string]any `json:"fields"`
 	}
-	if err := json.Unmarshal([]byte(out[start:end+1]), &raw); err != nil {
-		return nil, fmt.Errorf("llm: draft JSON: %w", err)
+	// 模型可能在 JSON 前后加说明或代码围栏：从每个 "{" 起尝试解码，取第一个含 title 或 description 的对象
+	var raw rawDraft
+	found := false
+	for i := strings.IndexByte(out, '{'); i >= 0; {
+		var r rawDraft
+		if err := json.NewDecoder(strings.NewReader(out[i:])).Decode(&r); err == nil && (r.Title != "" || r.Description != "") {
+			raw, found = r, true
+			break
+		}
+		next := strings.IndexByte(out[i+1:], '{')
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	if !found {
+		return nil, errors.New("llm: draft is not JSON")
 	}
 	d := &Draft{Title: oneLine(raw.Title), Description: strings.TrimSpace(raw.Description), Fields: map[string][]string{}}
 	if d.Title == "" || utf8.RuneCountInString(d.Title) > maxTitleRunes {
 		d.Title = in.Title // 标题缺失或过长：保留原标题
 	}
-	d.Description = clip(d.Description, maxInputRunes)
+	d.Description = textutil.Clip(d.Description, maxInputRunes)
 	for id, vs := range in.Fields {
 		d.Fields[id] = vs // 提交人已填的字段原样保留
 	}
@@ -147,7 +160,7 @@ func parseDraft(out string, in DraftInput) (*Draft, error) {
 	}
 	for id, v := range raw.Fields {
 		spec, ok := specs[id]
-		if !ok || hasValue(in.Fields[id]) {
+		if !ok || textutil.HasValue(in.Fields[id]) {
 			continue // 模板中没有的字段、提交人已填的字段：不采纳
 		}
 		if vals := validValues(spec, v); len(vals) > 0 {
@@ -181,35 +194,24 @@ func validValues(spec FieldSpec, v any) []string {
 			if slices.Contains(spec.Options, s) && !slices.Contains(out, s) {
 				out = append(out, s)
 			}
+		case "input":
+			out = append(out, textutil.Clip(strings.Join(strings.Fields(s), " "), maxFieldRunes)) // 单行字段
 		default:
-			out = append(out, clip(s, maxFieldRunes))
+			out = append(out, textutil.Clip(s, maxFieldRunes))
 		}
 	}
 	if spec.Kind == "dropdown" && !spec.Multiple && len(out) > 1 {
 		out = out[:1]
 	}
-	if spec.Kind != "dropdown" && spec.Kind != "checkboxes" && len(out) > 1 {
+	switch {
+	case spec.Kind == "input" && len(out) > 1:
+		out = []string{strings.Join(out, "; ")}
+	case spec.Kind == "textarea" && len(out) > 1:
 		out = []string{strings.Join(out, "\n")}
 	}
 	return out
 }
 
-func hasValue(vs []string) bool {
-	for _, v := range vs {
-		if strings.TrimSpace(v) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func oneLine(s string) string {
 	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
-}
-
-func clip(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	return string([]rune(s)[:n])
 }

@@ -70,6 +70,7 @@ type Ticket struct {
 	Repo           string // "owner/name"，未选定仓库时为空
 	Type           string // consult | bug | feature
 	Title          string
+	TitleAuto      bool // 标题由灵问从正文生成（提交人未填写），建 Issue 时可由模型改写
 	Body           string
 	Fields         map[string][]string // Issue 表单模板字段取值（按字段 ID）
 	Context        map[string]string   // 页面 URL、浏览器等提交环境

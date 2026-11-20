@@ -94,6 +94,7 @@ CREATE TABLE tickets (
     repo_id               bigint      REFERENCES repos (id), -- 转出前可为空
     type                  text        NOT NULL CHECK (type IN ('consult', 'bug', 'feature')),
     title                 text        NOT NULL,
+    title_auto            boolean     NOT NULL DEFAULT false, -- 标题由灵问从正文生成（提交人未填写）
     body                  text        NOT NULL DEFAULT '',
     status                text        NOT NULL CHECK (status IN (
                               'pending_triage', 'answered', 'merged', 'rejected',

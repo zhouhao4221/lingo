@@ -90,6 +90,22 @@ func TestLightModelDraftsIssue(t *testing.T) {
 	}
 }
 
+func TestLightModelKeepsSubmitterTitle(t *testing.T) {
+	g := &giteaServer{templates: draftTemplate}
+	l, _ := newDraftLingo(t, g, &draftModel{out: `{"title":"模型改写的标题","description":"整理后的描述"}`})
+	tk, err := l.CreateTicket(context.Background(), alice, lingo.TicketInput{Type: lingo.TicketBug, Title: "Export CSV 500 on /reports", Content: "导出报 500"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runLingo(t, l)
+	waitTicket(t, l, alice, tk.ID, "open")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.created[0]["title"] != "[Bug]: Export CSV 500 on /reports" {
+		t.Errorf("title = %v", g.created[0]["title"])
+	}
+}
+
 func TestLightModelFailureFallsBack(t *testing.T) {
 	g := &giteaServer{templates: draftTemplate}
 	l, _ := newDraftLingo(t, g, &draftModel{err: errors.New("model unavailable")})

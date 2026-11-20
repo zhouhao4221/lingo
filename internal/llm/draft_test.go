@@ -46,6 +46,15 @@ func TestDraftIssueValidates(t *testing.T) {
 	}
 }
 
+func TestDraftIssueProseAroundJSON(t *testing.T) {
+	in := DraftInput{Title: "t", Template: []FieldSpec{{ID: "ver", Kind: "input"}}}
+	out := "结果 {ticket} 如下：\n" + `{"title":"版本 1.2 导出失败","description":"d","fields":{"ver":["1.2","1.3\n beta"]}}` + "\n谢谢 {end}"
+	d, err := drafter(out, nil, nil).DraftIssue(context.Background(), in)
+	if err != nil || d.Title != "版本 1.2 导出失败" || d.Fields["ver"][0] != "1.2; 1.3 beta" {
+		t.Errorf("draft = %+v %v", d, err)
+	}
+}
+
 func TestDraftIssueFailures(t *testing.T) {
 	in := DraftInput{Title: "原标题", Body: "x"}
 	if _, err := drafter("", errors.New("timeout"), nil).DraftIssue(context.Background(), in); err == nil {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/store"
+	"github.com/zhouhao4221/lingo/internal/textutil"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
@@ -105,7 +107,7 @@ func (w *Worker) releaseTask(ctx context.Context, t store.Task, reason string) {
 
 func (w *Worker) handleTask(ctx context.Context, t store.Task) {
 	tctx, cancel := w.taskContext(ctx)
-	err := w.runTask(tctx, t)
+	err := w.runTask(context.WithValue(tctx, parentCtxKey{}, ctx), t)
 	cancel()
 	fctx, fcancel := finishContext(ctx)
 	defer fcancel()
@@ -259,12 +261,13 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return err
 	}
-	draft, original := w.draftIssue(ctx, t, tmpl, forwardedBy != "")
+	// 后台人员确认过的标题、提交人自己写的标题都保留，只有灵问从正文生成的标题交给模型改写
+	draft, original := w.draftIssue(ctx, t, tmpl, forwardedBy != "" || !t.TitleAuto)
 	opt := gitea.CreateIssueOption{Title: draft.Title, Body: IssueBody(draft, tmpl, comments, forwardedBy, note, original), Labels: labels, Assignees: cfg.Assignees}
-	if tmpl != nil && tmpl.Title != "" && !strings.HasPrefix(opt.Title, tmpl.Title) {
-		opt.Title = tmpl.Title + opt.Title
+	if tmpl != nil && tmpl.Title != "" {
+		opt.Title = tmpl.Title + stripTitlePrefix(opt.Title, tmpl.Title)
 	}
-	opt.Title = clipRunes(opt.Title, maxIssueTitle)
+	opt.Title = textutil.Clip(opt.Title, maxIssueTitle)
 	is, err := w.o.Issues.CreateIssue(ctx, owner, name, opt)
 	var ae *gitea.APIError
 	if errors.As(err, &ae) && ae.StatusCode == http.StatusUnprocessableEntity {
@@ -282,6 +285,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return giteaErr("create issue", err)
 	}
+	w.drafts.drop(id)
 	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create", commentIDs(comments)); err != nil {
 		return err // 重试时会按标记查到这个 Issue，不会重复建
 	}
@@ -289,13 +293,73 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	return w.uploadIssueAttachments(ctx, t, attachments)
 }
 
-// draftTimeout 是整理工单的时限：超时按原内容建单。
-const draftTimeout = 45 * time.Second
+// draftTimeout 是整理工单的时限；draftReserve 是留给建单本身的任务时间，剩余不足时不整理。
+const (
+	draftTimeout = 45 * time.Second
+	draftReserve = 20 * time.Second
+)
 
-// draftIssue 用轻量模型整理工单（标题、模板字段、描述），返回用于建单的副本与原始描述；未配置模型或整理失败时
-// 返回原工单与空串（按原内容建单，不影响建单）。keepTitle 为真（后台人员已确认过标题）时不改标题。
+// parentCtxKey 在任务 context 中携带可取消的上层 context：退出时停止整理（按原内容建单），不等模型。
+type parentCtxKey struct{}
+
+// draftCache 缓存整理结果（按工单与其更新时间），建单重试时不重复调用模型、内容保持一致。
+type draftCache struct {
+	mu sync.Mutex
+	m  map[string]drafted
+}
+
+type drafted struct {
+	t        *ticket.Ticket
+	original string
+}
+
+func (c *draftCache) key(t *ticket.Ticket) string {
+	return strconv.FormatInt(t.ID, 10) + "@" + strconv.FormatInt(t.UpdatedAt.UnixNano(), 10)
+}
+
+func (c *draftCache) get(t *ticket.Ticket) (drafted, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	d, ok := c.m[c.key(t)]
+	return d, ok
+}
+
+func (c *draftCache) put(t *ticket.Ticket, d drafted) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil || len(c.m) > 1000 {
+		c.m = map[string]drafted{} // 上限保护：只为短期重试服务
+	}
+	c.m[c.key(t)] = d
+}
+
+func (c *draftCache) drop(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefix := strconv.FormatInt(id, 10) + "@"
+	for k := range c.m {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.m, k)
+		}
+	}
+}
+
+// draftIssue 用轻量模型整理工单（标题、模板字段、描述），返回用于建单的副本与原始描述（只有描述被改写时非空）。
+// 未配置模型、剩余任务时间不足、退出中或整理失败时返回原工单与空串（按原内容建单，不影响建单）。
+// keepTitle 为真时不改标题。
 func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.IssueTemplate, keepTitle bool) (*ticket.Ticket, string) {
 	if w.o.Drafter == nil {
+		return t, ""
+	}
+	if d, ok := w.drafts.get(t); ok {
+		return d.t, d.original
+	}
+	timeout := draftTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = min(timeout, time.Until(deadline)-draftReserve)
+	}
+	parent, _ := ctx.Value(parentCtxKey{}).(context.Context)
+	if timeout < 5*time.Second || (parent != nil && parent.Err() != nil) {
 		return t, ""
 	}
 	in := llm.DraftInput{Type: t.Type, Title: t.Title, Body: t.Body, Fields: t.Fields, Context: t.Context, Version: t.Version}
@@ -308,22 +372,38 @@ func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.I
 			}
 		}
 	}
-	dctx, cancel := context.WithTimeout(ctx, draftTimeout)
+	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if parent != nil {
+		stop := context.AfterFunc(parent, cancel)
+		defer stop()
+	}
 	d, err := w.o.Drafter.DraftIssue(dctx, in)
 	if err != nil {
 		w.log.Warn("issue drafting failed, using original content", "ticket", t.ID, "err", err)
 		return t, ""
 	}
-	out := *t
+	out, original := *t, ""
 	if !keepTitle {
 		out.Title = d.Title
 	}
-	if d.Description != "" {
-		out.Body = d.Description
+	if d.Description != "" && d.Description != t.Body {
+		out.Body, original = d.Description, t.Body
 	}
 	out.Fields = d.Fields
-	return &out, t.Body
+	w.drafts.put(t, drafted{t: &out, original: original})
+	return &out, original
+}
+
+// stripTitlePrefix 去掉模型可能自带的模板标题前缀（如 "[Bug]: "、"[Bug]"），避免拼成 "[Bug]: [Bug] …"。
+func stripTitlePrefix(title, prefix string) string {
+	core := strings.TrimRight(prefix, " :：")
+	for _, p := range []string{prefix, strings.TrimSpace(prefix), core} {
+		if p != "" && strings.HasPrefix(title, p) {
+			return strings.TrimLeft(strings.TrimPrefix(title, p), " :：")
+		}
+	}
+	return title
 }
 
 func commentIDs(cs []ticket.Comment) []int64 {
@@ -674,13 +754,6 @@ func stripMarkers(s string) string {
 
 // maxIssueTitle 是 Gitea Issue 标题上限（字符）。
 const maxIssueTitle = 255
-
-func clipRunes(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n])
-	}
-	return s
-}
 
 // labelCache 缓存各仓库标签 name → id，缺的标签创建后加入缓存。
 type labelCache struct {

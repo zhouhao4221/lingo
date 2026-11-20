@@ -22,6 +22,14 @@ func TestWithSectionReplacesAndKeepsMarkerLast(t *testing.T) {
 	}
 }
 
+func TestStripTitlePrefix(t *testing.T) {
+	for in, want := range map[string]string{"[Bug]: 登录失败": "登录失败", "[Bug] 登录失败": "登录失败", "登录失败": "登录失败", "[Bug]：登录失败": "登录失败"} {
+		if got := stripTitlePrefix(in, "[Bug]: "); got != want {
+			t.Errorf("stripTitlePrefix(%q) = %q", in, got)
+		}
+	}
+}
+
 func TestStripMarkersNested(t *testing.T) {
 	if got := stripMarkers("a <!-<!-- lingo:x -->- lingo:public --> b"); strings.Contains(got, "lingo:") {
 		t.Errorf("nested marker survived: %q", got)

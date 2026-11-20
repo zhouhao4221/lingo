@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/notify"
+	"github.com/zhouhao4221/lingo/internal/textutil"
 )
 
 type sourceKey struct{}
@@ -100,25 +100,6 @@ const (
 	MaxTitleRunes = 200
 )
 
-// clip 把 s 截到最多 n 个字符。
-func clip(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	return string([]rune(s)[:n-1]) + "…"
-}
-
-func hasValue(fields map[string][]string) bool {
-	for _, vs := range fields {
-		for _, v := range vs {
-			if strings.TrimSpace(v) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // Create 提交工单：按项目 + 类型的开关自动转出（submitted，入队建 Issue）或进入待确认（pending_triage）。
 func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*Ticket, error) {
 	switch {
@@ -129,11 +110,12 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 	case !p.InProject(in.Project) || !s.o.Declared(in.Project, ""):
 		return nil, fmt.Errorf("%w: project %q", ErrNotFound, in.Project)
 	}
-	in.Title, in.Body = clip(strings.TrimSpace(in.Title), MaxTitleRunes), strings.TrimSpace(in.Body)
-	if in.Body == "" && !hasValue(in.Fields) {
+	in.Title, in.Body = textutil.ClipEllipsis(strings.TrimSpace(in.Title), MaxTitleRunes), strings.TrimSpace(in.Body)
+	if in.Body == "" && !textutil.AnyValue(in.Fields) {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
 	}
-	if in.Title == "" {
+	titleAuto := in.Title == ""
+	if titleAuto {
 		in.Title = summarize(in.Body, in.Fields)
 	}
 	if in.Source == "" {
@@ -156,7 +138,7 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		}
 		t = &Ticket{ProjectID: proj.ID, ProjectKey: proj.Key, Type: in.Type, Title: in.Title, Body: in.Body,
 			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email,
-			Conversation: in.Conversation}
+			Conversation: in.Conversation, TitleAuto: titleAuto}
 		if err := s.setRepo(ctx, tx, t, proj, in.Repo); err != nil {
 			return err
 		}
@@ -267,7 +249,7 @@ func summarize(body string, fields map[string][]string) string {
 	}
 	for _, line := range strings.Split(src, "\n") {
 		if line = strings.TrimSpace(strings.TrimLeft(line, "#>-* ")); line != "" {
-			return clip(line, maxSummaryRunes)
+			return textutil.ClipEllipsis(line, maxSummaryRunes)
 		}
 	}
 	return "未命名工单"
@@ -293,8 +275,8 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 		if t.Status == StatusAbnormal {
 			retry = s.o.Now()
 		}
-		if in.Title = clip(strings.TrimSpace(in.Title), MaxTitleRunes); in.Title != "" {
-			t.Title = in.Title
+		if in.Title = textutil.ClipEllipsis(strings.TrimSpace(in.Title), MaxTitleRunes); in.Title != "" {
+			t.Title, t.TitleAuto = in.Title, false
 		}
 		if in.Type != "" {
 			t.Type = in.Type
