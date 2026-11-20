@@ -57,6 +57,8 @@ CREATE TABLE lingo_tickets (
     user_id               text        NOT NULL,
     user_name             text        NOT NULL DEFAULT '', -- 提交人快照，仅展示与通知，不用于权限判断
     user_email            text        NOT NULL DEFAULT '',
+    user_perspective      text        NOT NULL DEFAULT 'user'
+                              CHECK (user_perspective IN ('user', 'business', 'expert', 'leader')), -- 提交人视角快照，即需求首段的视角
     project_id            bigint      NOT NULL REFERENCES lingo_projects (id),
     repo_id               bigint      REFERENCES lingo_repos (id), -- 转出前可为空
     type                  text        NOT NULL CHECK (type IN ('consult', 'bug', 'feature')),
@@ -113,6 +115,22 @@ CREATE TABLE lingo_ticket_comments (
     deleted_at       timestamptz
 );
 CREATE INDEX lingo_ticket_comments_ticket_idx ON lingo_ticket_comments (ticket_id, id);
+
+-- 需求视角补充（仅 feature 工单，只追加）：首段由工单本身派生（user_perspective + body），不在此表
+CREATE TABLE lingo_ticket_perspectives (
+    id              bigserial PRIMARY KEY,
+    ticket_id       bigint      NOT NULL REFERENCES lingo_tickets (id) ON DELETE CASCADE,
+    perspective     text        NOT NULL CHECK (perspective IN ('user', 'business', 'expert', 'leader')),
+    author_id       text        NOT NULL DEFAULT '', -- 接入方用户 ID，仅留痕，不对外、不写入 Gitea
+    author_name     text        NOT NULL DEFAULT '', -- 姓名快照，写入 Issue 区块
+    body            text        NOT NULL,
+    version         integer     NOT NULL DEFAULT 1,  -- 预留：后续支持修改时递增
+    gitea_posted_id bigint      UNIQUE,              -- 提示评论的 Gitea 评论 ID；非空表示已发，重试不重发
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now(), -- 预留：修改
+    deleted_at      timestamptz                         -- 预留：撤回
+);
+CREATE INDEX lingo_ticket_perspectives_ticket_idx ON lingo_ticket_perspectives (ticket_id, id);
 
 -- 版本关联工单：以 tag 区间提交匹配 fixed_commit / fixed_pr 为主，版本说明中的 Issue 引用补漏
 CREATE TABLE lingo_release_tickets (

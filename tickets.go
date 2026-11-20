@@ -398,7 +398,8 @@ func (l *Lingo) principal(u User) auth.Principal {
 	if len(ps) == 0 {
 		ps = l.projectKeys()
 	}
-	return auth.Principal{ID: u.ID, Name: u.Name, Email: u.Email, Role: string(u.Role), Projects: ps}
+	return auth.Principal{ID: u.ID, Name: u.Name, Email: u.Email, Role: string(u.Role), Projects: ps,
+		Perspective: string(u.Perspective)}
 }
 
 func (l *Lingo) ticketResult(t *ticket.Ticket, err error) (Ticket, error) {

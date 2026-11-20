@@ -45,6 +45,7 @@ type IssueWriter interface {
 	CreateIssueAttachment(ctx context.Context, owner, repo string, index int64, name string, r io.Reader) (*gitea.Attachment, error)
 	CreateCommentAttachment(ctx context.Context, owner, repo string, commentID int64, name string, r io.Reader) (*gitea.Attachment, error)
 	RemoveIssueLabel(ctx context.Context, owner, repo string, index, labelID int64) error
+	AddIssueLabels(ctx context.Context, owner, repo string, index int64, labelIDs []int64) ([]*gitea.Label, error)
 }
 
 // Forwarding 是转出 Issue 时读取的补充评论与附件，由 store.Store 实现。
@@ -54,6 +55,7 @@ type Forwarding interface {
 	MarkAttachment(ctx context.Context, ticketID int64, a ticket.Attachment) error
 	Comment(ctx context.Context, id int64) (*ticket.Comment, error)
 	CommentPosted(ctx context.Context, id, giteaID int64) error
+	PerspectivePosted(ctx context.Context, id, giteaID int64) error
 }
 
 // Drafts 读取待建 Issue 的工单并记录建单结果，由 ticket.Service 实现。
@@ -61,6 +63,8 @@ type Drafts interface {
 	Draft(ctx context.Context, id int64) (*ticket.Ticket, error)
 	IssueCreated(ctx context.Context, id, number int64, via string, commentIDs []int64) (bool, error)
 	IssueFailed(ctx context.Context, id int64, reason string) error
+	// Perspectives 返回工单的需求视角补充（含首段与缺失的必填视角）。
+	Perspectives(ctx context.Context, id int64) (*ticket.PerspectiveSet, error)
 }
 
 // RepoConfig 是仓库在 lingo.Repo 中的建单配置。
@@ -173,6 +177,14 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 			return permanent(fmt.Errorf("task payload: %s", t.Payload))
 		}
 		return w.createComment(withFailures(ctx, t.Failures), t.TicketID, p.CommentID)
+	case ticket.OpSyncPerspectives:
+		var p struct {
+			PerspectiveID int64 `json:"perspective_id"`
+		}
+		if err := json.Unmarshal(t.Payload, &p); err != nil || p.PerspectiveID == 0 {
+			return permanent(fmt.Errorf("task payload: %s", t.Payload))
+		}
+		return w.syncPerspectives(ctx, t.TicketID, p.PerspectiveID)
 	}
 	return permanent(fmt.Errorf("unknown task op %q", t.Op))
 }
@@ -245,7 +257,13 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		}
 	}
 
-	wantLabels := issueLabels(w.o.LabelPrefix, t.Type)
+	var perspectives *ticket.PerspectiveSet
+	if t.Type == ticket.TypeFeature {
+		if perspectives, err = w.o.Drafts.Perspectives(ctx, id); err != nil {
+			return err
+		}
+	}
+	wantLabels := append(issueLabels(w.o.LabelPrefix, t.Type), perspectiveLabels(w.o.LabelPrefix, perspectives)...)
 	labels, err := w.labels.ensure(ctx, w.o.Issues, owner, name, wantLabels)
 	if err != nil {
 		return err
@@ -261,7 +279,8 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	}
 	// 后台人员确认过的标题、提交人自己写的标题都保留，只有灵问从正文生成的标题交给模型改写
 	draft, original := w.draftIssue(ctx, t, tmpl, forwardedBy != "" || !t.TitleAuto)
-	opt := gitea.CreateIssueOption{Title: draft.Title, Body: IssueBody(draft, tmpl, comments, forwardedBy, note, original), Labels: labels, Assignees: cfg.Assignees}
+	opt := gitea.CreateIssueOption{Title: draft.Title, Body: IssueBody(draft, tmpl, comments, forwardedBy, note, original,
+		perspectiveSection(perspectives)), Labels: labels, Assignees: cfg.Assignees}
 	if tmpl != nil && tmpl.Title != "" {
 		opt.Title = tmpl.Title + stripTitlePrefix(opt.Title, tmpl.Title)
 	}
@@ -605,15 +624,7 @@ const (
 
 // withSection 把附件段落写进正文：替换已有段落，否则插在工单标记之前，保证工单标记仍是正文最后一个。
 func withSection(body, section string) string {
-	if i := strings.Index(body, sectionStart); i >= 0 {
-		if j := strings.Index(body[i:], sectionEnd); j >= 0 {
-			return body[:i] + section + body[i+j+len(sectionEnd):]
-		}
-	}
-	if i := strings.LastIndex(body, "<!-- lingo:ticket="); i >= 0 {
-		return strings.TrimRight(body[:i], "\n") + "\n\n" + section + "\n\n" + body[i:]
-	}
-	return strings.TrimRight(body, "\n") + "\n\n" + section
+	return withBlock(body, sectionStart, sectionEnd, section)
 }
 
 var mdEscaper = strings.NewReplacer("[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "<", "&lt;", ">", "&gt;")
@@ -767,9 +778,10 @@ func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg Repo
 }
 
 // IssueBody 生成 Issue 正文：有表单模板且提交了字段时按 Gitea 表单格式渲染，否则用内置结构；
-// 末尾附项目、版本、提交环境、确认人与隐藏标记。不写入提交人姓名、邮箱等身份信息（PRD 3.2.0.6）。
+// 末尾附项目、版本、提交环境、确认人与隐藏标记。不写入提交人姓名、邮箱等身份信息（PRD 3.2.0.6）；
+// 例外是需求视角区块 perspectives（见 perspectiveSection），写在元信息之前。
 // original 非空时（内容经模型整理过）在末尾附上提交人原始描述，整理有误时研发仍能看到原话。
-func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Comment, forwardedBy, note, original string) string {
+func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Comment, forwardedBy, note, original, perspectives string) string {
 	var b strings.Builder
 	fields := map[string][]string{}
 	for k, vs := range t.Fields {
@@ -807,6 +819,9 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Co
 	if original = strings.TrimSpace(stripMarkers(original)); original != "" {
 		b.WriteString("<details><summary>提交人原始描述</summary>\n\n" + original + "\n\n</details>\n\n")
 	}
+	if perspectives != "" {
+		b.WriteString(perspectives + "\n\n")
+	}
 	b.WriteString("---\n\n")
 	b.WriteString("- 项目：" + t.ProjectKey + "\n")
 	if t.Version != "" {
@@ -832,8 +847,8 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Co
 	return b.String()
 }
 
-// markerRe 匹配灵问的隐藏标记（lingo:ticket、lingo:public 等）。
-var markerRe = regexp.MustCompile(`<!--\s*lingo:[^>]*-->`)
+// markerRe 匹配灵问的隐藏标记（lingo:ticket、lingo:public 等，含区块结束标记 /lingo:…）。
+var markerRe = regexp.MustCompile(`<!--\s*/?\s*lingo:[^>]*-->`)
 
 // stripMarkers 去掉用户文本中的灵问标记，防止伪造工单关联或对外标记；反复替换直到不变，
 // 嵌套构造（去掉内层后外层拼成新标记）也会被清除。

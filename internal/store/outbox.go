@@ -67,7 +67,7 @@ func (s *Store) ClaimNotifications(ctx context.Context, limit int, lease time.Du
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return nil, fmt.Errorf("store: event %d payload: %w", e.ID, err)
 		}
-		e.TicketType, e.Title, e.Body, e.URL = p.TicketType, p.Title, p.Body, p.URL
+		e.TicketType, e.Title, e.Body, e.URL, e.Perspectives = p.TicketType, p.Title, p.Body, p.URL, p.Perspectives
 		out = append(out, n)
 	}
 	if err := rows.Err(); err != nil {

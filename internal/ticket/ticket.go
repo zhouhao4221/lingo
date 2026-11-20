@@ -42,6 +42,15 @@ func (s Status) fixed() bool {
 	return false
 }
 
+// ended 表示工单已结束（已答复、合并、驳回或关闭未修复），不再接受需求视角补充。
+func (s Status) ended() bool {
+	switch s {
+	case StatusAnswered, StatusMerged, StatusRejected, StatusClosed:
+		return true
+	}
+	return false
+}
+
 // 工单类型，取值与 lingo.TicketType 一致。
 const (
 	TypeConsult = "consult"
@@ -63,31 +72,32 @@ func (s Status) forwarded() bool {
 
 // Ticket 是工单在领域层的视图。
 type Ticket struct {
-	ID             int64
-	ProjectID      int64
-	ProjectKey     string
-	RepoID         int64  // 未选定仓库时为 0
-	Repo           string // "owner/name"，未选定仓库时为空
-	Type           string // consult | bug | feature
-	Title          string
-	TitleAuto      bool         // 标题由灵问从正文生成（提交人未填写），建 Issue 时可由模型改写
-	Attachments    []Attachment // 提交时的附件引用（写入时使用；读取工单时不回填，见 Detail）
-	Body           string
-	Fields         map[string][]string // Issue 表单模板字段取值（按字段 ID）
-	Context        map[string]string   // 页面 URL、浏览器等提交环境
-	Version        string              // 提交人使用的版本
-	Status         Status
-	UserID         string // 提交人（接入方用户 ID）
-	UserName       string // 提交人姓名快照，仅展示
-	UserEmail      string
-	IssueNumber    int64 // 主 Issue 编号，Issue 创建前为 0
-	MergedInto     int64
-	TriageSince    *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	FixedTag       string     // 修复版本（只读，取自 FixedReleaseID）
-	FixedReleaseID int64      // 最早包含修复的正式版本
-	DeployedAt     *time.Time // 上线时间
+	ID              int64
+	ProjectID       int64
+	ProjectKey      string
+	RepoID          int64  // 未选定仓库时为 0
+	Repo            string // "owner/name"，未选定仓库时为空
+	Type            string // consult | bug | feature
+	Title           string
+	TitleAuto       bool         // 标题由灵问从正文生成（提交人未填写），建 Issue 时可由模型改写
+	Attachments     []Attachment // 提交时的附件引用（写入时使用；读取工单时不回填，见 Detail）
+	Body            string
+	Fields          map[string][]string // Issue 表单模板字段取值（按字段 ID）
+	Context         map[string]string   // 页面 URL、浏览器等提交环境
+	Version         string              // 提交人使用的版本
+	Status          Status
+	UserID          string // 提交人（接入方用户 ID）
+	UserName        string // 提交人姓名快照，仅展示
+	UserEmail       string
+	UserPerspective string // 提交人视角快照（首段视角），取值见 PerspectiveOrder
+	IssueNumber     int64  // 主 Issue 编号，Issue 创建前为 0
+	MergedInto      int64
+	TriageSince     *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	FixedTag        string     // 修复版本（只读，取自 FixedReleaseID）
+	FixedReleaseID  int64      // 最早包含修复的正式版本
+	DeployedAt      *time.Time // 上线时间
 
 	GiteaUpdatedAt time.Time // 最近一次采纳的 Issue updated_at，用于丢弃乱序到达的旧事件
 	FixedPR        int64

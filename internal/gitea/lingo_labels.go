@@ -7,9 +7,11 @@ import (
 	"path"
 	"slices"
 	"strings"
+
+	"github.com/zhouhao4221/lingo/internal/perspective"
 )
 
-// LingoLabels 返回灵问使用的标签（前缀默认 lingo）：来源标签，以及 type/*、review/* 两组互斥作用域标签。
+// LingoLabels 返回灵问使用的标签（前缀默认 lingo）：来源标签，type/*、review/* 两组互斥作用域标签，以及需求视角标签。
 func LingoLabels(prefix string) []CreateLabelOption {
 	if prefix == "" {
 		prefix = "lingo"
@@ -21,7 +23,28 @@ func LingoLabels(prefix string) []CreateLabelOption {
 	for _, r := range []struct{ name, color string }{{"pending", "#fbca04"}, {"approved", "#0e8a16"}, {"rejected", "#b60205"}, {"need-info", "#d93f0b"}} {
 		out = append(out, CreateLabelOption{Name: prefix + "/review/" + r.name, Color: r.color, Exclusive: true})
 	}
+	for _, p := range perspective.Order {
+		out = append(out, PerspectiveLabel(prefix, p))
+	}
 	return out
+}
+
+// perspectiveColors 是各视角标签的颜色。
+var perspectiveColors = map[string]string{perspective.User: "#bfd4f2", perspective.Business: "#fef2c0",
+	perspective.Expert: "#d4c5f9", perspective.Leader: "#f9d0c4"}
+
+// PerspectiveLabel 返回需求视角标签 "<前缀>/视角/<视角名>"（视角名固定不可配置，PRD 3.2.2.1；非互斥：一个 Issue
+// 可有多个视角）；未知视角按 user。
+func PerspectiveLabel(prefix, p string) CreateLabelOption {
+	if prefix == "" {
+		prefix = "lingo"
+	}
+	p, ok := perspective.Normalize(p)
+	if !ok {
+		p = perspective.User
+	}
+	name := perspective.Name(p)
+	return CreateLabelOption{Name: prefix + "/视角/" + name, Color: perspectiveColors[p], Description: "需求视角：" + name}
 }
 
 // TypeLabel 返回工单类型标签（互斥作用域）；color 为空时取默认色。

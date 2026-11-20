@@ -25,6 +25,8 @@ type memStore struct {
 	tasks    map[string]Task
 	reminded map[int64]time.Time
 
+	perspectives []Perspective
+
 	lastEventQuery EventQuery
 }
 
@@ -43,7 +45,7 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 	for id, t := range m.tickets {
 		saved[id] = *t
 	}
-	nh, ne, nn := len(m.history), len(m.events), len(m.notes)
+	nh, ne, nn, np := len(m.history), len(m.events), len(m.notes), len(m.perspectives)
 	if err := fn(m); err != nil {
 		for id := range m.tickets {
 			if t, ok := saved[id]; ok {
@@ -52,7 +54,7 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 				delete(m.tickets, id)
 			}
 		}
-		m.history, m.events, m.notes = m.history[:nh], m.events[:ne], m.notes[:nn]
+		m.history, m.events, m.notes, m.perspectives = m.history[:nh], m.events[:ne], m.notes[:nn], m.perspectives[:np]
 		return err
 	}
 	return nil
@@ -156,6 +158,22 @@ func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]Atta
 }
 
 func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }
+
+func (m *memStore) AddPerspective(_ context.Context, p Perspective) (int64, error) {
+	p.ID = int64(len(m.perspectives) + 1)
+	m.perspectives = append(m.perspectives, p)
+	return p.ID, nil
+}
+
+func (m *memStore) Perspectives(_ context.Context, id int64) ([]Perspective, error) {
+	var out []Perspective
+	for _, p := range m.perspectives {
+		if p.TicketID == id {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
 
 func (m *memStore) AddComment(_ context.Context, c Comment) (int64, error) {
 	m.notes = append(m.notes, c)

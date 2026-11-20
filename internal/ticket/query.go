@@ -93,6 +93,8 @@ type QueryStore interface {
 	ListMine(ctx context.Context, q MineQuery) ([]*Ticket, error)
 	Events(ctx context.Context, q EventQuery) ([]notify.Event, error)
 	Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]Comment, error)
+	// Perspectives 返回工单的视角补充（不含首段），按时间升序。
+	Perspectives(ctx context.Context, ticketID int64) ([]Perspective, error)
 	AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error)
 	// TicketAttachments 返回工单的附件（不含内容）；publicOnly 时排除随内部评论上传的，forwardedOnly 时只含已上传到 Gitea 的。
 	TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]Attachment, error)

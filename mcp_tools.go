@@ -12,13 +12,15 @@ import (
 
 // MCPHandler 返回 MCP Server（Streamable HTTP，无状态：只接受 POST，直接返回 JSON 响应），工具与 Handler 能力对齐。
 // 身份由 Config.Authenticate 解析，权限与数据隔离同 Go 方法；带 Origin 头的浏览器请求须与 Host 同源。
-// 工具：list_projects、list_ticket_types、create_ticket、get_ticket、list_my_tickets、reply_ticket、list_events、
+// 工具：list_projects、list_ticket_types、create_ticket、get_ticket、list_my_tickets、reply_ticket、add_perspective、
+// list_perspectives、list_events、
 // list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、list_releases、get_release、get_llm_usage。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵问（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
 进展回传给提交人。研发 Agent 可用 get_ticket 读取工单上下文（含提交人的补充与附件列表），用 reply_ticket 回复提交人
-（会同步到 Issue，并通知提交人）。所有数据按调用者身份隔离。`
+（会同步到 Issue，并通知提交人）。需求工单可按调用者视角（使用者 / 业务方 / 专家 / 决策者）用 add_perspective 追加补充、
+list_perspectives 查看分层补充与缺失的必填视角。所有数据按调用者身份隔离。`
 
 // replyModeNote 说明 Gitea 评论是否会转给提交人，随 GiteaConfig.ReplyMode 变化。
 func (l *Lingo) replyModeNote() string {
@@ -135,6 +137,27 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 					return nil, err
 				}
 				return l.AddTicketComment(ctx, u, a.ID, a.Body, nil)
+			}),
+		tool("add_perspective", "以调用者的视角（使用者 / 业务方 / 专家 / 决策者，由身份决定）给需求工单追加一段补充，只追加不可修改；已转出时同步到 Issue 的视角区块。",
+			`{"type":"object","required":["id","content"],"properties":{"id":{"type":"integer"},"content":{"type":"string"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ID      int64
+				Content string
+			}) (any, error) {
+				if err := requireID(a.ID); err != nil {
+					return nil, err
+				}
+				return l.AddPerspective(ctx, u, a.ID, a.Content)
+			}),
+		tool("list_perspectives", "查看需求工单按视角分组的补充（使用者反馈 / 业务补充 / 专家意见 / 决策意见）与缺失的必填视角。",
+			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ID int64
+			}) (any, error) {
+				if err := requireID(a.ID); err != nil {
+					return nil, err
+				}
+				return l.ListPerspectives(ctx, u, a.ID)
 			}),
 		tool("list_events", "按 id 增量拉取工单进展事件（与推送同源），用返回的最后一个 id 作下次的 after。",
 			`{"type":"object","properties":{"after":{"type":"integer"},"limit":{"type":"integer"}}}`,

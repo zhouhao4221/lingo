@@ -21,7 +21,7 @@ func TestMigrateFreshAndIdempotent(t *testing.T) {
 		WHERE table_schema = current_schema() AND table_name <> 'lingo_schema_migrations'`).Scan(&n, &unprefixed); err != nil {
 		t.Fatal(err)
 	}
-	if n != 12 || unprefixed != 0 {
+	if n != 13 || unprefixed != 0 {
 		t.Errorf("tables = %d, without prefix = %d", n, unprefixed)
 	}
 	var name, sum string

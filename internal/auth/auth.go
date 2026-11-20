@@ -17,6 +17,8 @@ type Principal struct {
 	Email    string
 	Role     string
 	Projects []string // 可访问的项目 key；为空表示不限制
+	// Perspective 是需求视角（user / business / expert / leader，为空视为 user），只用于给需求补充归类，不参与权限判断。
+	Perspective string
 }
 
 // InProject 报告调用者能否访问项目 key（User.Projects 为空时不限）。

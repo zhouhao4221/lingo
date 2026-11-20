@@ -17,6 +17,17 @@ const (
 	RoleAdmin    Role = "admin"    // 管理知识库审核等
 )
 
+// Perspective 是固定的需求视角，由接入方按自身用户身份映射；只决定需求补充归入哪一层（Issue 中按视角分段），
+// 与 Role 相互独立，不授予任何权限（PRD 3.2.2.1）。
+type Perspective string
+
+const (
+	PerspectiveUser     Perspective = "user"     // 使用者：现象、诉求、复现步骤
+	PerspectiveBusiness Perspective = "business" // 业务方：业务场景、影响范围、业务价值
+	PerspectiveExpert   Perspective = "expert"   // 专家：专业判断、方案建议、风险与约束
+	PerspectiveLeader   Perspective = "leader"   // 决策者：做不做、优先级、范围取舍、期限
+)
+
 // User 是接入方解析出的请求身份；lingo 不保存用户表，ID 为接入方自己的用户 ID。
 type User struct {
 	ID       string
@@ -25,6 +36,8 @@ type User struct {
 	Role     Role
 	Scopes   []string // 业务数据权限，与 Tool.Scope 比对
 	Projects []string // 可访问的项目 key；为空表示不限制
+	// Perspective 是需求视角，为空视为 PerspectiveUser；非法值在提交工单与追加视角补充时返回 ErrInvalidInput。
+	Perspective Perspective
 }
 
 // Authenticator 从 HTTP 请求解析身份，供 Handler 与 MCPHandler 使用。
@@ -40,6 +53,9 @@ type Project struct {
 	// AutoForward 是各工单类型提交后是否自动转出到 Gitea 的默认值；未配置的类型需后台人员确认。
 	// admin 可经 SetAutoForward 在运行时覆盖。
 	AutoForward map[TicketType]bool
+	// RequiredPerspectives 是该项目需求工单的必填视角，覆盖 Config.RequiredPerspectives；nil 表示沿用 Config，
+	// 空切片表示该项目不检查。
+	RequiredPerspectives []Perspective
 }
 
 // TicketType 是工单类型，对应 Gitea 类型标签。
@@ -155,6 +171,11 @@ const (
 	EventTriageRequired EventKind = "triage.required"
 	EventTriageOverdue  EventKind = "triage.overdue"  // 待确认超过 Config.TriageRemindAfter 未处理，按该间隔重复提醒
 	EventTriageResolved EventKind = "triage.resolved" // 后台处理完成，见 Event.Action
+	// EventTicketPerspectiveAdded 表示需求新增一段视角补充；Perspectives 为本次补充的视角，Body 为提示文案
+	// （如“业务方 · 张三 补充了内容”，不含补充内容）。
+	EventTicketPerspectiveAdded EventKind = "ticket.perspective_added"
+	// EventTicketPerspectiveMissing 表示需求转出时缺少必填视角；Perspectives 为缺失的视角，由接入方决定提醒谁补充。
+	EventTicketPerspectiveMissing EventKind = "ticket.perspective_missing"
 )
 
 // TriageAction 是后台人员对待确认工单的处理动作。
@@ -184,6 +205,8 @@ type Event struct {
 	ActorID    string       `json:"actor_id,omitempty"`    // 触发人（接入方用户 ID）；系统或 Gitea 触发为空
 	Body       string       `json:"body,omitempty"`
 	URL        string       `json:"url,omitempty"` // Gitea Issue 或 Release 链接
+	// Perspectives 是视角事件涉及的视角：ticket.perspective_added 为本次补充的视角，ticket.perspective_missing 为缺失的必填视角。
+	Perspectives []Perspective `json:"perspectives,omitempty"`
 }
 
 // Ticket 是对接入方可见的工单视图（不含 Gitea 内部讨论）。

@@ -14,6 +14,7 @@ import (
 // bad_request / invalid_input（400）、forbidden（403）、not_found（404）、conflict（409）、internal（500）。
 //
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
+// 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
@@ -98,6 +99,30 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		return httpapi.Created{Value: c}, nil
+	})
+	rt.Handle("POST /tickets/{id}/perspectives", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Content string `json:"content"`
+		}
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		p, err := l.AddPerspective(ctx(r), user(r), id, in.Content)
+		if err != nil {
+			return nil, err
+		}
+		return httpapi.Created{Value: p}, nil
+	})
+	rt.Handle("GET /tickets/{id}/perspectives", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return l.ListPerspectives(ctx(r), user(r), id)
 	})
 	triage := func(name string, do func(r *httpapi.Request, id int64) (Ticket, error)) {
 		rt.Handle("POST /tickets/{id}/"+name, func(r *httpapi.Request) (any, error) {

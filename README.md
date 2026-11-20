@@ -60,7 +60,7 @@ See [examples/server](examples/server/main.go) for a complete example.
 
 ### Roles
 
-Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access.
+Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions (`user`, `business`, `expert`, `leader`): feature tickets can be supplemented per perspective via `AddPerspective`, the issue body shows them in layered sections and gets `<prefix>/视角/<name>` labels, and `Config.RequiredPerspectives` flags missing ones. `Config.AuthorizePerspective` decides who may add to or read which requirement (by default the normal ticket visibility applies: external users only their own); contributor and submitter names are written to the issue.
 
 ### REST API
 
@@ -78,11 +78,11 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `list_releases`, `get_release`, `get_llm_usage`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `list_releases`, `get_release`, `get_llm_usage`.
 
 ### Events
 
-`ticket.created`, `ticket.status`, `ticket.comment`, `ticket.scheduled`, `ticket.released`, `ticket.deployed`, `triage.required`, `triage.overdue`, `triage.resolved`. Delivery is at-least-once in per-ticket order; de-duplicate by `Event.ID`.
+`ticket.created`, `ticket.status`, `ticket.comment`, `ticket.scheduled`, `ticket.released`, `ticket.deployed`, `triage.required`, `triage.overdue`, `triage.resolved`, `ticket.perspective_added`, `ticket.perspective_missing`. Delivery is at-least-once in per-ticket order; de-duplicate by `Event.ID`.
 
 ### Gitea setup
 

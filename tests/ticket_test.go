@@ -27,6 +27,7 @@ type giteaServer struct {
 	assets    []string         // 上传的附件：路径 + 文件名
 	comments  []string         // 机器人发出的评论正文
 	edits     []string         // 编辑后的 Issue / 评论正文
+	added     []int64          // POST issues/{n}/labels 追加的标签 id
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,12 +76,22 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": len(g.assets), "uuid": "uuid-" + jsonNum(int64(len(g.assets))),
 			"name": hdr.Filename, "browser_download_url": "http://g/attachments/" + jsonNum(int64(len(g.assets)))})
+	case strings.HasPrefix(p, "/repos/demo/api/issues/") && strings.HasSuffix(p, "/labels") && r.Method == "POST":
+		var req struct{ Labels []int64 }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		g.added = append(g.added, req.Labels...)
+		_, _ = w.Write([]byte("[]"))
 	case strings.HasPrefix(p, "/repos/demo/api/issues/comments/") && r.Method == "PATCH",
 		strings.HasPrefix(p, "/repos/demo/api/issues/") && r.Method == "PATCH":
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		body, _ := req["body"].(string)
 		g.edits = append(g.edits, body)
+		for _, is := range g.issues { // 编辑 Issue 正文后 GET 读到新正文
+			if !strings.Contains(p, "/comments/") && "/repos/demo/api/issues/"+jsonNum(int64(is["number"].(int))) == p {
+				is["body"] = body
+			}
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "number": 40, "body": body})
 	case strings.HasSuffix(p, "/comments") && r.Method == "POST":
 		var req map[string]any
