@@ -1,10 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -33,12 +35,29 @@ type IssueWriter interface {
 	ListLabels(ctx context.Context, owner, repo string, o gitea.ListOptions) ([]*gitea.Label, *gitea.Response, error)
 	CreateLabel(ctx context.Context, owner, repo string, opt gitea.CreateLabelOption) (*gitea.Label, error)
 	ListIssueTemplates(ctx context.Context, owner, repo string) ([]*gitea.IssueTemplate, error)
+	GetIssue(ctx context.Context, owner, repo string, index int64) (*gitea.Issue, error)
+	EditIssue(ctx context.Context, owner, repo string, index int64, opt gitea.EditIssueOption) (*gitea.Issue, error)
+	CreateComment(ctx context.Context, owner, repo string, index int64, body string) (*gitea.Comment, error)
+	EditComment(ctx context.Context, owner, repo string, id int64, body string) (*gitea.Comment, error)
+	CreateIssueAttachment(ctx context.Context, owner, repo string, index int64, name string, r io.Reader) (*gitea.Attachment, error)
+	CreateCommentAttachment(ctx context.Context, owner, repo string, commentID int64, name string, r io.Reader) (*gitea.Attachment, error)
+}
+
+// Forwarding 是转出 Issue 时读取的补充评论与附件，由 store.Store 实现。
+type Forwarding interface {
+	PendingComments(ctx context.Context, ticketID int64) ([]ticket.Comment, error)
+	ForwardableAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64) ([]*ticket.Attachment, error)
+	GetAttachment(ctx context.Context, id int64, withData bool) (*ticket.Attachment, error)
+	MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url, reason string) error
+	AttachmentLinks(ctx context.Context, ticketID, commentID int64) ([]store.AttachmentLink, error)
+	Comment(ctx context.Context, id int64) (*ticket.Comment, error)
+	CommentPosted(ctx context.Context, id, giteaID int64) error
 }
 
 // Drafts 读取待建 Issue 的工单并记录建单结果，由 ticket.Service 实现。
 type Drafts interface {
 	Draft(ctx context.Context, id int64) (*ticket.Ticket, error)
-	IssueCreated(ctx context.Context, id, number int64, via string) (bool, error)
+	IssueCreated(ctx context.Context, id, number int64, via string, commentIDs []int64) (bool, error)
 	IssueFailed(ctx context.Context, id int64, reason string) error
 }
 
@@ -124,13 +143,22 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 	switch t.Op {
 	case ticket.OpCreateIssue:
 		var p struct {
-			ForwardedBy string `json:"forwarded_by"`
-			Note        string `json:"note"`
+			ForwardedBy   string   `json:"forwarded_by"`
+			Note          string   `json:"note"`
+			AttachmentIDs *[]int64 `json:"attachment_ids"`
 		}
 		if err := json.Unmarshal(t.Payload, &p); err != nil {
 			return permanent(fmt.Errorf("task payload: %w", err))
 		}
-		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note, t.Attempts > 1)
+		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note, p.AttachmentIDs, t.Attempts > 1)
+	case ticket.OpCreateComment:
+		var p struct {
+			CommentID int64 `json:"comment_id"`
+		}
+		if err := json.Unmarshal(t.Payload, &p); err != nil || p.CommentID == 0 {
+			return permanent(fmt.Errorf("task payload: %s", t.Payload))
+		}
+		return w.createComment(ctx, t.TicketID, p.CommentID)
 	}
 	return permanent(fmt.Errorf("unknown task op %q", t.Op))
 }
@@ -144,8 +172,9 @@ func giteaErr(what string, err error) error {
 	return permanent(err)
 }
 
-// createIssue 建 Issue；retried 为真表示任务此前被领取过（可能已建好 Issue 但未保存），需先查重。
-func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string, retried bool) error {
+// createIssue 建 Issue 并上传附件；retried 为真表示任务此前被领取过（可能已建好 Issue 但未保存），需先查重。
+// Issue 已存在（上次建好后附件未传完）时只继续上传附件。
+func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note string, attachments *[]int64, retried bool) error {
 	t, err := w.o.Drafts.Draft(ctx, id)
 	if errors.Is(err, ticket.ErrNotFound) {
 		return nil
@@ -153,8 +182,11 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return err
 	}
-	if t.Status != ticket.StatusSubmitted || t.IssueNumber != 0 {
-		return nil // 已建单（或被 Webhook 按标记补记），或工单已不再待建
+	if t.IssueNumber != 0 {
+		return w.uploadIssueAttachments(ctx, t, attachments)
+	}
+	if t.Status != ticket.StatusSubmitted {
+		return nil // 工单已不再待建
 	}
 	if t.Repo == "" {
 		return permanent(fmt.Errorf("ticket %d has no repo", id))
@@ -179,8 +211,22 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		}
 		for _, is := range existing {
 			if is.User != nil && strings.EqualFold(is.User.Login, bot) && gitea.ParseTicketMarker(is.Body) == id {
-				_, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup")
-				return err
+				// 只把正文里确实写进了的补充评论标记为已转出；建单之后才加的补充仍由 create_comment 单独发
+				comments, err := w.o.Forwarding.PendingComments(ctx, id)
+				if err != nil {
+					return err
+				}
+				var inBody []ticket.Comment
+				for _, c := range comments {
+					if strings.Contains(is.Body, stripMarkers(c.Body)) {
+						inBody = append(inBody, c)
+					}
+				}
+				if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup", commentIDs(inBody)); err != nil {
+					return err
+				}
+				t.IssueNumber = is.Number
+				return w.uploadIssueAttachments(ctx, t, attachments)
 			}
 		}
 	}
@@ -198,7 +244,11 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return err
 	}
-	opt := gitea.CreateIssueOption{Title: t.Title, Body: IssueBody(t, tmpl, forwardedBy, note), Labels: labels, Assignees: cfg.Assignees}
+	comments, err := w.o.Forwarding.PendingComments(ctx, id)
+	if err != nil {
+		return err
+	}
+	opt := gitea.CreateIssueOption{Title: t.Title, Body: IssueBody(t, tmpl, comments, forwardedBy, note), Labels: labels, Assignees: cfg.Assignees}
 	if tmpl != nil && tmpl.Title != "" && !strings.HasPrefix(t.Title, tmpl.Title) {
 		opt.Title = tmpl.Title + t.Title
 	}
@@ -220,8 +270,199 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return giteaErr("create issue", err)
 	}
-	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create"); err != nil {
+	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create", commentIDs(comments)); err != nil {
 		return err // 重试时会按标记查到这个 Issue，不会重复建
+	}
+	t.IssueNumber = is.Number
+	return w.uploadIssueAttachments(ctx, t, attachments)
+}
+
+func commentIDs(cs []ticket.Comment) []int64 {
+	ids := make([]int64, 0, len(cs))
+	for _, c := range cs {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
+// uploadIssueAttachments 把随 Issue 转出的附件（attachments 为后台人员勾选的工单附件，nil 表示全部）上传为 Issue 附件，
+// 并重写正文中的附件段落。段落按全部已处理的附件整体生成，重试或部分失败后已上传的引用也不会丢。
+func (w *Worker) uploadIssueAttachments(ctx context.Context, t *ticket.Ticket, attachments *[]int64) error {
+	owner, name, _ := strings.Cut(t.Repo, "/")
+	if err := w.uploadAttachments(ctx, t.ID, 0, attachments, func(a *ticket.Attachment) (*gitea.Attachment, error) {
+		return w.o.Issues.CreateIssueAttachment(ctx, owner, name, t.IssueNumber, a.Filename, bytes.NewReader(a.Data))
+	}); err != nil {
+		return err
+	}
+	section, err := w.attachmentSection(ctx, t.ID, 0)
+	if err != nil || section == "" {
+		return err
+	}
+	is, err := w.o.Issues.GetIssue(ctx, owner, name, t.IssueNumber)
+	if err != nil {
+		return giteaErr("get issue", err)
+	}
+	body := withSection(is.Body, section)
+	if body == is.Body {
+		return nil
+	}
+	if _, err := w.o.Issues.EditIssue(ctx, owner, name, t.IssueNumber, gitea.EditIssueOption{Body: &body}); err != nil {
+		return giteaErr("edit issue body", err)
+	}
+	return nil
+}
+
+// uploadAttachments 逐个上传待转出的附件（每次只读入一个的内容）。Gitea 按内容拒收的附件（400 / 413 / 415 / 422：
+// 类型、大小限制）记下原因不再重试；可重试的错误返回给调用方重试；其他错误（权限、证书等配置问题）让任务失败，
+// 不把附件误记为被拒。已上传的不会重复上传。
+func (w *Worker) uploadAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64,
+	upload func(a *ticket.Attachment) (*gitea.Attachment, error)) error {
+	as, err := w.o.Forwarding.ForwardableAttachments(ctx, ticketID, commentID, ids)
+	if err != nil {
+		return err
+	}
+	for _, meta := range as {
+		a, err := w.o.Forwarding.GetAttachment(ctx, meta.ID, true)
+		if err != nil {
+			return err
+		}
+		ga, err := upload(a)
+		var ae *gitea.APIError
+		switch {
+		case err == nil:
+			err = w.o.Forwarding.MarkAttachmentForwarded(ctx, a.ID, ga.UUID, ga.BrowserDownloadURL, "")
+		case errors.As(err, &ae) && rejectedByContent(ae.StatusCode):
+			w.log.Warn("attachment rejected by gitea", "attachment", a.ID, "file", a.Filename, "err", err)
+			err = w.o.Forwarding.MarkAttachmentForwarded(ctx, a.ID, "", "", err.Error())
+		default:
+			return giteaErr(fmt.Sprintf("upload attachment %d", a.ID), err)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectedByContent(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+// attachmentSection 按已处理的附件生成正文中的附件段落；没有附件时为空。
+func (w *Worker) attachmentSection(ctx context.Context, ticketID, commentID int64) (string, error) {
+	ls, err := w.o.Forwarding.AttachmentLinks(ctx, ticketID, commentID)
+	if err != nil || len(ls) == 0 {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString(sectionStart + "\n### 附件\n\n")
+	for _, l := range ls {
+		name := escapeMarkdown(l.Filename)
+		switch {
+		case l.URL == "":
+			b.WriteString("- " + name + "（未能上传到 Gitea，请在灵问后台查看）\n")
+		case strings.HasPrefix(l.ContentType, "image/"):
+			b.WriteString("- ![" + name + "](" + l.URL + ")\n")
+		default:
+			b.WriteString("- [" + name + "](" + l.URL + ")\n")
+		}
+	}
+	b.WriteString(sectionEnd)
+	return b.String(), nil
+}
+
+const (
+	sectionStart = "<!-- lingo:attachments -->"
+	sectionEnd   = "<!-- /lingo:attachments -->"
+)
+
+// withSection 把附件段落写进正文：替换已有段落，否则插在工单标记之前，保证工单标记仍是正文最后一个。
+func withSection(body, section string) string {
+	if i := strings.Index(body, sectionStart); i >= 0 {
+		if j := strings.Index(body[i:], sectionEnd); j >= 0 {
+			return body[:i] + section + body[i+j+len(sectionEnd):]
+		}
+	}
+	if i := strings.LastIndex(body, "<!-- lingo:ticket="); i >= 0 {
+		return strings.TrimRight(body[:i], "\n") + "\n\n" + section + "\n\n" + body[i:]
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + section
+}
+
+var mdEscaper = strings.NewReplacer("[", "\\[", "]", "\\]", "(", "\\(", ")", "\\)", "<", "&lt;", ">", "&gt;")
+
+func escapeMarkdown(s string) string { return mdEscaper.Replace(s) }
+
+// commentAuthor 是补充评论在 Gitea 中的署名：提交人不具名（PRD 3.2.0.6），后台人员注明姓名。
+func commentAuthor(c *ticket.Comment) string {
+	if c.Source != "staff" {
+		return "提交人"
+	}
+	if c.AuthorName != "" {
+		return "灵问后台（" + escapeMarkdown(c.AuthorName) + "）"
+	}
+	return "灵问后台"
+}
+
+// commentWait 是补充评论等待 Issue 建好时的推迟间隔：建单任务可能在退避重试，不必频繁空转。
+const commentWait = time.Minute
+
+// createComment 把补充评论由机器人发到 Issue，并上传评论附件；评论已发出时（上次附件未传完）只继续处理附件。
+// 建单前的补充已写进 Issue 正文，不再发。
+func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) error {
+	// 先读工单再读评论：建单事务同时写入 Issue 编号与评论的 forwarded_at，按这个顺序读，
+	// 读到 Issue 编号时一定也能读到 forwarded_at，不会把已写进正文的补充再发一遍
+	t, err := w.o.Drafts.Draft(ctx, ticketID)
+	if errors.Is(err, ticket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	c, err := w.o.Forwarding.Comment(ctx, commentID)
+	if errors.Is(err, ticket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if c.Forwarded {
+		return nil
+	}
+	if t.IssueNumber == 0 {
+		if t.Status == ticket.StatusSubmitted {
+			return &ticket.DeferError{Until: w.o.Now().Add(commentWait), Reason: "issue not created yet"}
+		}
+		return nil // 工单未转出（或建单失败）：补充留在灵问
+	}
+	owner, name, _ := strings.Cut(t.Repo, "/")
+	body := "**来自" + commentAuthor(c) + "的补充：**\n\n" + stripMarkers(c.Body)
+	giteaID := c.PostedID
+	if giteaID == 0 {
+		gc, err := w.o.Issues.CreateComment(ctx, owner, name, t.IssueNumber, body)
+		if err != nil {
+			return giteaErr("create comment", err)
+		}
+		if err := w.o.Forwarding.CommentPosted(ctx, c.ID, gc.ID); err != nil {
+			return err
+		}
+		giteaID = gc.ID
+	}
+	if err := w.uploadAttachments(ctx, t.ID, c.ID, nil, func(a *ticket.Attachment) (*gitea.Attachment, error) {
+		return w.o.Issues.CreateCommentAttachment(ctx, owner, name, giteaID, a.Filename, bytes.NewReader(a.Data))
+	}); err != nil {
+		return err // 评论已发出并记录：重试时跳过发评论，继续上传剩余附件
+	}
+	section, err := w.attachmentSection(ctx, t.ID, c.ID)
+	if err != nil || section == "" {
+		return err
+	}
+	if _, err := w.o.Issues.EditComment(ctx, owner, name, giteaID, body+"\n\n"+section); err != nil {
+		return giteaErr("edit comment", err)
 	}
 	return nil
 }
@@ -247,7 +488,7 @@ func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg Repo
 
 // IssueBody 生成 Issue 正文：有表单模板且提交了字段时按 Gitea 表单格式渲染，否则用内置结构；
 // 末尾附项目、版本、提交环境、确认人与隐藏标记。不写入提交人姓名、邮箱等身份信息（PRD 3.2.0.6）。
-func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, forwardedBy, note string) string {
+func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Comment, forwardedBy, note string) string {
 	var b strings.Builder
 	fields := map[string][]string{}
 	for k, vs := range t.Fields {
@@ -278,6 +519,9 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, forwardedBy, note st
 	sort.Strings(ids)
 	for _, id := range ids {
 		b.WriteString("### " + id + "\n\n" + strings.Join(fields[id], "\n") + "\n\n")
+	}
+	for _, c := range comments {
+		b.WriteString("### 补充（" + commentAuthor(&c) + "，" + c.At.UTC().Format("2006-01-02 15:04 UTC") + "）\n\n" + stripMarkers(c.Body) + "\n\n")
 	}
 	b.WriteString("---\n\n")
 	b.WriteString("- 项目：" + t.ProjectKey + "\n")

@@ -27,10 +27,12 @@ type memStore struct {
 	reminded map[int64]time.Time
 
 	lastEventQuery EventQuery
+	uploads        map[int64]string // 未关联的附件 → 上传人
+	attached       map[int64]int    // 工单 → 已关联附件数
 }
 
 func newMem(ts ...Ticket) *memStore {
-	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{}, reminded: map[int64]time.Time{},
+	m := &memStore{tickets: map[int64]*Ticket{}, comments: map[int64]Comment{}, auto: map[string]bool{}, tasks: map[string]Task{}, reminded: map[int64]time.Time{}, uploads: map[int64]string{}, attached: map[int64]int{},
 		projects: map[string]*Project{"demo": {ID: 1, Key: "demo", DefaultRepo: &RepoRef{ID: 10, Name: "demo/api"}}, "empty": {ID: 2, Key: "empty"}},
 		repos:    map[int64][]RepoRef{1: {{ID: 10, Name: "demo/api"}, {ID: 11, Name: "demo/web"}}}}
 	for _, t := range ts {
@@ -142,6 +144,10 @@ func (m *memStore) AutoForwardOverrides(context.Context, []string) (map[string]m
 	return nil, nil
 }
 
+func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]*Attachment, error) {
+	return nil, nil
+}
+
 func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }
 
 func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {
@@ -151,9 +157,27 @@ func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error
 	return "", ErrNotFound
 }
 
-func (m *memStore) AddComment(_ context.Context, c Comment) error {
+func (m *memStore) AddComment(_ context.Context, c Comment) (int64, error) {
 	m.notes = append(m.notes, c)
-	return nil
+	return int64(len(m.notes)), nil
+}
+
+func (m *memStore) MarkCommentsForwarded(context.Context, int64, []int64) error { return nil }
+
+func (m *memStore) CountAttachments(_ context.Context, id int64) (int, error) {
+	return m.attached[id], nil
+}
+
+func (m *memStore) LinkAttachments(_ context.Context, ids []int64, user string, ticketID, _ int64) (int, error) {
+	n := 0
+	for _, id := range ids {
+		if owner, ok := m.uploads[id]; ok && owner == user {
+			delete(m.uploads, id)
+			n++
+		}
+	}
+	m.attached[ticketID] += n
+	return n, nil
 }
 func (m *memStore) AddTriage(_ context.Context, a Triage) error {
 	m.triages = append(m.triages, a)

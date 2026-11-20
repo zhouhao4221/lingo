@@ -91,6 +91,8 @@ type QueryStore interface {
 	Events(ctx context.Context, q EventQuery) ([]notify.Event, error)
 	Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]Comment, error)
 	AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error)
+	// TicketAttachments 返回工单的附件（不含内容）；publicOnly 时排除随内部评论上传的，forwardedOnly 时只含已上传到 Gitea 的。
+	TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]*Attachment, error)
 }
 
 // ListTriage 列出调用者项目范围内的待确认工单（reviewer / admin），按进入待确认的先后（ID 升序）。
@@ -150,21 +152,29 @@ func (s *Service) ListEvents(ctx context.Context, p auth.Principal, afterID int6
 
 // Comments 返回工单评论：external 只看对外评论，其他可见该工单的角色看全部（含研发内部讨论）。
 func (s *Service) Comments(ctx context.Context, p auth.Principal, id int64) ([]Comment, error) {
-	_, cs, err := s.Detail(ctx, p, id)
-	return cs, err
+	if _, err := s.Get(ctx, p, id); err != nil {
+		return nil, err
+	}
+	return s.queries().Comments(ctx, id, p.Role == auth.RoleExternal)
 }
 
-// Detail 返回工单与评论（一次鉴权），评论可见范围同 Comments。
-func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, error) {
+// Detail 返回工单、评论与附件（一次鉴权），可见范围同 Comments。
+func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, []*Attachment, error) {
 	t, err := s.Get(ctx, p, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	cs, err := s.queries().Comments(ctx, id, p.Role == auth.RoleExternal)
+	ext := p.Role == auth.RoleExternal
+	cs, err := s.queries().Comments(ctx, id, ext)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return t, cs, nil
+	// agent 只看已转出到 Gitea 的附件：后台人员没勾选的截图可能含敏感信息
+	as, err := s.queries().TicketAttachments(ctx, id, ext, p.Role == auth.RoleAgent)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return t, cs, as, nil
 }
 
 // RemindOverdue 对项目 projects 中待确认超过 every（自进入待确认或上次提醒起）的工单发出 triage.overdue，

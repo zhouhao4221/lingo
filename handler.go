@@ -13,7 +13,8 @@ import (
 // Config.Authenticate 解析，失败返回 401；错误响应为 {"error":{"code","message"}}，code 取
 // bad_request / invalid_input（400）、forbidden（403）、not_found（404）、conflict（409）、internal（500）。
 //
-// 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}；
+// 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
+// 附件：POST /attachments（multipart，字段 file）、GET /attachments/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward；变更流：GET /events?after=。
 func (l *Lingo) Handler() http.Handler { return l.rest }
@@ -41,12 +42,14 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			Context        map[string]string   `json:"context"`
 			Version        string              `json:"version"`
 			ConversationID int64               `json:"conversation_id"`
+			AttachmentIDs  []int64             `json:"attachment_ids"`
 		}
 		if err := r.Decode(&in); err != nil {
 			return nil, err
 		}
 		t, err := l.CreateTicket(ctx(r), user(r), TicketInput{Project: in.Project, Repo: in.Repo, Type: in.Type, Title: in.Title,
-			Content: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version, ConversationID: in.ConversationID})
+			Content: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version, ConversationID: in.ConversationID,
+			AttachmentIDs: in.AttachmentIDs})
 		if err != nil {
 			return nil, err
 		}
@@ -69,14 +72,57 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		if err != nil {
 			return nil, err
 		}
-		t, cs, err := l.ticketDetail(ctx(r), user(r), id)
+		t, cs, as, err := l.ticketDetail(ctx(r), user(r), id)
 		if err != nil {
 			return nil, err
 		}
 		return struct {
 			Ticket
-			Comments []Comment `json:"comments"`
-		}{t, cs}, nil
+			Comments    []Comment    `json:"comments"`
+			Attachments []Attachment `json:"attachments"`
+		}{t, cs, as}, nil
+	})
+	rt.Handle("POST /tickets/{id}/comments", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Body          string  `json:"body"`
+			AttachmentIDs []int64 `json:"attachment_ids"`
+		}
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		c, err := l.AddTicketComment(ctx(r), user(r), id, in.Body, in.AttachmentIDs)
+		if err != nil {
+			return nil, err
+		}
+		return httpapi.Created{Value: c}, nil
+	})
+	// 上传只接受 multipart：表单的“简单请求”可跨站发出，但只能产生 24 小时后清理的孤儿附件，
+	// 不能把附件挂到工单上（挂接要走 JSON 接口）
+	rt.HandleUpload("POST /attachments", func(r *httpapi.Request) (any, error) {
+		name, data, err := r.FormFile("file", l.maxAttachmentBytes())
+		if err != nil {
+			return nil, err
+		}
+		a, err := l.uploadBytes(ctx(r), user(r), name, data)
+		if err != nil {
+			return nil, err
+		}
+		return httpapi.Created{Value: a}, nil
+	})
+	rt.Handle("GET /attachments/{id}", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		a, data, err := l.GetAttachment(ctx(r), user(r), id)
+		if err != nil {
+			return nil, err
+		}
+		return httpapi.Blob{Name: a.Filename, ContentType: a.ContentType, Data: data}, nil
 	})
 	triage := func(name string, do func(r *httpapi.Request, id int64) (Ticket, error)) {
 		rt.Handle("POST /tickets/{id}/"+name, func(r *httpapi.Request) (any, error) {
@@ -89,15 +135,17 @@ func (l *Lingo) newRESTHandler() http.Handler {
 	}
 	triage("forward", func(r *httpapi.Request, id int64) (Ticket, error) {
 		var in struct {
-			Title string     `json:"title"`
-			Type  TicketType `json:"type"`
-			Repo  string     `json:"repo"`
-			Note  string     `json:"note"`
+			Title         string     `json:"title"`
+			Type          TicketType `json:"type"`
+			Repo          string     `json:"repo"`
+			Note          string     `json:"note"`
+			AttachmentIDs *[]int64   `json:"attachment_ids"` // 省略或 null 表示全部
 		}
 		if err := r.DecodeOptional(&in); err != nil {
 			return Ticket{}, err
 		}
-		return l.ForwardTicket(ctx(r), user(r), id, ForwardOptions{Title: in.Title, Type: in.Type, Repo: in.Repo, Note: in.Note})
+		return l.ForwardTicket(ctx(r), user(r), id, ForwardOptions{Title: in.Title, Type: in.Type, Repo: in.Repo, Note: in.Note,
+			AttachmentIDs: in.AttachmentIDs})
 	})
 	triage("answer", func(r *httpapi.Request, id int64) (Ticket, error) {
 		var in struct {

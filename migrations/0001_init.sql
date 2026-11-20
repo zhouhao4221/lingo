@@ -148,6 +148,8 @@ CREATE TABLE ticket_comments (
     body             text        NOT NULL,
     public           boolean     NOT NULL DEFAULT true, -- 对提交人可见
     gitea_comment_id bigint      UNIQUE,                -- 已同步到 / 来自 Gitea 的评论
+    gitea_posted_id  bigint      UNIQUE, -- 灵问补充由机器人发到 Gitea 后的评论 ID（与 gitea_comment_id 分开，研发编辑机器人评论不会改写原文）
+    forwarded_at     timestamptz, -- 已随 Issue 正文转出（建单前的补充），不再单独发评论
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
     deleted_at       timestamptz
@@ -167,6 +169,8 @@ CREATE TABLE attachments (
     data                  bytea       NOT NULL,
     forwarded             boolean     NOT NULL DEFAULT false, -- 已上传到 Gitea
     gitea_attachment_uuid text        NOT NULL DEFAULT '',
+    gitea_url             text        NOT NULL DEFAULT '', -- Gitea 中的下载地址，用于在 Issue / 评论正文引用
+    forward_error         text        NOT NULL DEFAULT '', -- 上传被 Gitea 拒绝（类型、大小限制）的原因，不再重试
     created_at            timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX attachments_ticket_idx ON attachments (ticket_id);

@@ -216,6 +216,17 @@ type Comment struct {
 	At         time.Time `json:"at"`
 }
 
+// Attachment 是附件的元数据；内容经 GetAttachment 或 GET /attachments/{id} 下载。
+type Attachment struct {
+	ID          int64     `json:"id"`
+	Filename    string    `json:"filename"`
+	ContentType string    `json:"content_type"`
+	Size        int64     `json:"size"`
+	CommentID   int64     `json:"comment_id,omitempty"` // 随补充评论上传时为评论 ID
+	Forwarded   bool      `json:"forwarded"`            // 已上传到 Gitea
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // TicketTypeInfo 是某类工单可填写的表单，取自仓库 Issue 表单模板；没有模板时 Fields 为空（只填正文）。
 type TicketTypeInfo struct {
 	Type     TicketType  `json:"type"`

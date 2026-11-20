@@ -248,17 +248,18 @@ func (x *ticketTx) ConversationOwner(ctx context.Context, id int64) (string, err
 	return owner, nil
 }
 
-func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) error {
+func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) (int64, error) {
 	at := c.At
 	if at.IsZero() {
 		at = time.Now()
 	}
-	if _, err := x.tx.ExecContext(ctx, `
+	var id int64
+	if err := x.tx.QueryRowContext(ctx, `
 		INSERT INTO ticket_comments (ticket_id, author_id, author_name, source, body, public, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`, c.TicketID, c.AuthorID, c.AuthorName, c.Source, c.Body, c.Public, at); err != nil {
-		return fmt.Errorf("store: add comment %d: %w", c.TicketID, err)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`, c.TicketID, c.AuthorID, c.AuthorName, c.Source, c.Body, c.Public, at).Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: add comment %d: %w", c.TicketID, err)
 	}
-	return nil
+	return id, nil
 }
 
 func (x *ticketTx) AddTriage(ctx context.Context, a ticket.Triage) error {

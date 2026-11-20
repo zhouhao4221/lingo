@@ -340,10 +340,10 @@ func TestIssueCreated(t *testing.T) {
 	s := newService(t, m, map[string]bool{TypeBug: true})
 	ctx := context.Background()
 	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x"})
-	if ok, err := s.IssueCreated(ctx, tk.ID, 12, "create"); err != nil || !ok {
+	if ok, err := s.IssueCreated(ctx, tk.ID, 12, "create", nil); err != nil || !ok {
 		t.Fatalf("IssueCreated = %v %v", ok, err)
 	}
-	if ok, _ := s.IssueCreated(ctx, tk.ID, 13, "create"); ok {
+	if ok, _ := s.IssueCreated(ctx, tk.ID, 13, "create", nil); ok {
 		t.Error("second IssueCreated overwrote the issue")
 	}
 	if got := m.tickets[tk.ID]; got.IssueNumber != 12 || got.Status != StatusOpen {
