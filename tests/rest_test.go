@@ -30,6 +30,9 @@ func (c restClient) do(user, role, method, path string, body any) (int, map[stri
 		_ = json.NewEncoder(&buf).Encode(body)
 	}
 	r := httptest.NewRequest(method, path, &buf)
+	if method != "GET" {
+		r.Header.Set("Content-Type", "application/json")
+	}
 	if user != "" {
 		r.Header.Set("X-User", user)
 		r.Header.Set("X-Role", role)
@@ -151,6 +154,21 @@ func TestRESTTicketFlow(t *testing.T) {
 		t.Errorf("events after cursor = %s", kinds(rest))
 	}
 
+	// agent 只看已转出工单在转出之后的事件：这张被直接答复的工单对 agent 不可见
+	if _, _, agentEvents := c.do("a1", "agent", "GET", "/events", nil); len(agentEvents) != 0 {
+		t.Errorf("agent events = %s", kinds(agentEvents))
+	}
+	// 写接口必须是 JSON（CSRF 防护）
+	r := httptest.NewRequest("POST", path+"/reject", strings.NewReader(`{"reason":"x"}`))
+	r.Header.Set("Content-Type", "text/plain")
+	r.Header.Set("X-User", "r1")
+	r.Header.Set("X-Role", rev)
+	w := httptest.NewRecorder()
+	c.h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("text/plain post: %d", w.Code)
+	}
+
 	// 开关
 	if code, _, _ := c.do("r1", rev, "PUT", "/settings/auto-forward", map[string]any{"project": "demo", "type": "feature", "on": true}); code != 403 {
 		t.Errorf("reviewer put setting: %d", code)
@@ -207,6 +225,30 @@ func TestEventsHideUncommitted(t *testing.T) {
 }
 
 func lingoPrincipal() auth.Principal { return auth.Principal{ID: "root", Role: auth.RoleAdmin} }
+
+func TestCommentEventRedactedWhenDeleted(t *testing.T) {
+	db := testDB(t, true)
+	seedTicket(t, db, "open")
+	s, _ := store.New(db)
+	sync, _ := ticket.NewSync(ticket.SyncOptions{Store: s})
+	svc, _ := ticket.NewService(ticket.ServiceOptions{Store: s})
+	ctx := context.Background()
+	u := ticket.CommentUpdate{Change: ticket.CommentCreated, Repo: "demo/api", Number: 12, CommentID: 5, Body: "密钥是 abc", Public: true}
+	if err := sync.ApplyComment(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	ext := auth.Principal{ID: "u1", Role: auth.RoleExternal}
+	if es, _ := svc.ListEvents(ctx, ext, 0, 0); len(es) != 1 || es[0].Body != "密钥是 abc" {
+		t.Fatalf("events = %+v", es)
+	}
+	u.Change = ticket.CommentDeleted
+	if err := sync.ApplyComment(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := svc.ListEvents(ctx, ext, 0, 0); len(es) != 1 || es[0].Body != "" {
+		t.Errorf("deleted comment still in feed: %+v", es)
+	}
+}
 
 func TestRemindOverdueStore(t *testing.T) {
 	db := testDB(t, true)

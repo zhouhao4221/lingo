@@ -64,6 +64,7 @@ type Options struct {
 	Drafts      Drafts
 	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
 	LabelPrefix string                       // 默认 "lingo"
+	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
 
 	// Reminder 与 RemindEvery > 0 时，每分钟检查一次待确认超时（triage.overdue）。
 	Reminder    Reminder
@@ -93,7 +94,7 @@ type Worker struct {
 	o         Options
 	log       *slog.Logger
 	labels    labelCache
-	templates templateCache
+	templates *gitea.TemplateCache
 }
 
 // New 校验配置并创建 Worker。
@@ -140,7 +141,11 @@ func New(o Options) (*Worker, error) {
 	if o.Tasks != nil && (o.Issues == nil || o.Drafts == nil) {
 		return nil, errors.New("worker: Issues and Drafts are required with Tasks")
 	}
-	return &Worker{o: o, log: o.Logger.With("component", "lingo.worker")}, nil
+	tc := o.Templates
+	if tc == nil {
+		tc = &gitea.TemplateCache{}
+	}
+	return &Worker{o: o, log: o.Logger.With("component", "lingo.worker"), templates: tc}, nil
 }
 
 // Run 运行各处理循环直到 ctx 取消；取消后处理完在途的一条再返回，已领取未开始的条目立即释放。

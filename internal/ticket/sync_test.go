@@ -138,6 +138,10 @@ func (m *memStore) Events(_ context.Context, q EventQuery) ([]notify.Event, erro
 	m.lastEventQuery = q
 	return nil, nil
 }
+func (m *memStore) AutoForwardOverrides(context.Context, []string) (map[string]map[string]bool, error) {
+	return nil, nil
+}
+
 func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }
 
 func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {

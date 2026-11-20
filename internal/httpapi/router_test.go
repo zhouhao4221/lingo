@@ -59,6 +59,7 @@ func TestRouter(t *testing.T) {
 		status                   int
 		contains                 string
 	}{
+		{"POST", "/things", "u1", `{"name":"a"}`, 415, "unsupported_media_type"},
 		{"POST", "/things", "", `{"name":"a"}`, 401, `"unauthenticated"`},
 		{"POST", "/things", "u1", `{"name":"a"}`, 201, `"user":"u1"`},
 		{"POST", "/things", "u1", `{bad`, 400, `"bad_request"`},
@@ -70,6 +71,9 @@ func TestRouter(t *testing.T) {
 		{"GET", "/things/3", "u1", "", 204, ""},
 	} {
 		r := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+		if c.method == "POST" && c.status != 415 {
+			r.Header.Set("Content-Type", "application/json; charset=utf-8")
+		}
 		if c.user != "" {
 			r.Header.Set("X-User", c.user)
 		}

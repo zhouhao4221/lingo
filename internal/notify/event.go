@@ -36,4 +36,6 @@ type Event struct {
 	ActorID    string
 	Body       string
 	URL        string
+	// CommentID 是 ticket.comment 对应的 Gitea 评论 ID（不对外），评论被删除或改为内部时据此清除事件正文。
+	CommentID int64
 }

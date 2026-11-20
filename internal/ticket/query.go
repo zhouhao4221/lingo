@@ -22,24 +22,15 @@ func scopeOf(p auth.Principal) Scope {
 	return Scope{Projects: p.Projects}
 }
 
-// narrow 把范围收窄到单个项目；不在范围内时返回 ok=false。
-func (s Scope) narrow(key string) (Scope, bool) {
-	if key == "" {
-		return s, true
-	}
-	if !s.All && !contains(s.Projects, key) {
+// projectScope 返回调用者范围收窄到项目 key（为空不收窄）后的范围；key 不在范围内时 ok=false。
+func projectScope(p auth.Principal, key string) (Scope, bool) {
+	switch {
+	case key == "":
+		return scopeOf(p), true
+	case !p.InProject(key):
 		return Scope{}, false
 	}
 	return Scope{Projects: []string{key}}, true
-}
-
-func contains(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // DefaultLimit / MaxLimit 是列表查询的默认与最大条数。
@@ -99,6 +90,7 @@ type QueryStore interface {
 	ListMine(ctx context.Context, q MineQuery) ([]*Ticket, error)
 	Events(ctx context.Context, q EventQuery) ([]notify.Event, error)
 	Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]Comment, error)
+	AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error)
 }
 
 // ListTriage 列出调用者项目范围内的待确认工单（reviewer / admin），按进入待确认的先后（ID 升序）。
@@ -109,7 +101,7 @@ func (s *Service) ListTriage(ctx context.Context, p auth.Principal, project stri
 	if q.Type != "" && !ValidType(q.Type) {
 		return nil, fmt.Errorf("%w: type %q", ErrInvalid, q.Type)
 	}
-	sc, ok := scopeOf(p).narrow(project)
+	sc, ok := projectScope(p, project)
 	if !ok {
 		return nil, nil
 	}
@@ -158,10 +150,21 @@ func (s *Service) ListEvents(ctx context.Context, p auth.Principal, afterID int6
 
 // Comments 返回工单评论：external 只看对外评论，其他可见该工单的角色看全部（含研发内部讨论）。
 func (s *Service) Comments(ctx context.Context, p auth.Principal, id int64) ([]Comment, error) {
-	if _, err := s.Get(ctx, p, id); err != nil {
-		return nil, err
+	_, cs, err := s.Detail(ctx, p, id)
+	return cs, err
+}
+
+// Detail 返回工单与评论（一次鉴权），评论可见范围同 Comments。
+func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, error) {
+	t, err := s.Get(ctx, p, id)
+	if err != nil {
+		return nil, nil, err
 	}
-	return s.queries().Comments(ctx, id, p.Role == auth.RoleExternal)
+	cs, err := s.queries().Comments(ctx, id, p.Role == auth.RoleExternal)
+	if err != nil {
+		return nil, nil, err
+	}
+	return t, cs, nil
 }
 
 // RemindOverdue 对待确认超过 every（自进入待确认或上次提醒起）的工单发出 triage.overdue，最多 limit 条；
@@ -202,30 +205,27 @@ func (s *Service) AutoForwardSettings(ctx context.Context, p auth.Principal, pro
 	if !p.Staff() {
 		return nil, fmt.Errorf("%w: settings require reviewer or admin", ErrForbidden)
 	}
-	var out []AutoForwardSetting
-	err := s.o.Store.InTx(ctx, func(tx Tx) error {
-		for _, key := range projects {
-			if !p.InProject(key) {
-				continue
-			}
-			proj, err := tx.Project(ctx, key)
-			if err != nil {
-				return err
-			}
-			for _, typ := range []string{TypeConsult, TypeBug, TypeFeature} {
-				on, ok, err := tx.AutoForward(ctx, proj.ID, typ)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					on = s.o.AutoForward(key, typ)
-				}
-				out = append(out, AutoForwardSetting{ProjectKey: key, Type: typ, On: on, Overridden: ok})
-			}
+	var keys []string
+	for _, key := range projects {
+		if p.InProject(key) {
+			keys = append(keys, key)
 		}
-		return nil
-	})
-	return out, err
+	}
+	overrides, err := s.queries().AutoForwardOverrides(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	var out []AutoForwardSetting
+	for _, key := range keys {
+		for _, typ := range []string{TypeConsult, TypeBug, TypeFeature} {
+			on, ok := overrides[key][typ]
+			if !ok {
+				on = s.o.AutoForward(key, typ)
+			}
+			out = append(out, AutoForwardSetting{ProjectKey: key, Type: typ, On: on, Overridden: ok})
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) queries() QueryStore { return s.o.Queries }

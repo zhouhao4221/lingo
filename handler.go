@@ -69,16 +69,9 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		if err != nil {
 			return nil, err
 		}
-		t, err := l.GetTicket(ctx(r), user(r), id)
+		t, cs, err := l.ticketDetail(ctx(r), user(r), id)
 		if err != nil {
 			return nil, err
-		}
-		cs, err := l.ListTicketComments(ctx(r), user(r), id)
-		if err != nil {
-			return nil, err
-		}
-		if cs == nil {
-			cs = []Comment{}
 		}
 		return struct {
 			Ticket

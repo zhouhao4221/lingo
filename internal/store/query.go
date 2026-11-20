@@ -13,6 +13,9 @@ import (
 
 var _ ticket.QueryStore = (*Store)(nil)
 
+// eventSettle 见 Events。
+const eventSettle = 30 * time.Second
+
 // scopeSQL 返回限定项目范围的条件（引用 p.key），占位符从 $n 开始，占两个参数。
 func scopeSQL(n int) string {
 	return fmt.Sprintf("($%d OR p.key = ANY(($%d::text)::text[]))", n, n+1)
@@ -44,7 +47,7 @@ func (s *Store) ListTriage(ctx context.Context, q ticket.TriageQuery) ([]*ticket
 		before = sql.NullTime{Time: q.PendingBefore, Valid: true}
 	}
 	return s.tickets(ctx, "SELECT "+ticketColumns+`
-		WHERE t.status = 'pending_triage' AND `+scopeSQL(1)+`
+		WHERE t.status = 'pending_triage' AND p.enabled AND `+scopeSQL(1)+`
 		  AND ($3 = '' OR t.type = $3) AND ($4::timestamptz IS NULL OR t.triage_since < $4) AND t.id > $5
 		ORDER BY t.id LIMIT $6`, append(scopeArgs(q.Scope), q.Type, before, q.AfterID, q.Limit)...)
 }
@@ -78,18 +81,22 @@ func (s *Store) ListMine(ctx context.Context, q ticket.MineQuery) ([]*ticket.Tic
 		ORDER BY t.id DESC LIMIT $4`, q.UserID, q.Status, q.BeforeID, q.Limit)
 }
 
-// Events 实现 ticket.QueryStore。只返回早于所有进行中事务写入的事件（txid < 快照 xmin）：
-// 事件 ID 在事务内分配、提交顺序可能不同，否则游标可能越过一个尚未提交的较小 ID 而永远漏掉它。
+// Events 实现 ticket.QueryStore。事件 ID 在事务内分配、提交顺序可能不同，直接按 ID 翻页时游标可能越过一个
+// 尚未提交的较小 ID 而永远漏掉它，所以只返回早于所有进行中事务写入的事件（txid < 快照 xmin）。xmin 是整个实例
+// 最老的进行中事务，宿主的长事务会把它拖住；因此写入超过 eventSettle 的事件无论如何都返回（灵问自己的事务
+// 都是毫秒级，不会在这么久后才提交），变更流的延迟最多为 eventSettle。
 func (s *Store) Events(ctx context.Context, q ticket.EventQuery) ([]notify.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.kind, e.created_at, COALESCE(e.project_id, 0), COALESCE(p.key, ''), COALESCE(e.ticket_id, 0),
 		       e.status, e.prev_status, e.action, e.user_id, e.actor_id, e.payload
-		FROM events e LEFT JOIN projects p ON p.id = e.project_id LEFT JOIN tickets t ON t.id = e.ticket_id
-		WHERE e.id > $3 AND e.txid < pg_snapshot_xmin(pg_current_snapshot()) AND `+scopeSQL(1)+`
+		FROM events e LEFT JOIN projects p ON p.id = e.project_id
+		WHERE e.id > $3 AND (e.txid < pg_snapshot_xmin(pg_current_snapshot()) OR e.created_at < now() - $8 * interval '1 second')
+		  AND `+scopeSQL(1)+`
 		  AND ($4 = '' OR e.user_id = $4)
 		  AND (NOT $5 OR e.kind NOT LIKE 'triage.%')
-		  AND (NOT $6 OR t.status NOT IN ('pending_triage', 'answered', 'merged', 'rejected'))
-		ORDER BY e.id LIMIT $7`, append(scopeArgs(q.Scope), q.AfterID, q.UserID, q.ExcludeTriage, q.ForwardedOnly, q.Limit)...)
+		  AND (NOT $6 OR e.status NOT IN ('pending_triage', 'answered', 'merged', 'rejected'))
+		ORDER BY e.id LIMIT $7`, append(scopeArgs(q.Scope), q.AfterID, q.UserID, q.ExcludeTriage, q.ForwardedOnly, q.Limit,
+		eventSettle.Seconds())...)
 	if err != nil {
 		return nil, fmt.Errorf("store: events: %w", err)
 	}
@@ -131,6 +138,29 @@ func (s *Store) Comments(ctx context.Context, ticketID int64, publicOnly bool) (
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// AutoForwardOverrides 实现 ticket.QueryStore：返回 project key → 类型 → 覆盖值，一次查询。
+func (s *Store) AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT p.key, ps.ticket_type, ps.auto_forward FROM project_settings ps
+		JOIN projects p ON p.id = ps.project_id WHERE p.key = ANY(($1::text)::text[])`, textArray(keys))
+	if err != nil {
+		return nil, fmt.Errorf("store: auto forward overrides: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]map[string]bool{}
+	for rows.Next() {
+		var key, typ string
+		var on bool
+		if err := rows.Scan(&key, &typ, &on); err != nil {
+			return nil, err
+		}
+		if out[key] == nil {
+			out[key] = map[string]bool{}
+		}
+		out[key][typ] = on
 	}
 	return out, rows.Err()
 }

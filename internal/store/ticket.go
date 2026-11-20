@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -329,6 +330,11 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 		c.GiteaID, c.Body, c.Public, c.AuthorName, at); err != nil {
 		return nil, fmt.Errorf("store: update comment %d: %w", c.GiteaID, err)
 	}
+	if prev.Public && !c.Public {
+		if err := x.redactCommentEvents(ctx, c.GiteaID); err != nil {
+			return nil, err
+		}
+	}
 	return &prev, nil
 }
 
@@ -340,6 +346,16 @@ func (x *ticketTx) DeleteGiteaComment(ctx context.Context, giteaID int64, at tim
 		giteaID, at); err != nil {
 		return fmt.Errorf("store: delete comment %d: %w", giteaID, err)
 	}
+	return x.redactCommentEvents(ctx, giteaID)
+}
+
+// redactCommentEvents 清除该评论对应事件的正文：评论被删除或改为内部后，变更流不再返回原文
+// （已推送给 Notifier 的无法撤回）。
+func (x *ticketTx) redactCommentEvents(ctx context.Context, giteaID int64) error {
+	if _, err := x.tx.ExecContext(ctx, `UPDATE events SET payload = payload - 'body'
+		WHERE kind = 'ticket.comment' AND payload->>'comment_id' = $1`, strconv.FormatInt(giteaID, 10)); err != nil {
+		return fmt.Errorf("store: redact comment events %d: %w", giteaID, err)
+	}
 	return nil
 }
 
@@ -349,10 +365,11 @@ type eventPayload struct {
 	Title      string `json:"title,omitempty"`
 	Body       string `json:"body,omitempty"`
 	URL        string `json:"url,omitempty"`
+	CommentID  int64  `json:"comment_id,omitempty"`
 }
 
 func (x *ticketTx) Emit(ctx context.Context, e notify.Event) error {
-	payload, err := json.Marshal(eventPayload{TicketType: e.TicketType, Title: e.Title, Body: e.Body, URL: e.URL})
+	payload, err := json.Marshal(eventPayload{TicketType: e.TicketType, Title: e.Title, Body: e.Body, URL: e.URL, CommentID: e.CommentID})
 	if err != nil {
 		return err
 	}
