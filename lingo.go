@@ -109,10 +109,11 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, err
 	}
 	if l.tickets, err = ticket.NewService(ticket.ServiceOptions{
-		Store:       l.store,
-		AutoForward: l.defaultAutoForward,
-		IssueURL:    l.issueURL,
-		Declared:    l.declared,
+		Store:         l.store,
+		AutoForward:   l.defaultAutoForward,
+		IssueURL:      l.issueURL,
+		Declared:      l.declared,
+		NeedInfoLabel: l.labelPrefix() + "/review/need-info",
 	}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}

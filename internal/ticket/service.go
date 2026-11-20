@@ -40,7 +40,9 @@ type ServiceOptions struct {
 	// Declared 报告项目（repo 为空时）或项目下的仓库是否在当前 Config 中声明；为空时不限。数据库里的项目与仓库
 	// 不会因配置删除而停用（见 store.SyncProjects），以此保证只用当前声明的。
 	Declared func(projectKey, repo string) bool
-	Now      func() time.Time
+	// NeedInfoLabel 是“需补充信息”标签全名；提交人在 need_info 时补充后，由机器人从 Issue 上移除。为空时不移除。
+	NeedInfoLabel string
+	Now           func() time.Time
 }
 
 // Service 是工单的提交、后台确认与查询；所有方法在领域层执行访问控制（PRD 3.2.0.6）。
@@ -359,6 +361,10 @@ func (s *Service) Merge(ctx context.Context, p auth.Principal, id, target int64,
 			return "", fmt.Errorf("%w: merge target %d is %s", ErrConflict, target, dst.Status)
 		}
 		t.Status, t.MergedInto = StatusMerged, target
+		// 之前合并到本工单的重复工单改为跟随最终目标
+		if err := tx.RepointMerged(ctx, t.ID, target); err != nil {
+			return "", err
+		}
 		return note, tx.AddTriage(ctx, Triage{TicketID: t.ID, ActorID: p.ID, Action: "merge", Note: note, TargetID: target})
 	})
 }

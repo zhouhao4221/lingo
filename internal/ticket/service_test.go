@@ -210,6 +210,24 @@ func TestMergeLocksBothAndRejectsCycles(t *testing.T) {
 	}
 }
 
+func TestMergeRepointsChain(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, nil)
+	ctx := context.Background()
+	x, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x"})
+	tt, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "t"})
+	d, _ := s.Create(ctx, bob, NewTicket{Project: "demo", Type: TypeBug, Body: "d"})
+	if _, err := s.Merge(ctx, reviewer, d.ID, tt.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Merge(ctx, reviewer, tt.ID, x.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.tickets[d.ID].MergedInto; got != x.ID {
+		t.Errorf("d merged into %d, want %d", got, x.ID)
+	}
+}
+
 func TestForwardRevalidatesRepo(t *testing.T) {
 	m := newMem()
 	s := newService(t, m, nil)
