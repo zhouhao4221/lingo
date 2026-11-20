@@ -34,8 +34,6 @@ type TicketInput struct {
 	Fields  map[string][]string
 	Context map[string]string // 页面 URL、页面标题、浏览器等，转出时附在 Issue 末尾；不要放个人身份信息
 	Version string            // 提交人正在使用的版本
-	// ConversationID 是从问答转出时的会话 ID。
-	ConversationID int64
 	// AttachmentIDs 是经 UploadAttachment 上传、尚未关联工单的附件（最多 10 个）。
 	AttachmentIDs []int64
 }
@@ -61,7 +59,7 @@ func (l *Lingo) CreateTicket(ctx context.Context, u User, in TicketInput) (Ticke
 	}
 	t, err := l.tickets.Create(ctx, l.principal(u), ticket.NewTicket{Project: in.Project, Repo: in.Repo, Type: string(in.Type),
 		Title: in.Title, Body: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version,
-		Conversation: in.ConversationID, Attachments: in.AttachmentIDs})
+		Attachments: in.AttachmentIDs})
 	return l.ticketResult(t, err)
 }
 

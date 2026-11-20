@@ -79,7 +79,6 @@ type Ticket struct {
 	UserID         string // 提交人（接入方用户 ID）
 	UserName       string // 提交人姓名快照，仅展示
 	UserEmail      string
-	Conversation   int64 // 从问答转出时的会话 ID
 	IssueNumber    int64 // 主 Issue 编号，Issue 创建前为 0
 	MergedInto     int64
 	TriageSince    *time.Time

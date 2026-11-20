@@ -58,7 +58,7 @@ type ticketTx struct {
 }
 
 const ticketColumns = `t.id, t.project_id, p.key, COALESCE(t.repo_id, 0), COALESCE(r.owner || '/' || r.name, ''), t.type, t.title, t.title_auto,
-	t.body, t.fields, t.context, t.reported_version, t.status, t.user_id, t.user_name, t.user_email, COALESCE(t.conversation_id, 0),
+	t.body, t.fields, t.context, t.reported_version, t.status, t.user_id, t.user_name, t.user_email,
 	COALESCE(t.gitea_issue_number, 0), COALESCE(t.merged_into_ticket_id, 0), t.triage_since, t.created_at, t.updated_at,
 	t.gitea_updated_at, COALESCE(t.fixed_pr, 0), t.fixed_commit, t.milestone, t.due_date, t.deployed_at, COALESCE(rel.tag, ''),
 	COALESCE(t.fixed_release_id, 0), t.fixed_repo
@@ -72,7 +72,7 @@ func scanTicket(row rowScanner) (*ticket.Ticket, error) {
 	var fields, tctx []byte
 	var triage, updated, due, deployed sql.NullTime
 	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.RepoID, &t.Repo, &t.Type, &t.Title, &t.TitleAuto,
-		&t.Body, &fields, &tctx, &t.Version, &t.Status, &t.UserID, &t.UserName, &t.UserEmail, &t.Conversation,
+		&t.Body, &fields, &tctx, &t.Version, &t.Status, &t.UserID, &t.UserName, &t.UserEmail,
 		&t.IssueNumber, &t.MergedInto, &triage, &t.CreatedAt, &t.UpdatedAt,
 		&updated, &t.FixedPR, &t.FixedCommit, &t.Milestone, &due, &deployed, &t.FixedTag, &t.FixedReleaseID, &t.FixedRepo)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -167,11 +167,11 @@ func (x *ticketTx) Insert(ctx context.Context, t *ticket.Ticket) error {
 		return err
 	}
 	err = x.tx.QueryRowContext(ctx, `
-		INSERT INTO lingo_tickets (user_id, user_name, user_email, conversation_id, project_id, repo_id, type, title, body, status,
+		INSERT INTO lingo_tickets (user_id, user_name, user_email, project_id, repo_id, type, title, body, status,
 		    context, fields, reported_version, triage_since, title_auto)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id, created_at, updated_at`,
-		t.UserID, t.UserName, t.UserEmail, nullInt64(t.Conversation), t.ProjectID, nullInt64(t.RepoID), t.Type, t.Title, t.Body,
+		t.UserID, t.UserName, t.UserEmail, t.ProjectID, nullInt64(t.RepoID), t.Type, t.Title, t.Body,
 		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince), t.TitleAuto).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: insert ticket: %w", err)
@@ -224,43 +224,30 @@ func (x *ticketTx) Repo(ctx context.Context, projectID int64, name string) (*tic
 }
 
 func (x *ticketTx) AutoForward(ctx context.Context, projectID int64, typ string) (on, ok bool, err error) {
-	err = x.tx.QueryRowContext(ctx, "SELECT auto_forward FROM lingo_project_settings WHERE project_id = $1 AND ticket_type = $2",
-		projectID, typ).Scan(&on)
+	var v sql.NullBool
+	err = x.tx.QueryRowContext(ctx, "SELECT (auto_forward->>$2)::boolean FROM lingo_projects WHERE id = $1", projectID, typ).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
 	}
 	if err != nil {
 		return false, false, fmt.Errorf("store: auto forward: %w", err)
 	}
-	return on, true, nil
+	return v.Bool, v.Valid, nil
 }
 
-func (x *ticketTx) SetAutoForward(ctx context.Context, projectID int64, typ string, on *bool, by string) error {
+// SetAutoForward 写入或删除（on 为 nil）运行时覆盖值；不保存操作人。
+func (x *ticketTx) SetAutoForward(ctx context.Context, projectID int64, typ string, on *bool, _ string) error {
 	var err error
 	if on == nil {
-		_, err = x.tx.ExecContext(ctx, "DELETE FROM lingo_project_settings WHERE project_id = $1 AND ticket_type = $2", projectID, typ)
+		_, err = x.tx.ExecContext(ctx, "UPDATE lingo_projects SET auto_forward = auto_forward - $2 WHERE id = $1", projectID, typ)
 	} else {
-		_, err = x.tx.ExecContext(ctx, `
-			INSERT INTO lingo_project_settings (project_id, ticket_type, auto_forward, updated_by) VALUES ($1, $2, $3, $4)
-			ON CONFLICT (project_id, ticket_type) DO UPDATE SET auto_forward = EXCLUDED.auto_forward,
-			    updated_by = EXCLUDED.updated_by, updated_at = now()`, projectID, typ, *on, by)
+		_, err = x.tx.ExecContext(ctx, "UPDATE lingo_projects SET auto_forward = auto_forward || jsonb_build_object($2::text, $3::boolean) WHERE id = $1",
+			projectID, typ, *on)
 	}
 	if err != nil {
 		return fmt.Errorf("store: set auto forward: %w", err)
 	}
 	return nil
-}
-
-func (x *ticketTx) ConversationOwner(ctx context.Context, id int64) (string, error) {
-	var owner string
-	err := x.tx.QueryRowContext(ctx, "SELECT user_id FROM lingo_conversations WHERE id = $1", id).Scan(&owner)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ticket.ErrNotFound
-	}
-	if err != nil {
-		return "", fmt.Errorf("store: conversation %d: %w", id, err)
-	}
-	return owner, nil
 }
 
 func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) (int64, error) {
@@ -275,14 +262,6 @@ func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) (int64, err
 		return 0, fmt.Errorf("store: add comment %d: %w", c.TicketID, err)
 	}
 	return id, nil
-}
-
-func (x *ticketTx) AddTriage(ctx context.Context, a ticket.Triage) error {
-	if _, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_triage_actions (ticket_id, actor_id, action, note, target_ticket_id)
-		VALUES ($1, $2, $3, $4, $5)`, a.TicketID, a.ActorID, a.Action, a.Note, nullInt64(a.TargetID)); err != nil {
-		return fmt.Errorf("store: add triage %d: %w", a.TicketID, err)
-	}
-	return nil
 }
 
 func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {

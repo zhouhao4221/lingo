@@ -42,8 +42,6 @@ type Tx interface {
 	LockOverdue(ctx context.Context, s Scope, before time.Time, limit int) ([]*Ticket, error)
 	// MarkReminded 记录提醒时间。
 	MarkReminded(ctx context.Context, id int64, at time.Time) error
-	// ConversationOwner 返回会话的提交人；不存在返回 ErrNotFound。
-	ConversationOwner(ctx context.Context, id int64) (string, error)
 	// AddComment 写一条工单评论（用户补充或后台答复），返回评论 ID。
 	AddComment(ctx context.Context, c Comment) (int64, error)
 	// MarkCommentsForwarded 标记工单的补充评论已随 Issue 正文转出。
@@ -52,8 +50,6 @@ type Tx interface {
 	CountAttachments(ctx context.Context, ticketID int64) (int, error)
 	// LinkAttachments 把 userID 上传、尚未关联工单的附件 ids 关联到工单（与评论，commentID 为 0 表示工单本身），返回关联条数。
 	LinkAttachments(ctx context.Context, ids []int64, userID string, ticketID, commentID int64) (int, error)
-	// AddTriage 写一条后台处理记录（triage_actions）。
-	AddTriage(ctx context.Context, a Triage) error
 	// Enqueue 写一条 Gitea 写操作任务；Key 已存在时忽略（同一操作只入队一次）。
 	Enqueue(ctx context.Context, t Task) error
 	// RepointMerged 把合并到 from 的工单改为合并到 to。
@@ -107,15 +103,6 @@ type Project struct {
 type RepoRef struct {
 	ID   int64
 	Name string // "owner/name"
-}
-
-// Triage 是一条后台处理记录。
-type Triage struct {
-	TicketID int64
-	ActorID  string
-	Action   string // forward | answer | merge | reject
-	Note     string
-	TargetID int64 // merge 的目标工单
 }
 
 // 任务操作。

@@ -69,7 +69,7 @@ func TestReconcileRecoversMissedWebhooks(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		var n int
-		_ = db.QueryRow("SELECT count(*) FROM lingo_sync_cursors").Scan(&n)
+		_ = db.QueryRow("SELECT count(*) FROM lingo_repo_state WHERE kind <> 'ping'").Scan(&n)
 		return n == 4
 	})
 	time.Sleep(2500 * time.Millisecond) // 再对账几轮

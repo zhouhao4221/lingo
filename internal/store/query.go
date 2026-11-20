@@ -144,8 +144,8 @@ func (s *Store) Comments(ctx context.Context, ticketID int64, publicOnly bool) (
 
 // AutoForwardOverrides 实现 ticket.QueryStore：返回 project key → 类型 → 覆盖值，一次查询。
 func (s *Store) AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT p.key, ps.ticket_type, ps.auto_forward FROM lingo_project_settings ps
-		JOIN lingo_projects p ON p.id = ps.project_id WHERE p.key = ANY(($1::text)::text[])`, textArray(keys))
+	rows, err := s.db.QueryContext(ctx, `SELECT p.key, e.key, e.value::boolean FROM lingo_projects p, jsonb_each_text(p.auto_forward) e
+		WHERE p.key = ANY(($1::text)::text[])`, textArray(keys))
 	if err != nil {
 		return nil, fmt.Errorf("store: auto forward overrides: %w", err)
 	}

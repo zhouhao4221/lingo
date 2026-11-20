@@ -10,6 +10,7 @@ CREATE TABLE lingo_projects (
     description     text        NOT NULL DEFAULT '',
     default_repo_id bigint,
     enabled         boolean     NOT NULL DEFAULT true,
+    auto_forward    jsonb       NOT NULL DEFAULT '{}', -- 自动转出开关的运行时覆盖值（类型 → 是否），优先于 Project.AutoForward
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
@@ -32,40 +33,6 @@ CREATE INDEX lingo_repos_project_id_idx ON lingo_repos (project_id);
 ALTER TABLE lingo_projects
     ADD CONSTRAINT lingo_projects_default_repo_id_fkey FOREIGN KEY (default_repo_id) REFERENCES lingo_repos (id) ON DELETE SET NULL;
 
--- 运行时设置：自动转出开关的覆盖值（优先于 Project.AutoForward）
-CREATE TABLE lingo_project_settings (
-    project_id   bigint      NOT NULL REFERENCES lingo_projects (id) ON DELETE CASCADE,
-    ticket_type  text        NOT NULL CHECK (ticket_type IN ('consult', 'bug', 'feature')),
-    auto_forward boolean     NOT NULL,
-    updated_by   text        NOT NULL DEFAULT '',
-    updated_at   timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, ticket_type)
-);
-
--- 问答会话
-CREATE TABLE lingo_conversations (
-    id         bigserial PRIMARY KEY,
-    user_id    text        NOT NULL,
-    project_id bigint      NOT NULL REFERENCES lingo_projects (id),
-    channel    text        NOT NULL CHECK (channel IN ('api', 'mcp', 'go')),
-    status     text        NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'escalated')),
-    ticket_id  bigint,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX lingo_conversations_user_idx ON lingo_conversations (user_id, created_at DESC);
-
-CREATE TABLE lingo_messages (
-    id              bigserial PRIMARY KEY,
-    conversation_id bigint      NOT NULL REFERENCES lingo_conversations (id) ON DELETE CASCADE,
-    role            text        NOT NULL CHECK (role IN ('user', 'assistant')),
-    content         text        NOT NULL,
-    sources         jsonb       NOT NULL DEFAULT '[]',
-    feedback        smallint    CHECK (feedback IN (-1, 1)),
-    created_at      timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX lingo_messages_conversation_idx ON lingo_messages (conversation_id, id);
-
 -- 版本记录（同步自 Gitea Release）
 CREATE TABLE lingo_releases (
     id               bigserial PRIMARY KEY,
@@ -78,6 +45,7 @@ CREATE TABLE lingo_releases (
     gitea_release_id bigint,
     commit_sha       text        NOT NULL DEFAULT '', -- tag 所指提交，用于按提交识别上线
     html_url         text        NOT NULL DEFAULT '',
+    deployments      jsonb       NOT NULL DEFAULT '{}', -- 上线记录：环境 → {source, ref, at}，每个环境只记首次
     synced_at        timestamptz NOT NULL DEFAULT now(),
     UNIQUE (repo_id, tag)
 );
@@ -89,7 +57,6 @@ CREATE TABLE lingo_tickets (
     user_id               text        NOT NULL,
     user_name             text        NOT NULL DEFAULT '', -- 提交人快照，仅展示与通知，不用于权限判断
     user_email            text        NOT NULL DEFAULT '',
-    conversation_id       bigint      REFERENCES lingo_conversations (id) ON DELETE SET NULL,
     project_id            bigint      NOT NULL REFERENCES lingo_projects (id),
     repo_id               bigint      REFERENCES lingo_repos (id), -- 转出前可为空
     type                  text        NOT NULL CHECK (type IN ('consult', 'bug', 'feature')),
@@ -125,24 +92,6 @@ CREATE INDEX lingo_tickets_project_status_idx ON lingo_tickets (project_id, stat
 CREATE INDEX lingo_tickets_triage_idx ON lingo_tickets (triage_since) WHERE status = 'pending_triage';
 -- 被合并工单跟随目标工单的进展
 CREATE INDEX lingo_tickets_merged_into_idx ON lingo_tickets (merged_into_ticket_id) WHERE merged_into_ticket_id IS NOT NULL;
-
-ALTER TABLE lingo_conversations
-    ADD CONSTRAINT lingo_conversations_ticket_id_fkey FOREIGN KEY (ticket_id) REFERENCES lingo_tickets (id) ON DELETE SET NULL;
-
--- 工单拆到多个仓库时的附加 Issue（主 Issue 在 tickets 上）；全部修复发布 / 上线后工单才算 released / deployed
-CREATE TABLE lingo_ticket_issues (
-    id                 bigserial PRIMARY KEY,
-    ticket_id          bigint      NOT NULL REFERENCES lingo_tickets (id) ON DELETE CASCADE,
-    repo_id            bigint      NOT NULL REFERENCES lingo_repos (id),
-    gitea_issue_number bigint      NOT NULL,
-    state              text        NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'closed')),
-    fixed_pr           bigint,
-    fixed_commit       text        NOT NULL DEFAULT '',
-    created_at         timestamptz NOT NULL DEFAULT now(),
-    updated_at         timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (repo_id, gitea_issue_number)
-);
-CREATE INDEX lingo_ticket_issues_ticket_idx ON lingo_ticket_issues (ticket_id);
 
 -- 工单评论：用户补充、后台答复、研发对外回复（来自 Gitea）
 CREATE TABLE lingo_ticket_comments (
@@ -183,29 +132,6 @@ CREATE INDEX lingo_attachments_ticket_idx ON lingo_attachments (ticket_id);
 -- 未关联工单的附件 24 小时后清理
 CREATE INDEX lingo_attachments_orphan_idx ON lingo_attachments (created_at) WHERE ticket_id IS NULL;
 
--- 后台确认记录
-CREATE TABLE lingo_triage_actions (
-    id               bigserial PRIMARY KEY,
-    ticket_id        bigint      NOT NULL REFERENCES lingo_tickets (id) ON DELETE CASCADE,
-    actor_id         text        NOT NULL,
-    action           text        NOT NULL CHECK (action IN ('forward', 'answer', 'merge', 'reject')),
-    note             text        NOT NULL DEFAULT '',
-    target_ticket_id bigint      REFERENCES lingo_tickets (id) ON DELETE SET NULL,
-    created_at       timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX lingo_triage_actions_ticket_idx ON lingo_triage_actions (ticket_id);
-
--- 需求评审
-CREATE TABLE lingo_reviews (
-    id          bigserial PRIMARY KEY,
-    ticket_id   bigint      NOT NULL REFERENCES lingo_tickets (id) ON DELETE CASCADE,
-    reviewer_id text        NOT NULL,
-    verdict     text        NOT NULL CHECK (verdict IN ('approve', 'reject', 'need_info')),
-    comment     text        NOT NULL DEFAULT '',
-    created_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX lingo_reviews_ticket_idx ON lingo_reviews (ticket_id);
-
 -- 版本关联工单：以 tag 区间提交匹配 fixed_commit / fixed_pr 为主，版本说明中的 Issue 引用补漏
 CREATE TABLE lingo_release_tickets (
     release_id bigint      NOT NULL REFERENCES lingo_releases (id) ON DELETE CASCADE,
@@ -216,35 +142,7 @@ CREATE TABLE lingo_release_tickets (
 );
 CREATE INDEX lingo_release_tickets_ticket_idx ON lingo_release_tickets (ticket_id);
 
--- 上线记录
-CREATE TABLE lingo_deployments (
-    id          bigserial PRIMARY KEY,
-    release_id  bigint      NOT NULL REFERENCES lingo_releases (id) ON DELETE CASCADE,
-    env         text        NOT NULL DEFAULT 'production',
-    source      text        NOT NULL CHECK (source IN ('workflow', 'status', 'manual')),
-    ref         text        NOT NULL DEFAULT '',
-    deployed_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (release_id, env)
-);
-
--- 业务数据请求审计：不保存业务数据原文
-CREATE TABLE lingo_data_requests (
-    id              bigserial PRIMARY KEY,
-    user_id         text        NOT NULL,
-    conversation_id bigint      REFERENCES lingo_conversations (id) ON DELETE SET NULL,
-    tool_name       text        NOT NULL,
-    params_digest   text        NOT NULL DEFAULT '',
-    status          text        NOT NULL CHECK (status IN ('ok', 'denied', 'failed')),
-    latency_ms      integer     NOT NULL DEFAULT 0,
-    idempotency_key text,
-    created_at      timestamptz NOT NULL DEFAULT now()
-);
--- write 类工具防重复提交
-CREATE UNIQUE INDEX lingo_data_requests_idempotency_key ON lingo_data_requests (user_id, tool_name, idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
-CREATE INDEX lingo_data_requests_user_idx ON lingo_data_requests (user_id, created_at DESC);
-
--- 工单事件（审计，含 Gitea 回流的全部变化）
+-- 工单事件（审计，含 Gitea 回流的全部变化与后台确认：kind = triage.*，payload 含备注与合并目标）
 CREATE TABLE lingo_ticket_events (
     id         bigserial PRIMARY KEY,
     ticket_id  bigint      NOT NULL REFERENCES lingo_tickets (id) ON DELETE CASCADE,
@@ -343,34 +241,12 @@ CREATE TABLE lingo_llm_usage (
 CREATE INDEX lingo_llm_usage_created_idx ON lingo_llm_usage (created_at);
 CREATE INDEX lingo_llm_usage_ticket_idx ON lingo_llm_usage (ticket_id) WHERE ticket_id IS NOT NULL;
 
--- 连通记录：push / 测试投递只更新这里，不进投递表
-CREATE TABLE lingo_webhook_pings (
-    repo         text PRIMARY KEY, -- "owner/name"，小写
-    last_ping_at timestamptz NOT NULL
-);
-
--- 对账游标
-CREATE TABLE lingo_sync_cursors (
-    repo_id    bigint      NOT NULL REFERENCES lingo_repos (id) ON DELETE CASCADE,
-    kind       text        NOT NULL CHECK (kind IN ('issues', 'pulls', 'comments', 'releases', 'deployments')),
-    since      timestamptz NOT NULL,
+-- 仓库同步状态：Webhook 最近连通时间（ping）与各类对账游标（issues / pulls / comments / releases / deployments）；
+-- 按小写 "owner/name"，只向后移动
+CREATE TABLE lingo_repo_state (
+    repo       text        NOT NULL,
+    kind       text        NOT NULL CHECK (kind IN ('ping', 'issues', 'pulls', 'comments', 'releases', 'deployments')),
+    at         timestamptz NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (repo_id, kind)
+    PRIMARY KEY (repo, kind)
 );
-
--- 知识库问答；embedding 先用 real[]，接入 pgvector 后另行迁移
-CREATE TABLE lingo_kb_entries (
-    id                     bigserial PRIMARY KEY,
-    project_id             bigint      NOT NULL REFERENCES lingo_projects (id),
-    repo_id                bigint      REFERENCES lingo_repos (id),
-    question               text        NOT NULL,
-    answer                 text        NOT NULL,
-    source_ticket_id       bigint      REFERENCES lingo_tickets (id) ON DELETE SET NULL,
-    source_conversation_id bigint      REFERENCES lingo_conversations (id) ON DELETE SET NULL,
-    status                 text        NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
-    tags                   text[]      NOT NULL DEFAULT '{}',
-    embedding              real[],
-    created_at             timestamptz NOT NULL DEFAULT now(),
-    updated_at             timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX lingo_kb_entries_project_status_idx ON lingo_kb_entries (project_id, status);

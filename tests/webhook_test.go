@@ -78,7 +78,7 @@ func TestWebhookHandlerStoresDeliveries(t *testing.T) {
 	if n := count("SELECT count(*) FROM lingo_webhook_deliveries WHERE kind = 'comment.created' AND repo = 'demo/api' AND issue_number = 12"); n != 1 {
 		t.Errorf("stored deliveries = %d", n)
 	}
-	if n := count("SELECT count(*) FROM lingo_webhook_pings WHERE repo = 'demo/api'"); n != 1 {
+	if n := count("SELECT count(*) FROM lingo_repo_state WHERE repo = 'demo/api' AND kind = 'ping'"); n != 1 {
 		t.Errorf("pings = %d", n)
 	}
 }

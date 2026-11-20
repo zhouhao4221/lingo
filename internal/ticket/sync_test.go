@@ -22,7 +22,6 @@ type memStore struct {
 	repos    map[int64][]RepoRef // project → repos
 	auto     map[string]bool     // "project:type"
 	notes    []Comment
-	triages  []Triage
 	tasks    map[string]Task
 	reminded map[int64]time.Time
 
@@ -46,7 +45,7 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 	for id, t := range m.tickets {
 		saved[id] = *t
 	}
-	nh, ne, nn, nt := len(m.history), len(m.events), len(m.notes), len(m.triages)
+	nh, ne, nn := len(m.history), len(m.events), len(m.notes)
 	if err := fn(m); err != nil {
 		for id := range m.tickets {
 			if t, ok := saved[id]; ok {
@@ -55,7 +54,7 @@ func (m *memStore) InTx(ctx context.Context, fn func(Tx) error) error {
 				delete(m.tickets, id)
 			}
 		}
-		m.history, m.events, m.notes, m.triages = m.history[:nh], m.events[:ne], m.notes[:nn], m.triages[:nt]
+		m.history, m.events, m.notes = m.history[:nh], m.events[:ne], m.notes[:nn]
 		return err
 	}
 	return nil
@@ -160,13 +159,6 @@ func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]*Att
 
 func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }
 
-func (m *memStore) ConversationOwner(_ context.Context, id int64) (string, error) {
-	if id == 1 {
-		return "u1", nil
-	}
-	return "", ErrNotFound
-}
-
 func (m *memStore) AddComment(_ context.Context, c Comment) (int64, error) {
 	m.notes = append(m.notes, c)
 	return int64(len(m.notes)), nil
@@ -188,10 +180,6 @@ func (m *memStore) LinkAttachments(_ context.Context, ids []int64, user string, 
 	}
 	m.attached[ticketID] += n
 	return n, nil
-}
-func (m *memStore) AddTriage(_ context.Context, a Triage) error {
-	m.triages = append(m.triages, a)
-	return nil
 }
 func (m *memStore) Enqueue(_ context.Context, t Task) error {
 	if _, ok := m.tasks[t.Key]; !ok {

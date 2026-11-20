@@ -83,7 +83,8 @@ func (s *Store) ReleaseTicketIDs(ctx context.Context, id int64) ([]int64, error)
 
 // ReleaseDeployments 实现 release.Store。
 func (s *Store) ReleaseDeployments(ctx context.Context, id int64) ([]release.DeploymentRecord, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT env, source, deployed_at FROM lingo_deployments WHERE release_id = $1 ORDER BY deployed_at", id)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.key, e.value->>'source', (e.value->>'at')::timestamptz FROM lingo_releases r,
+		jsonb_each(r.deployments) e WHERE r.id = $1 ORDER BY 3, 1`, id)
 	if err != nil {
 		return nil, fmt.Errorf("store: release deployments: %w", err)
 	}
@@ -197,8 +198,10 @@ func (x releaseTx) FindRelease(ctx context.Context, repoID int64, tag, sha strin
 }
 
 func (x releaseTx) AddDeployment(ctx context.Context, releaseID int64, env, source, ref string, at time.Time) error {
-	if _, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_deployments (release_id, env, source, ref, deployed_at) VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (release_id, env) DO NOTHING`, releaseID, env, source, ref, at); err != nil {
+	// 每个环境只记首次上线
+	if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_releases
+		SET deployments = deployments || jsonb_build_object($2::text, jsonb_build_object('source', $3::text, 'ref', $4::text, 'at', $5::timestamptz))
+		WHERE id = $1 AND NOT deployments ? $2`, releaseID, env, source, ref, at); err != nil {
 		return fmt.Errorf("store: add deployment: %w", err)
 	}
 	return nil
@@ -206,9 +209,9 @@ func (x releaseTx) AddDeployment(ctx context.Context, releaseID int64, env, sour
 
 func (x releaseTx) Deployments(ctx context.Context, r *release.Release) (map[string]time.Time, error) {
 	// 同一提交上的其他版本（如先打 rc 上线、再在同一提交打正式 tag）已上线，也算本版本已上线
-	rows, err := x.tx.QueryContext(ctx, `SELECT d.env, min(d.deployed_at) FROM lingo_deployments d JOIN lingo_releases o ON o.id = d.release_id
-		WHERE d.release_id = $1 OR ($2 <> '' AND o.repo_id = $3 AND lower(o.commit_sha) = lower($2))
-		GROUP BY d.env`, r.ID, r.CommitSHA, r.RepoID)
+	rows, err := x.tx.QueryContext(ctx, `SELECT e.key, min((e.value->>'at')::timestamptz) FROM lingo_releases o, jsonb_each(o.deployments) e
+		WHERE o.id = $1 OR ($2 <> '' AND o.repo_id = $3 AND lower(o.commit_sha) = lower($2))
+		GROUP BY e.key`, r.ID, r.CommitSHA, r.RepoID)
 	if err != nil {
 		return nil, fmt.Errorf("store: deployments: %w", err)
 	}

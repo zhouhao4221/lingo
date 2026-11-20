@@ -47,8 +47,8 @@ func (s *Store) SaveDelivery(ctx context.Context, r webhook.Record) (bool, error
 // RecordPing 实现 webhook.Store：记录仓库最近一次连通时间，只会向后更新。
 func (s *Store) RecordPing(ctx context.Context, repo string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO lingo_webhook_pings (repo, last_ping_at) VALUES ($1, $2)
-		ON CONFLICT (repo) DO UPDATE SET last_ping_at = GREATEST(lingo_webhook_pings.last_ping_at, EXCLUDED.last_ping_at)`,
+		INSERT INTO lingo_repo_state (repo, kind, at) VALUES ($1, 'ping', $2)
+		ON CONFLICT (repo, kind) DO UPDATE SET at = GREATEST(lingo_repo_state.at, EXCLUDED.at), updated_at = now()`,
 		strings.ToLower(repo), at)
 	if err != nil {
 		return fmt.Errorf("store: record ping %s: %w", repo, err)
@@ -58,7 +58,7 @@ func (s *Store) RecordPing(ctx context.Context, repo string, at time.Time) error
 
 // LastPing 返回仓库最近一次连通时间；从未收到过时 ok 为 false。
 func (s *Store) LastPing(ctx context.Context, repo string) (at time.Time, ok bool, err error) {
-	err = s.db.QueryRowContext(ctx, "SELECT last_ping_at FROM lingo_webhook_pings WHERE repo = $1", strings.ToLower(repo)).Scan(&at)
+	err = s.db.QueryRowContext(ctx, "SELECT at FROM lingo_repo_state WHERE repo = $1 AND kind = 'ping'", strings.ToLower(repo)).Scan(&at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}

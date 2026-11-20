@@ -34,22 +34,21 @@ func (l *Lingo) newRESTHandler() http.Handler {
 	})
 	rt.Handle("POST /tickets", func(r *httpapi.Request) (any, error) {
 		var in struct {
-			Project        string              `json:"project"`
-			Repo           string              `json:"repo"`
-			Type           TicketType          `json:"type"`
-			Title          string              `json:"title"`
-			Content        string              `json:"content"`
-			Fields         map[string][]string `json:"fields"`
-			Context        map[string]string   `json:"context"`
-			Version        string              `json:"version"`
-			ConversationID int64               `json:"conversation_id"`
-			AttachmentIDs  []int64             `json:"attachment_ids"`
+			Project       string              `json:"project"`
+			Repo          string              `json:"repo"`
+			Type          TicketType          `json:"type"`
+			Title         string              `json:"title"`
+			Content       string              `json:"content"`
+			Fields        map[string][]string `json:"fields"`
+			Context       map[string]string   `json:"context"`
+			Version       string              `json:"version"`
+			AttachmentIDs []int64             `json:"attachment_ids"`
 		}
 		if err := r.Decode(&in); err != nil {
 			return nil, err
 		}
 		t, err := l.CreateTicket(ctx(r), user(r), TicketInput{Project: in.Project, Repo: in.Repo, Type: in.Type, Title: in.Title,
-			Content: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version, ConversationID: in.ConversationID,
+			Content: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version,
 			AttachmentIDs: in.AttachmentIDs})
 		if err != nil {
 			return nil, err
