@@ -22,6 +22,10 @@ func releaseGitea(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
 		case "/repos/demo/api/tags/v1.1.0":
 			_, _ = w.Write([]byte(`{"name":"v1.1.0","commit":{"sha":"tagsha110"}}`))
+		case "/repos/demo/web/tags/v2.0.0":
+			_, _ = w.Write([]byte(`{"name":"v2.0.0","commit":{"sha":"websha"}}`))
+		case "/repos/demo/web/compare/v2.0.0...webfix":
+			_, _ = w.Write([]byte(`{"total_commits":0,"commits":[]}`))
 		default:
 			// compare/<ref>...<sha>：sha 已包含在 ref 中时没有新提交
 			if rest, ok := strings.CutPrefix(p, "/repos/demo/api/compare/"); ok {
@@ -69,7 +73,7 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 		DB: db, Model: nopModel{}, Notifier: rec,
 		Gitea: lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s"},
 		Projects: []lingo.Project{{Key: "demo", Repos: []lingo.Repo{{Owner: "demo", Name: "api",
-			Deploy: lingo.DeploySignal{Workflow: "deploy-prod.yml", StatusContext: "deploy/production"}}}}},
+			Deploy: lingo.DeploySignal{Workflow: "deploy-prod.yml", StatusContext: "deploy/production"}}, {Owner: "demo", Name: "web"}}}},
 		Authenticate: func(*http.Request) (lingo.User, error) { return lingo.User{}, nil },
 	})
 	if err != nil {
@@ -152,5 +156,18 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 	evs = rec.waitFor(t, 6)
 	if evs[4].Kind != lingo.EventTicketReleased || evs[5].Kind != lingo.EventTicketDeployed || evs[5].TicketID != untouched {
 		t.Errorf("late link events = %+v", evs[4:])
+	}
+
+	// 跨仓库修复：后端工单由前端仓库的 PR 修复，随前端版本发布
+	var cross int64
+	if err := db.QueryRow(`INSERT INTO tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, fixed_commit, fixed_repo)
+		SELECT 'u1', project_id, id, 'bug', 't', 'fixed', 15, 'webfix', 'demo/web' FROM repos WHERE name = 'api' RETURNING id`).Scan(&cross); err != nil {
+		t.Fatal(err)
+	}
+	send("r3", "release", `{"action":"published","release":{"id":20,"tag_name":"v2.0.0","name":"web 2","body":"","prerelease":false,
+		"published_at":"2026-11-20T03:00:00Z","html_url":"http://g/demo/web/releases/v2.0.0"},"repository":{"full_name":"demo/web"},"sender":{"login":"dev"}}`)
+	evs = rec.waitFor(t, 7)
+	if evs[6].TicketID != cross || evs[6].Kind != lingo.EventTicketReleased {
+		t.Errorf("cross-repo release event = %+v", evs[6])
 	}
 }

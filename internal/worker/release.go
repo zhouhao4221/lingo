@@ -100,7 +100,10 @@ func (w *Worker) applyRelease(ctx context.Context, ev *webhook.Event, received t
 		if cfg.DeployWorkflow == "" || run.Conclusion != "success" || !workflowIs(run.Path, cfg.DeployWorkflow) {
 			return nil
 		}
-		d := release.Deployment{Repo: ev.Repo, Tag: run.HeadBranch, SHA: run.HeadSHA, Env: cfg.DeployEnv, Source: "workflow", Ref: run.HTMLURL}
+		d := release.Deployment{Repo: ev.Repo, SHA: run.HeadSHA, Env: cfg.DeployEnv, Source: "workflow", Ref: run.HTMLURL}
+		if versionTag.MatchString(run.HeadBranch) {
+			d.Tag = run.HeadBranch // 以 tag 触发的运行；分支名（如 main）不当作版本
+		}
 		if run.CompletedAt != nil {
 			d.At = *run.CompletedAt
 		}
@@ -166,16 +169,11 @@ func workflowIs(runPath, file string) bool {
 	return p != "" && (path.Base(p) == file || p == file)
 }
 
-// releaseRefs 解析版本说明中的 Issue 引用，补全仓库。
+// releaseRefs 解析版本说明中的 Issue 引用（补全仓库、去重）。
 func releaseRefs(repo, body string) []release.IssueRef {
 	var out []release.IssueRef
-	for _, r := range gitea.ParseIssueRefs(body) {
-		full, text := repo, "#"
-		if r.Owner != "" {
-			full = r.Owner + "/" + r.Repo
-			text = full + "#"
-		}
-		out = append(out, release.IssueRef{Repo: full, Number: r.Index, Text: text + itoa(r.Index)})
+	for _, r := range resolveRefs(repo, gitea.ParseIssueRefs(body)) {
+		out = append(out, release.IssueRef{Repo: r.Repo, Number: r.Number, Text: r.Text})
 	}
 	return out
 }

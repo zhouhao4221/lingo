@@ -45,13 +45,18 @@ func (x releaseTx) UpsertRelease(ctx context.Context, r *release.Release, fromTa
 		// 只有 tag：不覆盖 Release 的名称、说明、发布时间与预发布标记
 		q += `commit_sha = CASE WHEN releases.commit_sha = '' THEN EXCLUDED.commit_sha ELSE releases.commit_sha END, synced_at = now()`
 	} else {
-		q += `name = EXCLUDED.name, body = EXCLUDED.body, prerelease = EXCLUDED.prerelease, published_at = EXCLUDED.published_at,
+		q += `name = EXCLUDED.name, body = EXCLUDED.body, prerelease = EXCLUDED.prerelease,
+		    published_at = COALESCE(EXCLUDED.published_at, releases.published_at),
 		    gitea_release_id = EXCLUDED.gitea_release_id, html_url = EXCLUDED.html_url,
 		    commit_sha = CASE WHEN EXCLUDED.commit_sha = '' THEN releases.commit_sha ELSE EXCLUDED.commit_sha END, synced_at = now()`
 	}
-	q += ` RETURNING id, name, body, prerelease, published_at, commit_sha, html_url`
+	q += ` RETURNING id, name, body, prerelease, COALESCE(published_at, synced_at), commit_sha, html_url`
 	var published sql.NullTime
-	err := x.tx.QueryRowContext(ctx, q, r.RepoID, r.Tag, r.Name, r.Body, r.Prerelease, nullTime(&r.PublishedAt),
+	var at *time.Time
+	if !r.PublishedAt.IsZero() {
+		at = &r.PublishedAt
+	}
+	err := x.tx.QueryRowContext(ctx, q, r.RepoID, r.Tag, r.Name, r.Body, r.Prerelease, nullTime(at),
 		nullInt64(r.GiteaID), r.CommitSHA, r.URL).Scan(&r.ID, &r.Name, &r.Body, &r.Prerelease, &published, &r.CommitSHA, &r.URL)
 	if err != nil {
 		return fmt.Errorf("store: upsert release %s %s: %w", r.Repo, r.Tag, err)
@@ -77,9 +82,13 @@ func scanRelease(row rowScanner) (*release.Release, error) {
 	return &r, nil
 }
 
+// Candidates 返回修复提交在仓库 repoID 中、处于 status 的工单：修复 PR 在该仓库合并的（fixed_repo），
+// 以及未记录修复仓库、工单就在该仓库的。修复 PR 可能合在同项目的另一个仓库（前端 PR 修后端 Issue）。
 func (x releaseTx) Candidates(ctx context.Context, repoID int64, status ticket.Status) ([]release.Candidate, error) {
-	rows, err := x.tx.QueryContext(ctx, `SELECT id, fixed_commit FROM tickets WHERE repo_id = $1 AND status = $2 ORDER BY id`,
-		repoID, string(status))
+	rows, err := x.tx.QueryContext(ctx, `SELECT t.id, t.fixed_commit, COALESCE(t.fixed_release_id, 0) FROM tickets t, repos r
+		WHERE r.id = $1 AND t.status = $2
+		  AND (t.fixed_repo = lower(r.owner || '/' || r.name) OR (t.fixed_repo = '' AND t.repo_id = r.id))
+		ORDER BY t.id`, repoID, string(status))
 	if err != nil {
 		return nil, fmt.Errorf("store: release candidates: %w", err)
 	}
@@ -87,7 +96,7 @@ func (x releaseTx) Candidates(ctx context.Context, repoID int64, status ticket.S
 	var out []release.Candidate
 	for rows.Next() {
 		var c release.Candidate
-		if err := rows.Scan(&c.ID, &c.FixedCommit); err != nil {
+		if err := rows.Scan(&c.ID, &c.FixedCommit, &c.FixedReleaseID); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -117,8 +126,11 @@ func (x releaseTx) AddDeployment(ctx context.Context, releaseID int64, env, sour
 	return nil
 }
 
-func (x releaseTx) Deployments(ctx context.Context, releaseID int64) (map[string]time.Time, error) {
-	rows, err := x.tx.QueryContext(ctx, "SELECT env, deployed_at FROM deployments WHERE release_id = $1", releaseID)
+func (x releaseTx) Deployments(ctx context.Context, r *release.Release) (map[string]time.Time, error) {
+	// 同一提交上的其他版本（如先打 rc 上线、再在同一提交打正式 tag）已上线，也算本版本已上线
+	rows, err := x.tx.QueryContext(ctx, `SELECT d.env, min(d.deployed_at) FROM deployments d JOIN releases o ON o.id = d.release_id
+		WHERE d.release_id = $1 OR ($2 <> '' AND o.repo_id = $3 AND lower(o.commit_sha) = lower($2))
+		GROUP BY d.env`, r.ID, r.CommitSHA, r.RepoID)
 	if err != nil {
 		return nil, fmt.Errorf("store: deployments: %w", err)
 	}

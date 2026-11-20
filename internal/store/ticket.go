@@ -61,7 +61,7 @@ const ticketColumns = `t.id, t.project_id, p.key, COALESCE(t.repo_id, 0), COALES
 	t.body, t.fields, t.context, t.reported_version, t.status, t.user_id, t.user_name, t.user_email, COALESCE(t.conversation_id, 0),
 	COALESCE(t.gitea_issue_number, 0), COALESCE(t.merged_into_ticket_id, 0), t.triage_since, t.created_at, t.updated_at,
 	t.gitea_updated_at, COALESCE(t.fixed_pr, 0), t.fixed_commit, t.milestone, t.due_date, t.deployed_at, COALESCE(rel.tag, ''),
-	COALESCE(t.fixed_release_id, 0)
+	COALESCE(t.fixed_release_id, 0), t.fixed_repo
 	FROM tickets t JOIN projects p ON p.id = t.project_id LEFT JOIN repos r ON r.id = t.repo_id
 	LEFT JOIN releases rel ON rel.id = t.fixed_release_id`
 
@@ -74,7 +74,7 @@ func scanTicket(row rowScanner) (*ticket.Ticket, error) {
 	err := row.Scan(&t.ID, &t.ProjectID, &t.ProjectKey, &t.RepoID, &t.Repo, &t.Type, &t.Title,
 		&t.Body, &fields, &tctx, &t.Version, &t.Status, &t.UserID, &t.UserName, &t.UserEmail, &t.Conversation,
 		&t.IssueNumber, &t.MergedInto, &triage, &t.CreatedAt, &t.UpdatedAt,
-		&updated, &t.FixedPR, &t.FixedCommit, &t.Milestone, &due, &deployed, &t.FixedTag, &t.FixedReleaseID)
+		&updated, &t.FixedPR, &t.FixedCommit, &t.Milestone, &due, &deployed, &t.FixedTag, &t.FixedReleaseID, &t.FixedRepo)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
 	}
@@ -138,11 +138,11 @@ func (x *ticketTx) Update(ctx context.Context, t *ticket.Ticket) error {
 	err := x.tx.QueryRowContext(ctx, `
 		UPDATE tickets SET status = $2, gitea_issue_number = $3, gitea_updated_at = $4, fixed_pr = $5, fixed_commit = $6,
 		    milestone = $7, due_date = $8, repo_id = $9, type = $10, title = $11, merged_into_ticket_id = $12,
-		    triage_since = $13, fixed_release_id = $14, deployed_at = $15, updated_at = now()
+		    triage_since = $13, fixed_release_id = $14, deployed_at = $15, fixed_repo = lower($16), updated_at = now()
 		WHERE id = $1 RETURNING updated_at`,
 		t.ID, string(t.Status), nullInt64(t.IssueNumber), updated, nullInt64(t.FixedPR), t.FixedCommit, t.Milestone, nullTime(t.DueDate),
 		nullInt64(t.RepoID), t.Type, t.Title, nullInt64(t.MergedInto), nullTime(t.TriageSince), nullInt64(t.FixedReleaseID),
-		nullTime(t.DeployedAt)).Scan(&t.UpdatedAt)
+		nullTime(t.DeployedAt), t.FixedRepo).Scan(&t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: update ticket %d: %w", t.ID, err)
 	}

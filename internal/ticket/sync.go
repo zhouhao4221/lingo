@@ -272,7 +272,7 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 		}
 		if t.Status == StatusClosed || t.Status.fixed() {
 			// 修复被否定：清掉修复记录，之后的合并重新记录
-			t.Status, t.FixedPR, t.FixedCommit, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", 0, nil
+			t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", "", 0, nil
 		}
 	case IssueDeleted:
 		t.Status = StatusAbnormal
@@ -371,7 +371,7 @@ func (s *Sync) ApplyPull(ctx context.Context, u PullUpdate) error {
 }
 
 func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r IssueRef) error {
-	prev, prevPR, prevCommit := t.Status, t.FixedPR, t.FixedCommit
+	prev, prevPR, prevCommit, prevRepo := t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo
 	switch u.Change {
 	case PullOpened, PullReopened:
 		if t.Status == StatusOpen {
@@ -379,7 +379,7 @@ func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r 
 		}
 	case PullMerged:
 		if r.Closes && (t.Status.active() || t.Status == StatusSubmitted || t.Status == StatusClosed || t.Status == StatusFixed) {
-			t.Status, t.FixedPR, t.FixedCommit = StatusFixed, u.Number, u.MergeCommit
+			t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo = StatusFixed, u.Number, u.MergeCommit, u.Repo
 		}
 	}
 	if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
@@ -388,7 +388,7 @@ func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r 
 	}}); err != nil {
 		return err
 	}
-	if t.Status == prev && t.FixedPR == prevPR && t.FixedCommit == prevCommit {
+	if t.Status == prev && t.FixedPR == prevPR && t.FixedCommit == prevCommit && t.FixedRepo == prevRepo {
 		return nil
 	}
 	if err := tx.Update(ctx, t); err != nil {

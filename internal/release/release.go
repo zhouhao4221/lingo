@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,8 +29,9 @@ type Release struct {
 
 // Candidate 是可能随版本发布或上线的工单及其修复提交。
 type Candidate struct {
-	ID          int64
-	FixedCommit string
+	ID             int64
+	FixedCommit    string
+	FixedReleaseID int64
 }
 
 // ErrNotFound 表示仓库不属于任何项目或版本不存在。
@@ -43,7 +45,7 @@ type Tx interface {
 	// UpsertRelease 按仓库 + tag 写入版本并回填 ID 与库中的值。fromTag 为真（只来自 tag）时不覆盖已有的
 	// Release 名称、说明与预发布标记，只补提交。
 	UpsertRelease(ctx context.Context, r *Release, fromTag bool) error
-	// Candidates 返回仓库中处于 status 的工单及其修复提交。
+	// Candidates 返回修复提交在该仓库中、处于 status 的工单（修复 PR 可能合在同项目的另一个仓库）。
 	Candidates(ctx context.Context, repoID int64, status ticket.Status) ([]Candidate, error)
 	// LinkTicket 记录工单与版本的关联（ref 为 "commit" 或说明中的引用原文），已存在时忽略。
 	LinkTicket(ctx context.Context, releaseID, ticketID int64, ref string) error
@@ -51,8 +53,8 @@ type Tx interface {
 	FindRelease(ctx context.Context, repoID int64, tag, sha string) (*Release, error)
 	// AddDeployment 记录版本在环境 env 上线，已记录过时忽略。
 	AddDeployment(ctx context.Context, releaseID int64, env, source, ref string, at time.Time) error
-	// Deployments 返回版本已记录的上线（环境 → 时间）。
-	Deployments(ctx context.Context, releaseID int64) (map[string]time.Time, error)
+	// Deployments 返回版本（及同一提交上的其他版本）已记录的上线（环境 → 时间）。
+	Deployments(ctx context.Context, r *Release) (map[string]time.Time, error)
 }
 
 // Store 是版本仓储，由 internal/store 实现。
@@ -108,9 +110,6 @@ func (s *Service) Published(ctx context.Context, r Release, refs []IssueRef, fro
 		}
 		r.CommitSHA = sha
 	}
-	if r.PublishedAt.IsZero() {
-		r.PublishedAt = s.o.Now()
-	}
 	var cands []Candidate
 	if err := s.o.Store.InReleaseTx(ctx, func(tx Tx) error {
 		id, err := tx.RepoID(ctx, r.Repo)
@@ -146,11 +145,19 @@ func (s *Service) Published(ctx context.Context, r Release, refs []IssueRef, fro
 				matched[t.ID] = ref.Text
 			}
 		}
-		deployed, err := tx.Deployments(ctx, r.ID)
+		deployed, err := tx.Deployments(ctx, &r)
 		if err != nil {
 			return err
 		}
-		for id, ref := range matched {
+		for _, id := range sortedIDs(matched) { // 固定加锁顺序，避免并发处理重叠的工单时死锁
+			ref := matched[id]
+			t, err := tx.LockByID(ctx, id)
+			if err != nil {
+				return err
+			}
+			if t.Status != ticket.StatusFixed {
+				continue // 比较期间工单已变化（如被重开）：不再关联
+			}
 			if err := tx.LinkTicket(ctx, r.ID, id, ref); err != nil {
 				return err
 			}
@@ -170,22 +177,38 @@ func (s *Service) Published(ctx context.Context, r Release, refs []IssueRef, fro
 	})
 }
 
-// contained 返回修复提交包含在 ref 中的候选工单（值为关联来源 "commit"）。
+// contained 返回修复提交包含在 ref 中的候选工单（值为关联来源 "commit"）。每个不同的提交只比较一次；
+// 待发布的工单通常不多，逐个比较比按版本区间推算更可靠（见 Published）。
 func (s *Service) contained(ctx context.Context, repo, ref string, cands []Candidate) (map[int64]string, error) {
 	out := map[int64]string{}
+	seen := map[string]bool{}
 	for _, c := range cands {
-		if c.FixedCommit == "" {
+		sha := strings.ToLower(c.FixedCommit)
+		if sha == "" {
 			continue
 		}
-		ok, err := s.o.Git.Contains(ctx, repo, ref, c.FixedCommit)
-		if err != nil {
-			return nil, err
+		ok, done := seen[sha]
+		if !done {
+			var err error
+			if ok, err = s.o.Git.Contains(ctx, repo, ref, sha); err != nil {
+				return nil, err
+			}
+			seen[sha] = ok
 		}
 		if ok {
 			out[c.ID] = "commit"
 		}
 	}
 	return out, nil
+}
+
+func sortedIDs(m map[int64]string) []int64 {
+	ids := make([]int64, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // transit 把工单从 from 推进到 to（released 记录修复版本，deployed 记录上线时间）并通知；状态不符时不变。
@@ -275,17 +298,9 @@ func (s *Service) Deployed(ctx context.Context, d Deployment) error {
 	}
 	return s.o.Store.InReleaseTx(ctx, func(tx Tx) error {
 		for _, c := range cands {
-			if _, ok := matched[c.ID]; !ok {
-				if c.FixedCommit != "" {
-					continue
-				}
-				t, err := tx.LockByID(ctx, c.ID)
-				if err != nil {
-					return err
-				}
-				if t.FixedReleaseID != r.ID {
-					continue
-				}
+			// 修复提交未知的工单按修复版本就是上线版本判定
+			if _, ok := matched[c.ID]; !ok && (c.FixedCommit != "" || c.FixedReleaseID != r.ID) {
+				continue
 			}
 			if err := s.transit(ctx, tx, c.ID, r, ticket.StatusReleased, ticket.StatusDeployed, "", d.Env, d.At); err != nil {
 				return err

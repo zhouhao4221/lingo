@@ -109,6 +109,7 @@ CREATE TABLE tickets (
     due_date              date,
     fixed_pr              bigint,
     fixed_commit          text        NOT NULL DEFAULT '',
+    fixed_repo            text        NOT NULL DEFAULT '', -- 修复 PR 所在仓库（小写 owner/name），可能与工单仓库不同
     fixed_release_id      bigint      REFERENCES releases (id) ON DELETE SET NULL,
     deployed_at           timestamptz,
     triage_since          timestamptz, -- 进入待确认的时间

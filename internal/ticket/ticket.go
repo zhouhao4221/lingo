@@ -91,6 +91,7 @@ type Ticket struct {
 	GiteaUpdatedAt time.Time // 最近一次采纳的 Issue updated_at，用于丢弃乱序到达的旧事件
 	FixedPR        int64
 	FixedCommit    string
+	FixedRepo      string // 修复 PR 所在仓库 "owner/name"；为空表示与工单仓库相同
 	Milestone      string
 	DueDate        *time.Time
 }

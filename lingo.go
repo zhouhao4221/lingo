@@ -270,6 +270,9 @@ func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
 	if repo == "" || tag == "" {
 		return fmt.Errorf("%w: repo and tag are required", ErrInvalidInput)
 	}
+	if err := l.ensureProjects(ctx); err != nil {
+		return err
+	}
 	err := l.releases.Deployed(ctx, release.Deployment{Repo: repo, Tag: tag, Env: env, Source: "manual"})
 	if errors.Is(err, release.ErrNotFound) {
 		return ErrNotFound
