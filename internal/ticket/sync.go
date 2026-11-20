@@ -27,6 +27,8 @@ const (
 	IssueLabeled      IssueChange = "issue.labeled"
 	IssueMilestoned   IssueChange = "issue.milestoned"
 	IssueDemilestoned IssueChange = "issue.demilestoned"
+	// IssueSynced 是对账时按 Issue 当前快照对齐（不知道具体发生了什么变化）：只在快照新于已采纳的状态时生效。
+	IssueSynced IssueChange = "issue.synced"
 )
 
 // IssueState 是 Issue 的状态快照。Webhook 只是触发器：调用方应尽量传入从 Gitea 重新读取的当前状态，
@@ -191,9 +193,13 @@ func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate, 
 	cur := u.Current
 	// 删除是终态，不受乱序判断影响（Issue 已无法读取，快照只能来自旧载荷）
 	stale := u.Change != IssueDeleted && !cur.UpdatedAt.IsZero() && !t.GiteaUpdatedAt.IsZero() && cur.UpdatedAt.Before(t.GiteaUpdatedAt)
+	if u.Change == IssueSynced && !t.GiteaUpdatedAt.IsZero() && !cur.UpdatedAt.After(t.GiteaUpdatedAt) {
+		return nil // 对账：这个状态 Webhook 已处理过，不重复留痕
+	}
 	prev, prevMilestone := t.Status, t.Milestone
 	if !stale {
-		if u.Change == IssueClosed && cur.State != "open" && t.FixedPR == 0 && t.Status.active() {
+		closing := u.Change == IssueClosed || (u.Change == IssueSynced && cur.State == "closed")
+		if closing && cur.State != "open" && t.FixedPR == 0 && t.Status.active() {
 			if err := s.awaitFix(u, mergePending); err != nil {
 				return err
 			}
@@ -256,41 +262,32 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 			t.Status = StatusOpen
 		}
 	case IssueClosed:
-		if cur.State == "open" { // 事件之后又被重开
-			return
-		}
-		switch {
-		case t.Status.fixed():
-		case t.FixedPR != 0 && (t.Status.active() || t.Status == StatusClosed):
-			t.Status = StatusFixed
-		case t.Status.active() || t.Status == StatusSubmitted:
-			t.Status = StatusClosed
+		if cur.State != "open" { // 事件之后又被重开时不处理
+			closeTicket(t)
 		}
 	case IssueReopened:
-		if cur.State == "closed" {
-			return
-		}
-		if t.Status == StatusClosed || t.Status.fixed() {
-			// 修复被否定：清掉修复记录，之后的合并重新记录
-			t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", "", 0, nil
+		if cur.State != "closed" && (t.Status == StatusClosed || t.Status.fixed()) {
+			reopenTicket(t)
 		}
 	case IssueDeleted:
 		t.Status = StatusAbnormal
 		return
 	case IssueAssigned:
-		if t.Status == StatusOpen && len(cur.Assignees) > 0 {
-			t.Status = StatusInProgress
-		}
+		assignTicket(t, cur)
 	case IssueLabeled:
-		needInfo := s.o.NeedInfoLabel != "" && slices.ContainsFunc(cur.Labels, func(l string) bool {
-			return strings.EqualFold(l, s.o.NeedInfoLabel)
-		})
-		switch {
-		case needInfo && (t.Status == StatusOpen || t.Status == StatusInProgress):
-			t.Status = StatusNeedInfo
-		case !needInfo && t.Status == StatusNeedInfo:
-			t.Status = StatusInProgress
+		s.labelTicket(t, cur)
+	case IssueSynced:
+		// 对账：按快照补上漏掉的关闭 / 重开 / 领取 / 标签变化。Issue 仍打开而工单已修复（PR 合并但未自动关闭）
+		// 是正常情况，只有“关闭未修复”的工单才按打开的 Issue 重开
+		if cur.State == "closed" {
+			closeTicket(t)
+			break
 		}
+		if t.Status == StatusClosed {
+			reopenTicket(t)
+		}
+		assignTicket(t, cur)
+		s.labelTicket(t, cur)
 	case IssueMilestoned, IssueDemilestoned:
 		t.Milestone, t.DueDate = cur.Milestone, cur.DueDate
 	}
@@ -308,6 +305,39 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 	if u.Change != IssueMilestoned && u.Change != IssueDemilestoned && !cur.UpdatedAt.IsZero() {
 		// 其他事件携带的快照同样反映当前排期，顺带校正
 		t.Milestone, t.DueDate = cur.Milestone, cur.DueDate
+	}
+}
+
+func closeTicket(t *Ticket) {
+	switch {
+	case t.Status.fixed():
+	case t.FixedPR != 0 && (t.Status.active() || t.Status == StatusClosed):
+		t.Status = StatusFixed
+	case t.Status.active() || t.Status == StatusSubmitted:
+		t.Status = StatusClosed
+	}
+}
+
+// reopenTicket 回到开发中；修复被否定，清掉修复记录，之后的合并重新记录。
+func reopenTicket(t *Ticket) {
+	t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", "", 0, nil
+}
+
+func assignTicket(t *Ticket, cur IssueState) {
+	if t.Status == StatusOpen && len(cur.Assignees) > 0 {
+		t.Status = StatusInProgress
+	}
+}
+
+func (s *Sync) labelTicket(t *Ticket, cur IssueState) {
+	needInfo := s.o.NeedInfoLabel != "" && slices.ContainsFunc(cur.Labels, func(l string) bool {
+		return strings.EqualFold(l, s.o.NeedInfoLabel)
+	})
+	switch {
+	case needInfo && (t.Status == StatusOpen || t.Status == StatusInProgress):
+		t.Status = StatusNeedInfo
+	case !needInfo && t.Status == StatusNeedInfo:
+		t.Status = StatusInProgress
 	}
 }
 

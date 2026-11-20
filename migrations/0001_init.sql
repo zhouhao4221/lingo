@@ -333,7 +333,7 @@ CREATE TABLE webhook_pings (
 -- 对账游标
 CREATE TABLE sync_cursors (
     repo_id    bigint      NOT NULL REFERENCES repos (id) ON DELETE CASCADE,
-    kind       text        NOT NULL CHECK (kind IN ('issues', 'comments', 'releases', 'deployments')),
+    kind       text        NOT NULL CHECK (kind IN ('issues', 'pulls', 'comments', 'releases', 'deployments')),
     since      timestamptz NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (repo_id, kind)

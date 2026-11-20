@@ -326,6 +326,43 @@ func TestApplyIssueTransitions(t *testing.T) {
 	}
 }
 
+func TestApplyIssueSynced(t *testing.T) {
+	later := t0.Add(time.Hour)
+	for _, c := range []struct {
+		name   string
+		from   Status
+		fixed  int64
+		seen   time.Time // 已采纳的 updated_at
+		st     IssueState
+		want   Status
+		events int
+	}{
+		{"missed close with fix", StatusInProgress, 3, t0, IssueState{State: "closed", UpdatedAt: later}, StatusFixed, 1},
+		{"missed close", StatusInProgress, 0, t0, IssueState{State: "closed", UpdatedAt: later}, StatusClosed, 1},
+		{"missed reopen", StatusClosed, 0, t0, IssueState{State: "open", UpdatedAt: later}, StatusInProgress, 1},
+		{"fixed but issue still open", StatusFixed, 3, t0, IssueState{State: "open", UpdatedAt: later}, StatusFixed, 0},
+		{"missed assign", StatusOpen, 0, t0, IssueState{State: "open", Assignees: []string{"dev"}, UpdatedAt: later}, StatusInProgress, 1},
+		{"missed need-info", StatusInProgress, 0, t0, IssueState{State: "open", Labels: []string{"lingo/review/need-info"}, UpdatedAt: later}, StatusNeedInfo, 1},
+		{"already seen", StatusInProgress, 0, later, IssueState{State: "closed", UpdatedAt: later}, StatusInProgress, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tk := base(c.from)
+			tk.FixedPR, tk.GiteaUpdatedAt = c.fixed, c.seen
+			m := newMem(tk)
+			s := newSync(t, m, t0.Add(2*time.Hour))
+			if err := s.ApplyIssue(context.Background(), IssueUpdate{Change: IssueSynced, Repo: "demo/api", Number: 12, Current: c.st}); err != nil {
+				t.Fatal(err)
+			}
+			if got := m.tickets[1]; got.Status != c.want || len(m.events) != c.events {
+				t.Errorf("status %s events %d", got.Status, len(m.events))
+			}
+			if c.name == "already seen" && len(m.history) != 0 {
+				t.Error("already-seen snapshot recorded history")
+			}
+		})
+	}
+}
+
 func TestApplyIssueClosedWithoutFixWaitsForPull(t *testing.T) {
 	m := newMem(base(StatusInProgress))
 	u := issue(IssueClosed, IssueState{State: "closed"})

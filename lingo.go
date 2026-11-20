@@ -37,6 +37,9 @@ type Config struct {
 	// MCPAllowedOrigins 是 MCPHandler 额外允许的浏览器来源（如 "https://app.example.com"）。默认只允许与请求 Host
 	// 同源的浏览器请求（防 DNS 重绑定）；前端与 MCP 不同源、或反向代理改写了 Host 时在此列出。非浏览器客户端不受影响。
 	MCPAllowedOrigins []string
+	// ReconcileInterval 是定时对账的间隔：Gitea 投递 Webhook 失败不会重试，Run 按游标增量拉取各仓库的 PR、Issue、
+	// 评论与版本补齐漏掉的变化（多实例时只有一个执行）。0 表示默认 10 分钟，负数关闭。
+	ReconcileInterval time.Duration
 	// SkipSelfCheck 为真时 Run 启动时不执行自检（也就不会自动注册 Webhook、补齐标签）；可随时调用 SelfCheck。
 	SkipSelfCheck bool
 	// Logger 为空时使用 slog.Default()。
@@ -139,6 +142,30 @@ func (l *Lingo) labelPrefix() string {
 	return "lingo"
 }
 
+// reconcileLockKey 是定时对账的 advisory lock 键。
+const reconcileLockKey = 0x6c696e676f03
+
+func (l *Lingo) reconcileInterval() time.Duration {
+	switch d := l.cfg.ReconcileInterval; {
+	case d == 0:
+		return 10 * time.Minute
+	case d < 0:
+		return 0
+	default:
+		return d
+	}
+}
+
+func (l *Lingo) repoNames() []string {
+	var out []string
+	for _, p := range l.cfg.Projects {
+		for _, r := range p.Repos {
+			out = append(out, r.Owner+"/"+r.Name)
+		}
+	}
+	return out
+}
+
 // defaultRemindAfter 是 Config.TriageRemindAfter 为 0 时的提醒间隔。
 const defaultRemindAfter = 24 * time.Hour
 
@@ -197,6 +224,8 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Reminder:       l.tickets,
 		RemindEvery:    l.remindEvery(),
 		RemindProjects: l.projectKeys(),
+		Reconcile: worker.ReconcileOptions{Interval: l.reconcileInterval(), Repos: l.repoNames(), Cursors: l.store, Gitea: l.gitea,
+			Lock: func(ctx context.Context) (func(), bool, error) { return l.store.TryLock(ctx, reconcileLockKey) }},
 	}
 	if n := l.cfg.Notifier; n != nil {
 		o.Notifications = l.store
