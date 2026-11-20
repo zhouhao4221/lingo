@@ -65,12 +65,20 @@ func TestMergedSubmitterFollowsTarget(t *testing.T) {
 	}
 	// 自己的：提交回执、合并；目标工单答复后的进展转给 bob
 	joined := strings.Join(got, ",")
-	if !strings.Contains(joined, "ticket.status:merged") || !strings.HasSuffix(joined, "ticket.status:answered") {
-		t.Errorf("bob events = %s", joined)
+	if got := strings.Count(joined, "ticket.status:merged"); got != 2 {
+		t.Errorf("bob events = %s", joined) // 自己被合并 + 目标工单答复的副本（副本状态仍为 merged）
 	}
 	last := evs[len(evs)-1]
-	if last.TicketID != dup.ID || !strings.Contains(last.Body, "#"+jsonNum(target.ID)) || !strings.Contains(last.Body, "已支持") {
+	if last.TicketID != dup.ID || !strings.Contains(last.Body, "#"+jsonNum(target.ID)) || !strings.Contains(last.Body, "answered") ||
+		!strings.Contains(last.Body, "已支持") {
 		t.Errorf("fan-out event = %+v", last)
+	}
+	// 目标工单提交人自己的补充不转给 bob
+	if _, err := l.AddTicketComment(ctx, alice, target.ID, "我的手机号 138xxxx", nil); err != nil {
+		t.Fatal(err)
+	}
+	if evs2, _ := l.ListEvents(ctx, bob, last.ID, 0); len(evs2) != 0 {
+		t.Errorf("submitter's own comment fanned out: %+v", evs2)
 	}
 	// alice 看不到 bob 的转发
 	aev, _ := l.ListEvents(ctx, alice, 0, 0)

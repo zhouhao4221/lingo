@@ -82,17 +82,14 @@ func main() {
 	}
 }
 
-// authenticate 替换为业务项目自己的登录态解析：把当前用户映射为固定角色。
+// authenticate 替换为业务项目自己的登录态解析（如校验会话 cookie 或令牌），并按服务端记录的用户身份映射固定角色。
+// 示例从请求头取用户 ID 仅为演示，生产环境不能信任客户端自报的身份或角色。
 func authenticate(r *http.Request) (lingo.User, error) {
 	id := r.Header.Get("X-User-ID")
 	if id == "" {
 		return lingo.User{}, errors.New("unauthenticated")
 	}
-	role := lingo.RoleExternal
-	if r.Header.Get("X-User-Role") == "reviewer" {
-		role = lingo.RoleReviewer
-	}
-	return lingo.User{ID: id, Name: r.Header.Get("X-User-Name"), Role: role}, nil
+	return lingo.User{ID: id, Role: lingo.RoleExternal}, nil
 }
 
 // logNotifier 把进展事件写日志；实际项目中发邮件、站内信或推送到前端。返回错误会重试，接入方按 Event.ID 去重。

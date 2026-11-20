@@ -455,18 +455,23 @@ func (w *Worker) removeLabel(ctx context.Context, ticketID int64, label string) 
 		return nil
 	}
 	owner, name, _ := strings.Cut(t.Repo, "/")
-	id, ok, err := w.labels.lookup(ctx, w.o.Issues, owner, name, label)
-	if err != nil || !ok {
-		return err
+	for attempt := 0; ; attempt++ {
+		id, ok, err := w.labels.lookup(ctx, w.o.Issues, owner, name, label)
+		if err != nil || !ok {
+			return err
+		}
+		err = w.o.Issues.RemoveIssueLabel(ctx, owner, name, t.IssueNumber, id)
+		switch {
+		case errors.Is(err, gitea.ErrNotFound) && attempt == 0:
+			w.labels.forget(owner, name) // 缓存的标签 ID 可能已失效（标签被删除重建）：刷新后再试一次
+		case errors.Is(err, gitea.ErrNotFound):
+			return nil
+		case err != nil:
+			return giteaErr("remove label "+label, err)
+		default:
+			return nil
+		}
 	}
-	err = w.o.Issues.RemoveIssueLabel(ctx, owner, name, t.IssueNumber, id)
-	if errors.Is(err, gitea.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return giteaErr("remove label "+label, err)
-	}
-	return nil
 }
 
 // createComment 把补充评论由机器人发到 Issue，并上传评论附件；评论已发出时（上次附件未传完）只继续处理附件。
@@ -642,21 +647,25 @@ type labelCache struct {
 
 // lookup 返回仓库中标签 label 的 ID（不创建）；缓存未命中时重新列出标签。
 func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, label string) (int64, bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	key := strings.ToLower(owner + "/" + name)
-	if id, ok := c.byRepo[key][strings.ToLower(label)]; ok {
+	c.mu.Lock()
+	id, ok := c.byRepo[key][strings.ToLower(label)]
+	c.mu.Unlock()
+	if ok {
 		return id, true, nil
 	}
+	// 列标签在锁外进行，不阻塞其他仓库的建单
 	ids, _, err := gitea.EnsureLabels(ctx, g, owner, name, nil)
 	if err != nil {
 		return 0, false, giteaErr("list labels", err)
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.byRepo == nil {
 		c.byRepo = map[string]map[string]int64{}
 	}
 	c.byRepo[key] = ids
-	id, ok := ids[strings.ToLower(label)]
+	id, ok = ids[strings.ToLower(label)]
 	return id, ok, nil
 }
 

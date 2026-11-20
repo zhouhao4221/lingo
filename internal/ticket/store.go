@@ -56,6 +56,10 @@ type Tx interface {
 	AddTriage(ctx context.Context, a Triage) error
 	// Enqueue 写一条 Gitea 写操作任务；Key 已存在时忽略（同一操作只入队一次）。
 	Enqueue(ctx context.Context, t Task) error
+	// RepointMerged 把合并到 from 的工单改为合并到 to。
+	RepointMerged(ctx context.Context, from, to int64) error
+	// PendingTask 报告工单是否有未完成的 op 任务。
+	PendingTask(ctx context.Context, ticketID int64, op string) (bool, error)
 	// SeenPull 报告工单是否已记录过 PR pull（"owner/name#N"）的 kind 变化（ticket_events）。
 	SeenPull(ctx context.Context, ticketID int64, kind, pull string) (bool, error)
 	// AddHistory 写一条 ticket_events 审计记录。

@@ -206,7 +206,12 @@ func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate, 
 				return err
 			}
 		}
-		s.transitIssue(t, u)
+		// 提交人已补充、机器人尚未移除需补充标签时，快照里残留的标签不算数
+		removing, err := tx.PendingTask(ctx, t.ID, OpRemoveLabel)
+		if err != nil {
+			return err
+		}
+		s.transitIssue(t, u, removing)
 		if cur.UpdatedAt.After(t.GiteaUpdatedAt) {
 			t.GiteaUpdatedAt = cur.UpdatedAt
 		}
@@ -256,7 +261,7 @@ func (s *Sync) awaitFix(u IssueUpdate, mergePending bool) error {
 }
 
 // transitIssue 按变化与 Issue 当前状态推进工单（PRD 3.2.2 工单状态表）。
-func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
+func (s *Sync) transitIssue(t *Ticket, u IssueUpdate, ignoreNeedInfo bool) {
 	cur := u.Current
 	switch u.Change {
 	case IssueOpened:
@@ -277,7 +282,7 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 	case IssueAssigned:
 		assignTicket(t, cur)
 	case IssueLabeled:
-		s.labelTicket(t, cur)
+		s.labelTicket(t, cur, ignoreNeedInfo)
 	case IssueSynced:
 		// 对账：按快照补上漏掉的关闭 / 重开 / 领取 / 标签变化。Issue 仍打开而工单已修复（PR 合并但未自动关闭）
 		// 是正常情况，只有“关闭未修复”的工单才按打开的 Issue 重开
@@ -289,7 +294,7 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 			reopenTicket(t)
 		}
 		assignTicket(t, cur)
-		s.labelTicket(t, cur)
+		s.labelTicket(t, cur, ignoreNeedInfo)
 	case IssueMilestoned, IssueDemilestoned:
 		t.Milestone, t.DueDate = cur.Milestone, cur.DueDate
 	}
@@ -331,8 +336,8 @@ func assignTicket(t *Ticket, cur IssueState) {
 	}
 }
 
-func (s *Sync) labelTicket(t *Ticket, cur IssueState) {
-	needInfo := s.o.NeedInfoLabel != "" && slices.ContainsFunc(cur.Labels, func(l string) bool {
+func (s *Sync) labelTicket(t *Ticket, cur IssueState, ignoreNeedInfo bool) {
+	needInfo := !ignoreNeedInfo && s.o.NeedInfoLabel != "" && slices.ContainsFunc(cur.Labels, func(l string) bool {
 		return strings.EqualFold(l, s.o.NeedInfoLabel)
 	})
 	switch {

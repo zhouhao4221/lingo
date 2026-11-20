@@ -122,6 +122,8 @@ CREATE UNIQUE INDEX tickets_issue_key ON tickets (repo_id, gitea_issue_number) W
 CREATE INDEX tickets_user_idx ON tickets (user_id, created_at DESC);
 CREATE INDEX tickets_project_status_idx ON tickets (project_id, status);
 CREATE INDEX tickets_triage_idx ON tickets (triage_since) WHERE status = 'pending_triage';
+-- 被合并工单跟随目标工单的进展
+CREATE INDEX tickets_merged_into_idx ON tickets (merged_into_ticket_id) WHERE merged_into_ticket_id IS NOT NULL;
 
 ALTER TABLE conversations
     ADD CONSTRAINT conversations_ticket_id_fkey FOREIGN KEY (ticket_id) REFERENCES tickets (id) ON DELETE SET NULL;

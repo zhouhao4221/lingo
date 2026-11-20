@@ -361,6 +361,10 @@ func (s *Service) Merge(ctx context.Context, p auth.Principal, id, target int64,
 			return "", fmt.Errorf("%w: merge target %d is %s", ErrConflict, target, dst.Status)
 		}
 		t.Status, t.MergedInto = StatusMerged, target
+		// 之前合并到本工单的重复工单改为跟随最终目标
+		if err := tx.RepointMerged(ctx, t.ID, target); err != nil {
+			return "", err
+		}
 		return note, tx.AddTriage(ctx, Triage{TicketID: t.ID, ActorID: p.ID, Action: "merge", Note: note, TargetID: target})
 	})
 }

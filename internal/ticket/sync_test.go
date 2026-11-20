@@ -224,6 +224,24 @@ func (m *memStore) LockByID(_ context.Context, id int64) (*Ticket, error) {
 }
 
 func (m *memStore) Update(_ context.Context, t *Ticket) error { *m.tickets[t.ID] = *t; return nil }
+func (m *memStore) RepointMerged(_ context.Context, from, to int64) error {
+	for _, t := range m.tickets {
+		if t.MergedInto == from {
+			t.MergedInto = to
+		}
+	}
+	return nil
+}
+
+func (m *memStore) PendingTask(_ context.Context, id int64, op string) (bool, error) {
+	for _, t := range m.tasks {
+		if t.TicketID == id && t.Op == op {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *memStore) SeenPull(_ context.Context, id int64, kind, pull string) (bool, error) {
 	for _, h := range m.history {
 		if h.TicketID == id && h.Kind == kind && h.Payload["pull"] == pull {

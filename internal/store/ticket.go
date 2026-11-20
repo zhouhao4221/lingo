@@ -301,6 +301,25 @@ func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {
 	return nil
 }
 
+// RepointMerged 把合并到 from 的工单改为合并到 to（合并链只保留一层，跟随最终目标）。
+func (x *ticketTx) RepointMerged(ctx context.Context, from, to int64) error {
+	if _, err := x.tx.ExecContext(ctx, "UPDATE tickets SET merged_into_ticket_id = $2 WHERE merged_into_ticket_id = $1", from, to); err != nil {
+		return fmt.Errorf("store: repoint merged %d: %w", from, err)
+	}
+	return nil
+}
+
+// PendingTask 报告工单是否有未完成的 op 任务。
+func (x *ticketTx) PendingTask(ctx context.Context, ticketID int64, op string) (bool, error) {
+	var ok bool
+	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM outbox WHERE kind = 'gitea' AND status = 'pending'
+		AND ticket_id = $1 AND payload->>'op' = $2)`, ticketID, op).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("store: pending task: %w", err)
+	}
+	return ok, nil
+}
+
 func (x *ticketTx) SeenPull(ctx context.Context, ticketID int64, kind, pull string) (bool, error) {
 	var ok bool
 	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM ticket_events WHERE ticket_id = $1 AND kind = $2
@@ -412,6 +431,9 @@ func (x *ticketTx) Emit(ctx context.Context, e notify.Event) error {
 	if e.TicketID == 0 || !mergedFanout[e.Kind] {
 		return nil
 	}
+	if e.Kind == notify.TicketComment && e.ActorID != "" && e.ActorID == e.UserID {
+		return nil // 目标工单提交人自己的补充属于其个人内容，不转给其他提交人
+	}
 	// 被合并到该工单的其他工单：其提交人一并收到目标工单的进展（PRD 3.2.1.2），事件挂在各自的工单上，
 	// 按提交人隔离；正文注明来自合并到的工单
 	rows, err := x.tx.QueryContext(ctx, "SELECT id, user_id FROM tickets WHERE merged_into_ticket_id = $1 AND status = 'merged' ORDER BY id", e.TicketID)
@@ -436,13 +458,18 @@ func (x *ticketTx) Emit(ctx context.Context, e notify.Event) error {
 		return err
 	}
 	for _, m := range ms {
+		// 副本挂在被合并的工单上：状态仍是 merged（与 GetTicket 一致），目标工单的进展写在正文里；
+		// 保留 CommentID，评论被删除或改为内部时副本一并清除
 		f := e
-		f.TicketID, f.UserID, f.CommentID = m.id, m.user, 0
-		note := fmt.Sprintf("（你的反馈已合并到工单 #%d）", e.TicketID)
+		f.TicketID, f.UserID, f.Status, f.PrevStatus = m.id, m.user, "merged", ""
+		note := fmt.Sprintf("你的反馈已合并到工单 #%d", e.TicketID)
+		if e.Kind == notify.TicketStatus {
+			note += "，该工单状态变为 " + e.Status
+		}
 		if f.Body == "" {
 			f.Body = note
 		} else {
-			f.Body = note + f.Body
+			f.Body = note + "：" + f.Body
 		}
 		if err := x.emit(ctx, f); err != nil {
 			return err
