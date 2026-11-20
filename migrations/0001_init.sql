@@ -327,6 +327,22 @@ CREATE INDEX webhook_deliveries_issue_pending_idx ON webhook_deliveries (repo, i
 -- Issue 关闭时检查是否还有未处理的 PR 合并投递
 CREATE INDEX webhook_deliveries_merge_pending_idx ON webhook_deliveries (received_at) WHERE processed_at IS NULL AND kind = 'pull.merged';
 
+-- 模型调用用量：每次调用一行（用途、模型、token，cached 为命中服务端前缀缓存的输入 token）
+CREATE TABLE llm_usage (
+    id         bigserial PRIMARY KEY,
+    kind       text        NOT NULL, -- 用途，如 draft_issue
+    model      text        NOT NULL DEFAULT '',
+    ticket_id  bigint      REFERENCES tickets (id) ON DELETE SET NULL,
+    input      integer     NOT NULL DEFAULT 0,
+    output     integer     NOT NULL DEFAULT 0,
+    cached     integer     NOT NULL DEFAULT 0,
+    ok         boolean     NOT NULL,
+    latency_ms integer     NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX llm_usage_created_idx ON llm_usage (created_at);
+CREATE INDEX llm_usage_ticket_idx ON llm_usage (ticket_id) WHERE ticket_id IS NOT NULL;
+
 -- 连通记录：push / 测试投递只更新这里，不进投递表
 CREATE TABLE webhook_pings (
     repo         text PRIMARY KEY, -- "owner/name"，小写

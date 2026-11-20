@@ -49,6 +49,13 @@ mux.Handle("/webhooks/gitea", l.WebhookHandler())              // Gitea webhook
 go l.Run(ctx)                                                  // background workers
 ```
 
+Built-in models (standard library HTTP, no SDK): `lingo.NewOpenAIModel(lingo.OpenAIConfig{...})` for OpenAI or any OpenAI-compatible API (gateways, vLLM, Ollama `/v1`), and `lingo.NewDeepSeekModel(apiKey, "")` for DeepSeek. You can also implement `lingo.Model` yourself.
+
+```go
+light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
+// or: lingo.NewOpenAIModel(lingo.OpenAIConfig{BaseURL: "https://gateway.example.com/v1", APIKey: key, Model: "your-model"})
+```
+
 See [examples/server](examples/server/main.go) for a complete example.
 
 ### Roles
@@ -66,12 +73,13 @@ Your `Authenticate` maps each user to one of four fixed roles: `external` (end u
 | `GET /events?after=` | Event feed (same events as the `Notifier`) |
 | `GET /releases`, `GET /releases/{id}` | Releases with linked tickets and deployments |
 | `GET` / `PUT /settings/auto-forward` | Auto-forward switches (changes: admin) |
+| `GET /usage?from=&to=` | Model token usage by day, purpose and model, with prompt-cache hit rate (admin) |
 
 Write requests must use `Content-Type: application/json` (CSRF protection); errors are `{"error":{"code","message"}}`.
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `list_releases`, `get_release`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `list_releases`, `get_release`, `get_llm_usage`.
 
 ### Events
 

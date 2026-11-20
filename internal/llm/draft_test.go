@@ -15,11 +15,11 @@ var tmpl = []FieldSpec{
 }
 
 func drafter(out string, err error, got *[]Message) *Drafter {
-	return &Drafter{Chat: func(_ context.Context, ms []Message) (string, error) {
+	return &Drafter{Chat: func(_ context.Context, ms []Message) (string, Usage, error) {
 		if got != nil {
 			*got = ms
 		}
-		return out, err
+		return out, Usage{Model: "m", Input: 100, Output: 20, Cached: 60}, err
 	}}
 }
 
@@ -29,7 +29,7 @@ func TestDraftIssueValidates(t *testing.T) {
 	var msgs []Message
 	out := "好的：\n```json\n" + `{"title":"Safari 登录后页面白屏","description":"- 登录后白屏","fields":{
 		"what":["模型改写的内容"],"steps":["1. 点登录","2. 输密码"],"browser":["Safari","Chrome"],"os":["Linux"],"unknown":["x"]}}` + "\n```"
-	d, err := drafter(out, nil, &msgs).DraftIssue(context.Background(), in)
+	d, _, err := drafter(out, nil, &msgs).DraftIssue(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,9 @@ func TestDraftIssueValidates(t *testing.T) {
 		d.Fields["browser"][0] != "Safari" || d.Fields["os"] != nil || d.Fields["unknown"] != nil {
 		t.Errorf("fields = %v", d.Fields)
 	}
-	if len(msgs) != 2 || msgs[0].Role != "system" || !strings.Contains(msgs[1].Content, "template_fields") {
+	// 模板定义在前、工单内容在后，同一仓库的请求前缀相同，便于服务端前缀缓存命中
+	if p := msgs[1].Content; len(msgs) != 2 || msgs[0].Role != "system" || !strings.Contains(p, "template_fields") ||
+		strings.Index(p, "template_fields") > strings.Index(p, "登录后白屏") {
 		t.Errorf("messages = %+v", msgs)
 	}
 }
@@ -49,7 +51,7 @@ func TestDraftIssueValidates(t *testing.T) {
 func TestDraftIssueProseAroundJSON(t *testing.T) {
 	in := DraftInput{Title: "t", Template: []FieldSpec{{ID: "ver", Kind: "input"}}}
 	out := "结果 {ticket} 如下：\n" + `{"title":"版本 1.2 导出失败","description":"d","fields":{"ver":["1.2","1.3\n beta"]}}` + "\n谢谢 {end}"
-	d, err := drafter(out, nil, nil).DraftIssue(context.Background(), in)
+	d, _, err := drafter(out, nil, nil).DraftIssue(context.Background(), in)
 	if err != nil || d.Title != "版本 1.2 导出失败" || d.Fields["ver"][0] != "1.2; 1.3 beta" {
 		t.Errorf("draft = %+v %v", d, err)
 	}
@@ -57,17 +59,17 @@ func TestDraftIssueProseAroundJSON(t *testing.T) {
 
 func TestDraftIssueFailures(t *testing.T) {
 	in := DraftInput{Title: "原标题", Body: "x"}
-	if _, err := drafter("", errors.New("timeout"), nil).DraftIssue(context.Background(), in); err == nil {
+	if _, _, err := drafter("", errors.New("timeout"), nil).DraftIssue(context.Background(), in); err == nil {
 		t.Error("model error not returned")
 	}
-	if _, err := drafter("抱歉，我无法处理", nil, nil).DraftIssue(context.Background(), in); err == nil {
+	if _, _, err := drafter("抱歉，我无法处理", nil, nil).DraftIssue(context.Background(), in); err == nil {
 		t.Error("non-JSON accepted")
 	}
-	d, err := drafter(`{"title":"","description":"整理后"}`, nil, nil).DraftIssue(context.Background(), in)
+	d, _, err := drafter(`{"title":"","description":"整理后"}`, nil, nil).DraftIssue(context.Background(), in)
 	if err != nil || d.Title != "原标题" {
 		t.Errorf("empty title: %+v %v", d, err)
 	}
-	if _, err := (*Drafter)(nil).DraftIssue(context.Background(), in); err == nil {
+	if _, _, err := (*Drafter)(nil).DraftIssue(context.Background(), in); err == nil {
 		t.Error("nil drafter")
 	}
 }

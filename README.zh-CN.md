@@ -49,6 +49,13 @@ mux.Handle("/webhooks/gitea", l.WebhookHandler())              // Gitea Webhook
 go l.Run(ctx)                                                  // 后台任务
 ```
 
+内置模型（标准库 HTTP，不引入 SDK）：`lingo.NewOpenAIModel(lingo.OpenAIConfig{...})` 对接 OpenAI 或任意 OpenAI 兼容接口（网关、vLLM、Ollama 的 `/v1` 等），`lingo.NewDeepSeekModel(apiKey, "")` 对接 DeepSeek；也可以自己实现 `lingo.Model`。
+
+```go
+light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
+// 或：lingo.NewOpenAIModel(lingo.OpenAIConfig{BaseURL: "https://gateway.example.com/v1", APIKey: key, Model: "your-model"})
+```
+
 完整示例见 [examples/server](examples/server/main.go)。
 
 ### 角色
@@ -66,12 +73,13 @@ go l.Run(ctx)                                                  // 后台任务
 | `GET /events?after=` | 变更流（与 `Notifier` 同源） |
 | `GET /releases`、`GET /releases/{id}` | 版本记录、关联工单与上线记录 |
 | `GET` / `PUT /settings/auto-forward` | 自动转出开关（修改需 admin） |
+| `GET /usage?from=&to=` | 模型 token 用量，按天、用途、模型汇总，含前缀缓存命中率（admin） |
 
 写操作须使用 `Content-Type: application/json`（防 CSRF）；错误响应为 `{"error":{"code","message"}}`。
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`list_releases`、`get_release`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`list_releases`、`get_release`、`get_llm_usage`。
 
 ### 事件
 

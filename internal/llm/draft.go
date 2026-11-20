@@ -18,8 +18,8 @@ type Message struct {
 	Content string
 }
 
-// Chat 是对话模型，由根包把 lingo.Model 适配而来。
-type Chat func(ctx context.Context, messages []Message) (string, error)
+// Chat 是对话模型，由根包把 lingo.Model 适配而来；不报告用量的模型返回零值 Usage。
+type Chat func(ctx context.Context, messages []Message) (string, Usage, error)
 
 // FieldSpec 是 Issue 表单模板中的一个输入字段。
 type FieldSpec struct {
@@ -51,6 +51,9 @@ type Draft struct {
 	Fields      map[string][]string // 合并后的模板字段：提交人已填的保持原值，模型只补空缺
 }
 
+// ErrNotCalled 表示没有调用到模型（未配置、提示词构造失败），不计入用量。
+var ErrNotCalled = errors.New("llm: model not called")
+
 // Drafter 用轻量模型把工单整理为结构清晰的 Issue：生成标题、从自由描述中抽取模板字段、整理描述。
 // 输出逐项校验（字段 ID、选项须来自模板），不合格的丢弃；提交人已填的字段不改。
 type Drafter struct {
@@ -76,20 +79,25 @@ const draftSystemPrompt = `你是软件研发团队的工单整理助手。用�
 6. 不要输出任何个人信息（姓名、手机号、邮箱、账号、地址）；用户内容中出现的个人信息不要写进结果。
 7. 只输出一个 JSON 对象，不要输出其他文字：{"title": "...", "description": "...", "fields": {"字段id": ["值"]}}`
 
-// DraftIssue 调用模型整理工单；模型出错或输出不合格时返回错误，调用方应退回原内容。
-func (d *Drafter) DraftIssue(ctx context.Context, in DraftInput) (*Draft, error) {
+// DraftIssue 调用模型整理工单，另返回 token 用量（出错时为已知部分）；模型出错或输出不合格时返回错误，
+// 调用方应退回原内容。
+//
+// 提示词按“不变的在前、变化的在后”排布，便于服务端的前缀缓存命中：system 提示词固定；用户消息先放同一仓库
+// 各工单相同的模板字段定义，再放本工单的内容。
+func (d *Drafter) DraftIssue(ctx context.Context, in DraftInput) (*Draft, Usage, error) {
 	if d == nil || d.Chat == nil {
-		return nil, errors.New("llm: no model")
+		return nil, Usage{}, fmt.Errorf("%w: no model", ErrNotCalled)
 	}
 	prompt, err := draftPrompt(in)
 	if err != nil {
-		return nil, err
+		return nil, Usage{}, fmt.Errorf("%w: build prompt: %v", ErrNotCalled, err)
 	}
-	out, err := d.Chat(ctx, []Message{{Role: "system", Content: draftSystemPrompt}, {Role: "user", Content: prompt}})
+	out, u, err := d.Chat(ctx, []Message{{Role: "system", Content: draftSystemPrompt}, {Role: "user", Content: prompt}})
 	if err != nil {
-		return nil, fmt.Errorf("llm: chat: %w", err)
+		return nil, u, fmt.Errorf("llm: chat: %w", err)
 	}
-	return parseDraft(out, in)
+	dr, err := parseDraft(out, in)
+	return dr, u, err
 }
 
 func draftPrompt(in DraftInput) (string, error) {
@@ -106,19 +114,25 @@ func draftPrompt(in DraftInput) (string, error) {
 	for _, f := range in.Template {
 		fields = append(fields, field{f.ID, f.Label, f.Kind, f.Description, f.Required, f.Options, f.Multiple})
 	}
-	b, err := json.MarshalIndent(map[string]any{
-		"type":            in.Type,
-		"title":           textutil.Clip(in.Title, maxTitleRunes*2),
-		"content":         textutil.Clip(in.Body, maxInputRunes),
-		"filled_fields":   in.Fields,
-		"environment":     in.Context,
-		"version":         in.Version,
-		"template_fields": fields,
-	}, "", "  ")
+	// 先模板（同一仓库、同一类型的工单都相同）后工单内容；用结构体而非 map，字段顺序固定（map 按键名排序）
+	tmpl, err := json.MarshalIndent(struct {
+		Type   string  `json:"type"`
+		Fields []field `json:"template_fields"`
+	}{in.Type, fields}, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	return "请整理下面的用户反馈（JSON）：\n\n" + string(b), nil
+	ticket, err := json.MarshalIndent(struct {
+		Title       string              `json:"title"`
+		Content     string              `json:"content"`
+		Filled      map[string][]string `json:"filled_fields,omitempty"`
+		Environment map[string]string   `json:"environment,omitempty"`
+		Version     string              `json:"version,omitempty"`
+	}{textutil.Clip(in.Title, maxTitleRunes*2), textutil.Clip(in.Body, maxInputRunes), in.Fields, in.Context, in.Version}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return "仓库的 Issue 模板（JSON）：\n\n" + string(tmpl) + "\n\n请整理下面的用户反馈（JSON）：\n\n" + string(ticket), nil
 }
 
 // parseDraft 解析并校验模型输出。

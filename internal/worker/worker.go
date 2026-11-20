@@ -66,6 +66,7 @@ type Options struct {
 	Forwarding Forwarding
 	// Drafter 非空时建 Issue 前用轻量模型整理工单内容（失败时按原内容建单）。
 	Drafter     Drafter
+	Usage       UsageRecorder                // 模型调用用量；为空时只写日志
 	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
 	LabelPrefix string                       // 默认 "lingo"
 	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
@@ -95,7 +96,12 @@ type Options struct {
 
 // Drafter 整理待建 Issue 的工单内容，由 llm.Drafter 实现。
 type Drafter interface {
-	DraftIssue(ctx context.Context, in llm.DraftInput) (*llm.Draft, error)
+	DraftIssue(ctx context.Context, in llm.DraftInput) (*llm.Draft, llm.Usage, error)
+}
+
+// UsageRecorder 记录模型调用用量，由 store.Store 实现。
+type UsageRecorder interface {
+	RecordLLMUsage(ctx context.Context, u store.LLMUsage) error
 }
 
 // Reminder 发出待确认超时提醒并清理孤儿附件，由 ticket.Service 实现。

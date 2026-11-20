@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/mcp"
 	"github.com/zhouhao4221/lingo/internal/ticket"
@@ -12,7 +13,7 @@ import (
 // MCPHandler 返回 MCP Server（Streamable HTTP，无状态：只接受 POST，直接返回 JSON 响应），工具与 Handler 能力对齐。
 // 身份由 Config.Authenticate 解析，权限与数据隔离同 Go 方法；带 Origin 头的浏览器请求须与 Host 同源。
 // 工具：list_projects、list_ticket_types、create_ticket、get_ticket、list_my_tickets、reply_ticket、list_events、
-// list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、list_releases、get_release。
+// list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、list_releases、get_release、get_llm_usage。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵问（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
@@ -210,6 +211,11 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				Limit         int
 			}) (any, error) {
 				return list(l.ListReleases(ctx, u, a.Project, a.Repo, a.Before, a.Limit))
+			}),
+		tool("get_llm_usage", "模型用量（仅 admin）：按天、用途、模型汇总调用次数、token 与前缀缓存命中率；from / to 为 RFC 3339 时间，缺省为最近 30 天。",
+			`{"type":"object","properties":{"from":{"type":"string","format":"date-time"},"to":{"type":"string","format":"date-time"}}}`,
+			func(ctx context.Context, u User, a struct{ From, To time.Time }) (any, error) {
+				return list(l.LLMUsage(ctx, u, a.From, a.To))
 			}),
 		tool("get_release", "查看版本：说明、关联的工单（按调用者可见性过滤）与上线记录。",
 			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}`,

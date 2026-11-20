@@ -17,7 +17,7 @@ import (
 // 附件：POST /attachments（multipart，字段 file）、GET /attachments/{id}；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、GET /triage、GET /triage/summary、
-// GET / PUT /settings/auto-forward；变更流：GET /events?after=。
+// GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
 func (l *Lingo) Handler() http.Handler { return l.rest }
 
 func (l *Lingo) newRESTHandler() http.Handler {
@@ -231,6 +231,18 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		return l.GetRelease(ctx(r), user(r), id)
+	})
+	rt.Handle("GET /usage", func(r *httpapi.Request) (any, error) {
+		from, err := r.QueryTime("from")
+		if err != nil {
+			return nil, err
+		}
+		to, err := r.QueryTime("to")
+		if err != nil {
+			return nil, err
+		}
+		us, err := l.LLMUsage(ctx(r), user(r), from, to)
+		return list(us, err)
 	})
 	rt.Handle("GET /settings/auto-forward", func(r *httpapi.Request) (any, error) {
 		ss, err := l.AutoForwardSettings(ctx(r), user(r))

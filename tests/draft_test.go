@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zhouhao4221/lingo"
 )
@@ -28,6 +29,12 @@ func (m *draftModel) Chat(_ context.Context, ms []lingo.Message) (string, error)
 	return m.out, m.err
 }
 func (m *draftModel) Embed(context.Context, []string) ([][]float32, error) { return nil, nil }
+
+// ChatUsage 实现 lingo.UsageModel：报告用量。
+func (m *draftModel) ChatUsage(ctx context.Context, ms []lingo.Message) (string, lingo.Usage, error) {
+	s, err := m.Chat(ctx, ms)
+	return s, lingo.Usage{Model: "light-1", Input: 1500, Output: 120, Cached: 1024}, err
+}
 
 func newDraftLingo(t *testing.T, g *giteaServer, m lingo.Model) (*lingo.Lingo, *sql.DB) {
 	t.Helper()
@@ -87,6 +94,18 @@ func TestLightModelDraftsIssue(t *testing.T) {
 	// 工单本身的标题与正文不变（提交人看到的是自己写的）
 	if got, _ := l.GetTicket(ctx, alice, tk.ID); got.Body != tk.Body || got.Title != tk.Title {
 		t.Errorf("ticket changed: %+v", got)
+	}
+	// 用量：一次建单整理，命中前缀缓存 1024 / 1500
+	if _, err := l.LLMUsage(ctx, alice, time.Time{}, time.Time{}); !errors.Is(err, lingo.ErrForbidden) {
+		t.Errorf("external usage: %v", err)
+	}
+	stats, err := l.LLMUsage(ctx, lingo.User{ID: "root", Role: lingo.RoleAdmin}, time.Time{}, time.Time{})
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("usage = %+v %v", stats, err)
+	}
+	if s := stats[0]; s.Kind != "draft_issue" || s.Model != "light-1" || s.Calls != 1 || s.Input != 1500 || s.Cached != 1024 ||
+		s.Output != 120 || s.CacheHitRate < 0.68 || s.CacheHitRate > 0.69 {
+		t.Errorf("stat = %+v", s)
 	}
 }
 
