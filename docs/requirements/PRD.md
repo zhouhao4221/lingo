@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.14 | 2026-11-20 | haiqing | 附件与补充评论落地：`UploadAttachment` / `GetAttachment` / `AddTicketComment`，REST `POST /attachments`（multipart）、`GET /attachments/{id}`、`POST /tickets/{id}/comments`；附件随 Issue 上传并在正文引用，转出时可勾选；建单前的补充写进 Issue 正文，建单后的补充由机器人发为 Issue 评论并上传评论附件；Gitea 拒收的附件只留在灵问并在 Issue 中注明；未关联工单的附件 24 小时后清理 |
 | v1.13 | 2026-11-20 | haiqing | REST `Handler` 落地（工单、后台确认、待确认列表与统计、变更流、自动转出开关、`GET /ticket-types`）；新增 Go 方法 `ListMyTickets`、`ListTicketComments`、`TicketTypes`、`AutoForwardSettings`；实现 `ListTriage`、`TriageSummary`、`ListEvents` 与待确认超时提醒；变更流只返回早于所有进行中事务的事件，游标不会跳过；PostgreSQL 最低 13 |
 | v1.12 | 2026-11-18 | haiqing | 工单提交与后台确认落地：Go 方法 `CreateTicket`、`ForwardTicket`、`AnswerTicket`、`MergeTicket`、`RejectTicket` 与公开错误 `ErrInvalidInput` / `ErrForbidden` / `ErrConflict`；项目在 `Run` 启动或首次调用时同步入库（不停用配置中删掉的项目与仓库，以当前 Config 为准校验，避免滚动发布时旧实例停掉新项目）；建 Issue 经 outbox 执行，重试时按隐藏标记查重，用户文本中的灵问标记被去掉，Issue 正文不含提交人身份；建单被放弃时工单变为 `abnormal`，可再次转出 |
 | v1.11 | 2026-11-18 | haiqing | Webhook 回流规则补充：新增事件 `ticket.scheduled`（排期）；Issue 关闭但尚无修复 PR 时等待 30 秒再判定；重开清除修复记录；标签全名带 `LabelPrefix`（如 `lingo/review/need-info`） |

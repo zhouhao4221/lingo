@@ -32,6 +32,8 @@ func sourceOf(ctx context.Context) string {
 type ServiceOptions struct {
 	Store   Store
 	Queries QueryStore // 列表与变更流查询；为空时用 Store（若其实现了 QueryStore）
+	// Attachments 是附件仓储；为空时用 Store（若其实现了 AttachmentStore）。
+	Attachments AttachmentStore
 	// AutoForward 返回代码中声明的默认值（lingo.Project.AutoForward），运行时覆盖优先；为空时一律手动确认。
 	AutoForward func(projectKey, typ string) bool
 	IssueURL    func(repo string, number int64) string
@@ -64,6 +66,11 @@ func NewService(o ServiceOptions) (*Service, error) {
 		}
 		o.Queries = q
 	}
+	if o.Attachments == nil {
+		if a, ok := o.Store.(AttachmentStore); ok {
+			o.Attachments = a
+		}
+	}
 	if o.Declared == nil {
 		o.Declared = func(string, string) bool { return true }
 	}
@@ -81,7 +88,8 @@ type NewTicket struct {
 	Context      map[string]string
 	Version      string
 	Conversation int64
-	Source       string // api | mcp | go
+	Source       string  // api | mcp | go
+	Attachments  []int64 // 调用者已上传、尚未关联的附件
 }
 
 const (
@@ -169,6 +177,9 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		if err := tx.Insert(ctx, t); err != nil {
 			return err
 		}
+		if err := linkAttachments(ctx, tx, p, t.ID, 0, in.Attachments); err != nil {
+			return err
+		}
 		if err := tx.AddHistory(ctx, History{TicketID: t.ID, ActorID: p.ID, Source: in.Source, Kind: string(notify.TicketCreated),
 			Payload: map[string]any{"status": string(t.Status), "auto_forward": on}}); err != nil {
 			return err
@@ -179,7 +190,7 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		if !on {
 			return tx.Emit(ctx, s.event(t, notify.TriageRequired, "", p.ID, ""))
 		}
-		return enqueueCreate(ctx, tx, t, "", "", time.Time{})
+		return enqueueCreate(ctx, tx, t, "", "", nil, time.Time{})
 	})
 	if err != nil {
 		return nil, err
@@ -219,13 +230,17 @@ func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, 
 	return nil
 }
 
-func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, retry time.Time) error {
+// enqueueCreate 入队建 Issue；attachments 为要转出的工单附件，nil 表示全部。
+func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, attachments *[]int64, retry time.Time) error {
 	key := OpCreateIssue + ":ticket:" + strconv.FormatInt(t.ID, 10)
 	if !retry.IsZero() {
 		key += ":retry:" + strconv.FormatInt(retry.UnixNano(), 10) // 上次建单已放弃，重新入队需要新键
 	}
-	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue,
-		Payload: map[string]any{"forwarded_by": forwardedBy, "note": note}})
+	payload := map[string]any{"forwarded_by": forwardedBy, "note": note}
+	if attachments != nil {
+		payload["attachment_ids"] = dedupIDs(*attachments)
+	}
+	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue, Payload: payload})
 }
 
 // summarize 取正文（或第一个字段值）首个非空行作标题，最长 80 个字符。
@@ -258,6 +273,8 @@ type ForwardInput struct {
 	Type  string
 	Repo  string
 	Note  string // 补充说明，写入 Issue
+	// Attachments 是要随 Issue 转出的工单附件（截图可能含敏感信息，由后台人员勾选）；nil 表示全部，空切片表示不转出。
+	Attachments *[]int64
 }
 
 // Forward 把待确认工单转出到 Gitea（reviewer / admin）；建 Issue 失败而变为 abnormal 的工单也可再次转出。
@@ -294,7 +311,7 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 		if name == "" {
 			name = p.ID
 		}
-		return "", enqueueCreate(ctx, tx, t, name, in.Note, retry)
+		return "", enqueueCreate(ctx, tx, t, name, in.Note, in.Attachments, retry)
 	})
 }
 
@@ -305,7 +322,7 @@ func (s *Service) Answer(ctx context.Context, p auth.Principal, id int64, answer
 	}
 	return s.triage(ctx, p, id, "answer", func(tx Tx, t *Ticket) (string, error) {
 		t.Status = StatusAnswered
-		if err := tx.AddComment(ctx, Comment{TicketID: t.ID, Source: "staff", AuthorID: p.ID, AuthorName: p.Name, Body: answer,
+		if _, err := tx.AddComment(ctx, Comment{TicketID: t.ID, Source: "staff", AuthorID: p.ID, AuthorName: p.Name, Body: answer,
 			Public: true, At: s.o.Now()}); err != nil {
 			return "", err
 		}
@@ -464,7 +481,8 @@ func (s *Service) Draft(ctx context.Context, id int64) (*Ticket, error) {
 }
 
 // IssueCreated 记录建好的 Issue：工单 submitted → open。工单已关联 Issue（如 Webhook 先按标记补记）时不覆盖，返回 false。
-func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via string) (linked bool, err error) {
+// commentIDs 是已写进 Issue 正文的补充评论，一并标记为已转出。
+func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via string, commentIDs []int64) (linked bool, err error) {
 	err = s.o.Store.InTx(ctx, func(tx Tx) error {
 		t, err := tx.LockByID(ctx, id)
 		if err != nil {
@@ -475,6 +493,9 @@ func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via 
 		}
 		t.IssueNumber, t.Status = number, StatusOpen
 		if err := tx.Update(ctx, t); err != nil {
+			return err
+		}
+		if err := tx.MarkCommentsForwarded(ctx, t.ID, commentIDs); err != nil {
 			return err
 		}
 		linked = true

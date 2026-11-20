@@ -59,15 +59,27 @@ type Created struct{ Value any }
 // ErrBadRequest 表示请求格式错误（JSON 无法解析、参数类型不对），响应 400。
 var ErrBadRequest = errors.New("bad request")
 
-// Handle 注册路由，pattern 同 http.ServeMux（如 "GET /tickets/{id}"）。
-func (rt *Router) Handle(pattern string, h HandlerFunc) {
+// Blob 是二进制响应（附件下载），以附件形式返回，禁止浏览器嗅探与内联执行。
+type Blob struct {
+	Name        string
+	ContentType string
+	Data        []byte
+}
+
+// Handle 注册路由，pattern 同 http.ServeMux（如 "GET /tickets/{id}"）。写操作要求 JSON 请求体。
+func (rt *Router) Handle(pattern string, h HandlerFunc) { rt.handle(pattern, h, false) }
+
+// HandleUpload 注册接收 multipart/form-data 的写路由（文件上传），其他与 Handle 相同。
+func (rt *Router) HandleUpload(pattern string, h HandlerFunc) { rt.handle(pattern, h, true) }
+
+func (rt *Router) handle(pattern string, h HandlerFunc, multipart bool) {
 	rt.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		u, err := rt.o.Authenticate(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
 			return
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && !isJSON(r.Header.Get("Content-Type")) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !multipart && !isJSON(r.Header.Get("Content-Type")) {
 			// 写操作一律要求 Content-Type: application/json，没有请求体的 POST 也一样：跨站表单与无请求体的
 			// no-cors fetch 都属于“简单请求”，可借 cookie 伪造写操作；application/json 会触发 CORS 预检，
 			// 由接入方的 CORS 策略把关
@@ -77,6 +89,10 @@ func (rt *Router) Handle(pattern string, h HandlerFunc) {
 		res, err := h(&Request{Request: r, User: u, w: w, max: rt.o.MaxBody})
 		if err != nil {
 			rt.fail(w, r, err)
+			return
+		}
+		if b, ok := res.(Blob); ok {
+			writeBlob(w, b)
 			return
 		}
 		status := http.StatusOK
@@ -89,6 +105,37 @@ func (rt *Router) Handle(pattern string, h HandlerFunc) {
 		}
 		writeJSON(w, status, res)
 	})
+}
+
+func writeBlob(w http.ResponseWriter, b Blob) {
+	h := w.Header()
+	h.Set("Content-Type", b.ContentType)
+	h.Set("Content-Length", strconv.Itoa(len(b.Data)))
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": b.Name}))
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "sandbox")
+	h.Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b.Data)
+}
+
+// FormFile 读取 multipart 表单中名为 field 的文件，最多 max 字节；超出时返回 ErrBadRequest。
+func (r *Request) FormFile(field string, max int64) (name string, data []byte, err error) {
+	r.Body = http.MaxBytesReader(r.w, r.Body, max+1<<20) // 预留表单开销
+	f, hdr, err := r.Request.FormFile(field)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return "", nil, fmt.Errorf("%w: file exceeds %d bytes", ErrBadRequest, max)
+		}
+		return "", nil, fmt.Errorf("%w: multipart field %q: %v", ErrBadRequest, field, err)
+	}
+	defer f.Close()
+	data, err = io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: read file: %v", ErrBadRequest, err)
+	}
+	return hdr.Filename, data, nil
 }
 
 func isJSON(ct string) bool {

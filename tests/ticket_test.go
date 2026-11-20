@@ -24,6 +24,9 @@ type giteaServer struct {
 	templates string
 	created   []map[string]any // POST /issues 的请求体
 	createErr int              // 非 0 时 POST /issues 返回该状态码
+	assets    []string         // 上传的附件：路径 + 文件名
+	comments  []string         // 机器人发出的评论正文
+	edits     []string         // 编辑后的 Issue / 评论正文
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +61,39 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.issues = append(g.issues, is)
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(is)
+	case strings.HasSuffix(p, "/assets") && r.Method == "POST":
+		f, hdr, err := r.FormFile("attachment")
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		data, _ := io.ReadAll(f)
+		g.assets = append(g.assets, p+":"+hdr.Filename+":"+jsonNum(int64(len(data))))
+		w.WriteHeader(201)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": len(g.assets), "uuid": "uuid-" + jsonNum(int64(len(g.assets))),
+			"name": hdr.Filename, "browser_download_url": "http://g/attachments/" + jsonNum(int64(len(g.assets)))})
+	case strings.HasPrefix(p, "/repos/demo/api/issues/comments/") && r.Method == "PATCH",
+		strings.HasPrefix(p, "/repos/demo/api/issues/") && r.Method == "PATCH":
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		body, _ := req["body"].(string)
+		g.edits = append(g.edits, body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "number": 40, "body": body})
+	case strings.HasSuffix(p, "/comments") && r.Method == "POST":
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		body, _ := req["body"].(string)
+		g.comments = append(g.comments, body)
+		w.WriteHeader(201)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 500 + len(g.comments), "body": body, "user": map[string]any{"login": "lingo-bot"}})
+	case strings.HasPrefix(p, "/repos/demo/api/issues/") && r.Method == "GET":
+		for _, is := range g.issues {
+			if "/repos/demo/api/issues/"+jsonNum(int64(is["number"].(int))) == p {
+				_ = json.NewEncoder(w).Encode(is)
+				return
+			}
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}

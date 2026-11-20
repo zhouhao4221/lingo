@@ -62,11 +62,12 @@ type Options struct {
 	Tasks       TaskStore
 	Issues      IssueWriter
 	Drafts      Drafts
+	Forwarding  Forwarding
 	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
 	LabelPrefix string                       // 默认 "lingo"
 	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
 
-	// Reminder 与 RemindEvery > 0 时，每分钟检查一次待确认超时（triage.overdue）。
+	// Reminder 非空时每分钟清理孤儿附件；RemindEvery > 0 时同时检查待确认超时（triage.overdue）。
 	Reminder       Reminder
 	RemindEvery    time.Duration
 	RemindProjects []string // 只提醒这些项目（当前声明的项目）
@@ -82,10 +83,14 @@ type Options struct {
 	Now         func() time.Time
 }
 
-// Reminder 发出待确认超时提醒，由 ticket.Service 实现。
+// Reminder 发出待确认超时提醒并清理孤儿附件，由 ticket.Service 实现。
 type Reminder interface {
 	RemindOverdue(ctx context.Context, projects []string, every time.Duration, limit int) (int, error)
+	CleanupAttachments(ctx context.Context, maxAge time.Duration) (int, error)
 }
+
+// orphanAge 是未关联工单的附件的保留时长。
+const orphanAge = 24 * time.Hour
 
 // remindInterval 是检查待确认超时的间隔。
 const remindInterval = time.Minute
@@ -139,8 +144,8 @@ func New(o Options) (*Worker, error) {
 	if o.LabelPrefix == "" {
 		o.LabelPrefix = "lingo"
 	}
-	if o.Tasks != nil && (o.Issues == nil || o.Drafts == nil) {
-		return nil, errors.New("worker: Issues and Drafts are required with Tasks")
+	if o.Tasks != nil && (o.Issues == nil || o.Drafts == nil || o.Forwarding == nil) {
+		return nil, errors.New("worker: Issues, Drafts and Forwarding are required with Tasks")
 	}
 	tc := o.Templates
 	if tc == nil {
@@ -179,7 +184,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		wg.Add(1)
 		go loop("gitea", w.ProcessTasks)
 	}
-	if w.o.Reminder != nil && w.o.RemindEvery > 0 {
+	if w.o.Reminder != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -187,7 +192,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			defer t.Stop()
 			limit := min(w.o.BatchSize, ticket.MaxLimit)
 			for {
-				for {
+				if _, err := w.o.Reminder.CleanupAttachments(ctx, orphanAge); err != nil && ctx.Err() == nil {
+					w.log.Error("worker loop failed", "loop", "cleanup", "err", err)
+				}
+				for w.o.RemindEvery > 0 {
 					n, err := w.o.Reminder.RemindOverdue(ctx, w.o.RemindProjects, w.o.RemindEvery, limit)
 					if err != nil && ctx.Err() == nil {
 						w.log.Error("worker loop failed", "loop", "remind", "err", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -48,6 +49,15 @@ func textArray(ss []string) string {
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// textArrayInt 把整数切片编码为数组字面量，SQL 中以 ($n::text)::bigint[] 使用。
+func textArrayInt(ids []int64) string {
+	ss := make([]string, len(ids))
+	for i, id := range ids {
+		ss[i] = strconv.FormatInt(id, 10)
+	}
+	return "{" + strings.Join(ss, ",") + "}"
 }
 
 // nullInt64 把 0 映射为 NULL。

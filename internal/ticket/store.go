@@ -42,8 +42,14 @@ type Tx interface {
 	MarkReminded(ctx context.Context, id int64, at time.Time) error
 	// ConversationOwner 返回会话的提交人；不存在返回 ErrNotFound。
 	ConversationOwner(ctx context.Context, id int64) (string, error)
-	// AddComment 写一条工单评论（用户补充或后台答复）。
-	AddComment(ctx context.Context, c Comment) error
+	// AddComment 写一条工单评论（用户补充或后台答复），返回评论 ID。
+	AddComment(ctx context.Context, c Comment) (int64, error)
+	// MarkCommentsForwarded 标记工单的补充评论已随 Issue 正文转出。
+	MarkCommentsForwarded(ctx context.Context, ticketID int64, ids []int64) error
+	// CountAttachments 返回工单已关联的附件数。
+	CountAttachments(ctx context.Context, ticketID int64) (int, error)
+	// LinkAttachments 把 userID 上传、尚未关联工单的附件 ids 关联到工单（与评论，commentID 为 0 表示工单本身），返回关联条数。
+	LinkAttachments(ctx context.Context, ids []int64, userID string, ticketID, commentID int64) (int, error)
 	// AddTriage 写一条后台处理记录（triage_actions）。
 	AddTriage(ctx context.Context, a Triage) error
 	// Enqueue 写一条 Gitea 写操作任务；Key 已存在时忽略（同一操作只入队一次）。
@@ -78,6 +84,7 @@ type Comment struct {
 	Body       string
 	Public     bool
 	At         time.Time
+	Forwarded  bool // 已随 Issue 正文转出
 }
 
 // Project 是已同步入库的项目。
@@ -103,7 +110,10 @@ type Triage struct {
 }
 
 // 任务操作。
-const OpCreateIssue = "create_issue"
+const (
+	OpCreateIssue   = "create_issue"
+	OpCreateComment = "create_comment"
+)
 
 // Task 是 Gitea 写操作任务（outbox kind=gitea）。
 type Task struct {

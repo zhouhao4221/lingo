@@ -175,6 +175,7 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Tasks:       l.store,
 		Issues:      l.gitea,
 		Drafts:      l.tickets,
+		Forwarding:  l.store,
 		Repos:       l.repoConfig,
 		LabelPrefix: l.labelPrefix(),
 		Templates:   l.tmpls,
