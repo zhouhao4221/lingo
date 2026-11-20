@@ -2,9 +2,7 @@ package selfcheck
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -74,6 +72,8 @@ type Options struct {
 	// PingWait 是测试投递后等待接收端确认的时间，默认 10 秒。
 	PingWait time.Duration
 	Now      func() time.Time
+	// Lock 在多实例间互斥自检（避免同时创建重复的 Webhook 与标签）；拿不到锁时 ok 为假，本次跳过。为空时不加锁。
+	Lock func(ctx context.Context) (release func(), ok bool, err error)
 }
 
 // 版本要求：最低 1.22；Actions 上线信号需 1.25。
@@ -90,6 +90,16 @@ func Run(ctx context.Context, o Options) []Result {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.Lock != nil {
+		release, ok, err := o.Lock(ctx)
+		switch {
+		case err != nil:
+			return []Result{{Item: "lock", Level: Warn, Message: "self-check skipped, cannot take lock: " + err.Error()}}
+		case !ok:
+			return []Result{{Item: "lock", Level: OK, Message: "self-check skipped: another instance is running it"}}
+		}
+		defer release()
 	}
 	var out []Result
 	add := func(repo, item string, l Level, format string, args ...any) {
@@ -142,9 +152,12 @@ func Run(ctx context.Context, o Options) []Result {
 		case repo.ExternalTracker != nil && repo.ExternalTracker.URL != "":
 			add(r.Name, "repo", Error, "repository uses an external issue tracker")
 		case repo.Archived:
-			add(r.Name, "repo", Warn, "repository is archived")
+			add(r.Name, "repo", Error, "repository is archived (read-only): issues cannot be created")
 		default:
 			add(r.Name, "repo", OK, "accessible, issues enabled")
+		}
+		if repo.Archived || !repo.HasIssues {
+			continue // 后续检查都需要写 Issue / 标签，跳过
 		}
 		if bot != "" {
 			if p, err := o.Gitea.GetCollaboratorPermission(ctx, owner, name, bot); err != nil {
@@ -155,24 +168,24 @@ func Run(ctx context.Context, o Options) []Result {
 				add(r.Name, "permission", OK, "bot %s has %s permission", bot, p.Permission)
 			}
 		}
-		if created, err := EnsureLabels(ctx, o.Gitea, owner, name, o.LabelPrefix); err != nil {
+		if _, created, err := gitea.EnsureLabels(ctx, o.Gitea, owner, name, gitea.LingoLabels(o.LabelPrefix)); err != nil {
 			add(r.Name, "labels", Error, "cannot ensure labels: %v", err)
 		} else if len(created) > 0 {
 			add(r.Name, "labels", OK, "created labels %s", strings.Join(created, ", "))
 		} else {
 			add(r.Name, "labels", OK, "all labels present")
 		}
-		if t := checkWebhook(ctx, o, owner, name, add); t {
+		if t := checkWebhook(ctx, o, owner, name, actions, add); t {
 			tested = append(tested, r.Name)
 		}
 		checkTemplates(ctx, o, r, owner, name, add)
-		if r.DeployWorkflow != "" {
+		if r.DeployWorkflow != "" && !actions {
+			add(r.Name, "workflow", Warn, "deploy workflow %s configured but Gitea < 1.25", r.DeployWorkflow)
+		} else if r.DeployWorkflow != "" {
 			switch ws, err := o.Gitea.ListWorkflows(ctx, owner, name); {
-			case !actions:
-				add(r.Name, "workflow", Warn, "deploy workflow %s configured but Gitea < 1.25", r.DeployWorkflow)
 			case err != nil:
 				add(r.Name, "workflow", Warn, "cannot list workflows: %v", err)
-			case !slices.ContainsFunc(ws, func(w *gitea.Workflow) bool { return path.Base(w.Path) == r.DeployWorkflow }):
+			case !slices.ContainsFunc(ws, func(w *gitea.Workflow) bool { return gitea.WorkflowMatches(w.Path, r.DeployWorkflow) }):
 				add(r.Name, "workflow", Error, "deploy workflow %s not found in the repository", r.DeployWorkflow)
 			default:
 				add(r.Name, "workflow", OK, "deploy workflow %s found", r.DeployWorkflow)
@@ -186,7 +199,8 @@ func Run(ctx context.Context, o Options) []Result {
 }
 
 // checkWebhook 检查（AutoRegister 时创建或修正）Webhook，返回是否发起了测试投递。
-func checkWebhook(ctx context.Context, o Options, owner, name string, add func(repo, item string, l Level, format string, args ...any)) bool {
+func checkWebhook(ctx context.Context, o Options, owner, name string, actions bool, add func(repo, item string, l Level, format string, args ...any)) bool {
+	events := gitea.HookEvents(actions) // Gitea < 1.25 没有 workflow_run
 	repo := owner + "/" + name
 	if o.WebhookURL == "" {
 		if at, ok, err := o.Pings.LastPing(ctx, repo); err == nil && ok {
@@ -203,7 +217,7 @@ func checkWebhook(ctx context.Context, o Options, owner, name string, add func(r
 	}
 	missing := func(h *gitea.Hook) []string {
 		var m []string
-		for _, e := range gitea.LingoHookEvents {
+		for _, e := range events {
 			if !slices.Contains(h.Events, e) {
 				m = append(m, e)
 			}
@@ -215,23 +229,26 @@ func checkWebhook(ctx context.Context, o Options, owner, name string, add func(r
 		add(repo, "webhook", Error, "no webhook points to %s", o.WebhookURL)
 		return false
 	case h == nil:
-		if h, err = o.Gitea.CreateHook(ctx, owner, name, gitea.NewLingoHook(o.WebhookURL, o.WebhookSecret, "")); err != nil {
+		opt := gitea.NewLingoHook(o.WebhookURL, o.WebhookSecret, "")
+		opt.Events = events
+		if h, err = o.Gitea.CreateHook(ctx, owner, name, opt); err != nil {
 			add(repo, "webhook", Error, "create webhook failed: %v", err)
 			return false
 		}
 		add(repo, "webhook", OK, "webhook created")
-	case !h.Active || len(missing(h)) > 0:
-		if !o.AutoRegister {
-			add(repo, "webhook", Error, "webhook inactive or missing events %v", missing(h))
-			return false
-		}
+	case o.AutoRegister:
+		// Gitea 不返回密钥，无法判断是否一致：自动注册时总是写回当前配置（密钥轮换后也能修正）
 		active := true
 		cfg := gitea.NewLingoHook(o.WebhookURL, o.WebhookSecret, "")
-		if _, err := o.Gitea.EditHook(ctx, owner, name, h.ID, gitea.EditHookOption{Config: cfg.Config, Events: gitea.LingoHookEvents, Active: &active}); err != nil {
-			add(repo, "webhook", Error, "fix webhook failed: %v", err)
+		events := append(missing(h), h.Events...)
+		if _, err := o.Gitea.EditHook(ctx, owner, name, h.ID, gitea.EditHookOption{Config: cfg.Config, Events: events, Active: &active}); err != nil {
+			add(repo, "webhook", Error, "update webhook failed: %v", err)
 			return false
 		}
-		add(repo, "webhook", OK, "webhook re-enabled with all events")
+		add(repo, "webhook", OK, "webhook updated (secret, events, active)")
+	case !h.Active || len(missing(h)) > 0:
+		add(repo, "webhook", Error, "webhook inactive or missing events %v", missing(h))
+		return false
 	default:
 		add(repo, "webhook", OK, "webhook present and active")
 	}
@@ -266,7 +283,7 @@ func confirmPings(ctx context.Context, o Options, repos []string, since time.Tim
 		}
 		select {
 		case <-ctx.Done():
-			deadline.Reset(0)
+			return out // 退出中：不把取消误报为投递失败
 		case <-deadline.C:
 			for _, r := range pending {
 				out = append(out, Result{Repo: r, Item: "delivery", Level: Error, Message: "test delivery not received: check that " +
@@ -288,15 +305,22 @@ func checkTemplates(ctx context.Context, o Options, r Repo, owner, name string, 
 		add(r.Name, "templates", Warn, "cannot list issue templates: %v", err)
 		return
 	}
-	var missing []string
+	var missing, fallback []string
 	for typ, file := range r.Templates {
-		if gitea.MatchTemplate(ts, file, "", "") == nil {
+		if t := gitea.MatchTemplate(ts, file, typ, o.LabelPrefix); t == nil {
 			missing = append(missing, typ+"="+file)
+		} else if t.FileName != file && !strings.HasSuffix(t.FileName, "/"+file) {
+			fallback = append(fallback, typ+"="+file+" (using "+t.FileName+")")
 		}
 	}
 	slices.Sort(missing)
+	slices.Sort(fallback)
 	if len(missing) > 0 {
-		add(r.Name, "templates", Error, "issue templates not found: %s", strings.Join(missing, ", "))
+		add(r.Name, "templates", Error, "issue templates not found (built-in body will be used): %s", strings.Join(missing, ", "))
+		return
+	}
+	if len(fallback) > 0 {
+		add(r.Name, "templates", Warn, "configured template files not found, matched by type label: %s", strings.Join(fallback, ", "))
 		return
 	}
 	if v, err := o.Gitea.ValidateIssueConfig(ctx, owner, name); err == nil && !v.Valid {
@@ -304,48 +328,6 @@ func checkTemplates(ctx context.Context, o Options, r Repo, owner, name string, 
 		return
 	}
 	add(r.Name, "templates", OK, "configured templates present")
-}
-
-// LabelSpecs 返回灵问使用的标签（前缀默认 lingo）：来源标签，以及 type/*、review/* 两组互斥作用域标签。
-func LabelSpecs(prefix string) []gitea.CreateLabelOption {
-	if prefix == "" {
-		prefix = "lingo"
-	}
-	out := []gitea.CreateLabelOption{{Name: prefix, Color: "#6f42c1", Description: "由灵问创建"}}
-	for _, t := range []struct{ name, color string }{{"consult", "#1d76db"}, {"bug", "#d73a4a"}, {"feature", "#0e8a16"}} {
-		out = append(out, gitea.CreateLabelOption{Name: prefix + "/type/" + t.name, Color: t.color, Exclusive: true})
-	}
-	for _, r := range []struct{ name, color string }{{"pending", "#fbca04"}, {"approved", "#0e8a16"}, {"rejected", "#b60205"}, {"need-info", "#d93f0b"}} {
-		out = append(out, gitea.CreateLabelOption{Name: prefix + "/review/" + r.name, Color: r.color, Exclusive: true})
-	}
-	return out
-}
-
-// EnsureLabels 创建仓库中缺少的灵问标签，返回新建的标签名。
-func EnsureLabels(ctx context.Context, g Gitea, owner, name, prefix string) ([]string, error) {
-	ls, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Label, *gitea.Response, error) {
-		return g.ListLabels(ctx, owner, name, o)
-	})
-	if err != nil {
-		return nil, err
-	}
-	have := map[string]bool{}
-	for _, l := range ls {
-		have[strings.ToLower(l.Name)] = true
-	}
-	var created []string
-	var errs []error
-	for _, spec := range LabelSpecs(prefix) {
-		if have[strings.ToLower(spec.Name)] {
-			continue
-		}
-		if _, err := g.CreateLabel(ctx, owner, name, spec); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", spec.Name, err))
-			continue
-		}
-		created = append(created, spec.Name)
-	}
-	return created, errors.Join(errs...)
 }
 
 var versionRe = regexp.MustCompile(`^v?(\d+)\.(\d+)`)

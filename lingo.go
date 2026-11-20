@@ -294,10 +294,17 @@ func (l *Lingo) Run(ctx context.Context) error {
 		// 不阻断启动：各方法调用时会再次尝试同步
 		l.log.Error("lingo: sync projects failed", "err", err)
 	}
+	var checked sync.WaitGroup
 	if !l.cfg.SkipSelfCheck {
-		go l.logSelfCheck(ctx) // 不阻断启动；结果写日志，也可调用 SelfCheck 获取
+		checked.Add(1)
+		go func() { // 不阻断启动；结果写日志，也可调用 SelfCheck 获取
+			defer checked.Done()
+			l.logSelfCheck(ctx)
+		}()
 	}
-	return l.worker.Run(ctx)
+	err := l.worker.Run(ctx)
+	checked.Wait() // 退出前等自检结束（它随 ctx 取消尽快返回），之后不再访问数据库
+	return err
 }
 
 // ErrNotFound 表示资源不存在或无权访问（两者不区分，避免暴露数据是否存在）。

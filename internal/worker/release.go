@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -97,7 +96,7 @@ func (w *Worker) applyRelease(ctx context.Context, ev *webhook.Event, received t
 	case webhook.WorkflowRunCompleted:
 		cfg := w.o.Repos(ev.Repo)
 		run := ev.WorkflowRun
-		if cfg.DeployWorkflow == "" || run.Conclusion != "success" || !workflowIs(run.Path, cfg.DeployWorkflow) {
+		if cfg.DeployWorkflow == "" || run.Conclusion != "success" || !gitea.WorkflowMatches(run.Path, cfg.DeployWorkflow) {
 			return nil
 		}
 		d := release.Deployment{Repo: ev.Repo, SHA: run.HeadSHA, Env: cfg.DeployEnv, Source: "workflow", Ref: run.HTMLURL}
@@ -161,12 +160,6 @@ func (w *Worker) deployed(ctx context.Context, d release.Deployment, received ti
 	}
 	w.log.Warn("deployment does not match any release", "repo", d.Repo, "tag", d.Tag, "sha", d.SHA)
 	return nil
-}
-
-// workflowIs 报告运行的工作流路径（如 ".gitea/workflows/deploy-prod.yml@refs/heads/main"）是否为文件 file。
-func workflowIs(runPath, file string) bool {
-	p, _, _ := strings.Cut(runPath, "@")
-	return p != "" && (path.Base(p) == file || p == file)
 }
 
 // releaseRefs 解析版本说明中的 Issue 引用（补全仓库、去重）。

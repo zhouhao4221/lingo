@@ -115,18 +115,18 @@ func TestRunHealthy(t *testing.T) {
 	if m["demo/api|webhook"].Message != "webhook created" || m["demo/api|delivery"].Level != OK {
 		t.Errorf("webhook = %+v %+v", m["demo/api|webhook"], m["demo/api|delivery"])
 	}
-	if len(f.created) != len(LabelSpecs("lingo"))-1 {
+	if len(f.created) != len(gitea.LingoLabels("lingo"))-1 {
 		t.Errorf("created labels = %v", f.created)
 	}
 }
 
 func TestRunProblems(t *testing.T) {
 	f := &fake{version: "1.24.0", perm: "read", pings: map[string]time.Time{},
-		repos: map[string]*gitea.Repository{"demo/api": {HasIssues: true}, "demo/docs": {HasIssues: false}},
+		repos: map[string]*gitea.Repository{"demo/api": {HasIssues: true}, "demo/docs": {HasIssues: false}, "demo/old": {HasIssues: true, Archived: true}},
 		hook:  &gitea.Hook{ID: 3, Active: false, Events: []string{"issues"}}}
 	rs := Run(context.Background(), Options{Gitea: f, Pings: f, WebhookURL: "https://app/wh", PingWait: 600 * time.Millisecond,
 		Repos: []Repo{{Name: "demo/api", DeployWorkflow: "deploy.yml", Templates: map[string]string{"bug": "nope.yaml"}},
-			{Name: "demo/docs"}, {Name: "demo/gone"}}})
+			{Name: "demo/docs"}, {Name: "demo/gone"}, {Name: "demo/old"}}})
 	m := byItem(rs)
 	for key, want := range map[string]Level{
 		"|version":            Warn,  // < 1.25
@@ -136,6 +136,7 @@ func TestRunProblems(t *testing.T) {
 		"demo/api|templates":  Error,
 		"demo/docs|repo":      Error, // Issue 未启用
 		"demo/gone|repo":      Error, // 不可访问
+		"demo/old|repo":       Error, // 已归档
 	} {
 		if m[key].Level != want {
 			t.Errorf("%s = %+v, want %s", key, m[key], want)
@@ -149,12 +150,36 @@ func TestRunProblems(t *testing.T) {
 	rs = Run(context.Background(), Options{Gitea: f, Pings: f, WebhookURL: "https://app/wh", AutoRegister: true, PingWait: 600 * time.Millisecond,
 		Repos: []Repo{{Name: "demo/api"}}})
 	m = byItem(rs)
-	if !f.edited || m["demo/api|delivery"].Level != Error || !strings.Contains(m["demo/api|delivery"].Message, "ALLOWED_HOST_LIST") {
+	if !f.edited || m["demo/api|webhook"].Message != "webhook updated (secret, events, active)" || m["demo/api|delivery"].Level != Error || !strings.Contains(m["demo/api|delivery"].Message, "ALLOWED_HOST_LIST") {
 		t.Errorf("auto-register = %+v %+v", m["demo/api|webhook"], m["demo/api|delivery"])
 	}
 	f.hookErr = errors.New("403")
 	if m := byItem(Run(context.Background(), Options{Gitea: f, Pings: f, WebhookURL: "https://app/wh", Repos: []Repo{{Name: "demo/api"}}})); m["demo/api|webhook"].Level != Warn {
 		t.Errorf("list hooks forbidden = %+v", m["demo/api|webhook"])
+	}
+}
+
+func TestOldGiteaDoesNotRequireWorkflowRun(t *testing.T) {
+	f := &fake{version: "1.23.1", perm: "write", deliver: true, pings: map[string]time.Time{},
+		repos: map[string]*gitea.Repository{"demo/api": {HasIssues: true}},
+		hook:  &gitea.Hook{ID: 3, Active: true, Events: gitea.HookEvents(false)}}
+	m := byItem(Run(context.Background(), Options{Gitea: f, Pings: f, WebhookURL: "https://app/wh", PingWait: time.Second, Repos: []Repo{{Name: "demo/api"}}}))
+	if m["demo/api|webhook"].Level != OK || m["demo/api|delivery"].Level != OK {
+		t.Errorf("old gitea = %+v %+v", m["demo/api|webhook"], m["demo/api|delivery"])
+	}
+}
+
+func TestTemplateFallbackAndLock(t *testing.T) {
+	f := &fake{version: "1.27.0", perm: "write", pings: map[string]time.Time{}, repos: map[string]*gitea.Repository{"demo/api": {HasIssues: true}},
+		tmpls: []*gitea.IssueTemplate{{FileName: "bug_report.yaml", Labels: gitea.StringList{"type/bug"}}}}
+	m := byItem(Run(context.Background(), Options{Gitea: f, Pings: f, Repos: []Repo{{Name: "demo/api", Templates: map[string]string{"bug": "bug.yaml"}}}}))
+	if m["demo/api|templates"].Level != Warn {
+		t.Errorf("fallback template = %+v", m["demo/api|templates"])
+	}
+	rs := Run(context.Background(), Options{Gitea: f, Pings: f, Repos: []Repo{{Name: "demo/api"}},
+		Lock: func(context.Context) (func(), bool, error) { return nil, false, nil }})
+	if len(rs) != 1 || rs[0].Item != "lock" {
+		t.Errorf("locked out = %+v", rs)
 	}
 }
 

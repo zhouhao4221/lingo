@@ -33,6 +33,23 @@ func New(db *sql.DB, opts ...Option) (*Store, error) {
 	return s, nil
 }
 
+// TryLock 尝试取会话级 advisory lock（不等待）：拿到时返回释放函数；锁被其他实例持有时 ok 为 false。
+// 锁绑定在一个专用连接上，释放时归还连接；进程崩溃时连接断开，锁自动释放。
+func (s *Store) TryLock(ctx context.Context, key int64) (release func(), ok bool, err error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&ok); err != nil || !ok {
+		conn.Close()
+		return nil, false, err
+	}
+	return func() {
+		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+		conn.Close()
+	}, true, nil
+}
+
 // Ping 检查数据库连通性。
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
