@@ -289,6 +289,20 @@ func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {
 	return nil
 }
 
+// TaskState 按幂等键读取 Gitea 写操作任务的状态（走 key 唯一索引）；不存在时返回 nil。
+func (x *ticketTx) TaskState(ctx context.Context, key string) (*ticket.TaskState, error) {
+	st := ticket.TaskState{Key: key}
+	err := x.tx.QueryRowContext(ctx, `SELECT status, failures, last_error, updated_at FROM lingo_outbox WHERE key = $1 AND kind = 'gitea'`,
+		key).Scan(&st.Status, &st.Failures, &st.LastError, &st.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: task %s: %w", key, err)
+	}
+	return &st, nil
+}
+
 // RepointMerged 把合并到 from 的工单改为合并到 to（合并链只保留一层，跟随最终目标）。
 func (x *ticketTx) RepointMerged(ctx context.Context, from, to int64) error {
 	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_tickets SET merged_into_ticket_id = $2 WHERE merged_into_ticket_id = $1", from, to); err != nil {

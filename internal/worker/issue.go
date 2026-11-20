@@ -185,6 +185,8 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 			return permanent(fmt.Errorf("task payload: %s", t.Payload))
 		}
 		return w.syncPerspectives(ctx, t.TicketID, p.PerspectiveID)
+	case ticket.OpCloseIssue:
+		return w.closeIssue(ctx, t.TicketID)
 	}
 	return permanent(fmt.Errorf("unknown task op %q", t.Op))
 }
@@ -209,9 +211,13 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		return err
 	}
 	if t.IssueNumber != 0 {
+		if t.Status == ticket.StatusRejected {
+			return nil // 已驳回：Issue 由 close_issue 关闭，不再补传附件
+		}
 		return w.uploadIssueAttachments(ctx, t, exclude)
 	}
-	if t.Status != ticket.StatusSubmitted {
+	// 建单途中被驳回的工单不再建 Issue；但上次可能已建好而没来得及保存，重试时仍按标记查重，查到后补记并关闭
+	if t.Status != ticket.StatusSubmitted && (t.Status != ticket.StatusRejected || !retried) {
 		return nil // 工单已不再待建
 	}
 	if t.Repo == "" {
@@ -251,10 +257,16 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 				if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup", commentIDs(inBody)); err != nil {
 					return err
 				}
+				if t.Status == ticket.StatusRejected {
+					return nil // IssueCreated 已补记关联并入队关闭
+				}
 				t.IssueNumber = is.Number
 				return w.uploadIssueAttachments(ctx, t, exclude)
 			}
 		}
+	}
+	if t.Status != ticket.StatusSubmitted {
+		return nil // 已驳回且 Gitea 中没有为它建过 Issue
 	}
 
 	var perspectives *ticket.PerspectiveSet
@@ -696,6 +708,40 @@ func (w *Worker) removeLabel(ctx context.Context, ticketID int64, label string) 
 			return nil
 		}
 	}
+}
+
+// closeIssue 关闭被驳回工单的主 Issue：只处理库中记录的这一个 Issue（工单仓库 + 编号），不按标记搜索、不动 PR。
+// Issue 已关闭或已删除时视为完成；工单不再是驳回状态（不应出现）时不关闭。
+func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
+	t, err := w.o.Drafts.Draft(ctx, ticketID)
+	if errors.Is(err, ticket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if t.Status != ticket.StatusRejected || t.IssueNumber == 0 || t.Repo == "" {
+		return nil
+	}
+	owner, name, _ := strings.Cut(t.Repo, "/")
+	is, err := w.o.Issues.GetIssue(ctx, owner, name, t.IssueNumber)
+	if errors.Is(err, gitea.ErrNotFound) {
+		return nil // Issue 已被删除：没有可关闭的
+	}
+	if err != nil {
+		return giteaErr("get issue", err)
+	}
+	if is.State == gitea.StateClosed {
+		return nil // 已关闭（重试或研发已手动关闭）：幂等
+	}
+	state := gitea.StateClosed
+	if _, err := w.o.Issues.EditIssue(ctx, owner, name, t.IssueNumber, gitea.EditIssueOption{State: &state}); err != nil {
+		if errors.Is(err, gitea.ErrNotFound) {
+			return nil
+		}
+		return giteaErr("close issue", err)
+	}
+	return nil
 }
 
 // createComment 把补充评论由机器人发到 Issue，并上传评论附件；评论已发出时（上次附件未传完）只继续处理附件。

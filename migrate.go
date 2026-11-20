@@ -127,6 +127,147 @@ func checksum(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// MigrationStatus 是 CheckMigrations 的结果：本版本内嵌的迁移与数据库当前 schema 的对比。
+type MigrationStatus struct {
+	// Ready 为真表示本版本需要的迁移都已执行、内容一致且应有的表都在，可以正常使用 lingo。
+	Ready   bool     `json:"ready"`
+	Applied []string `json:"applied"`           // 已执行且内容与本版本一致的迁移
+	Pending []string `json:"pending,omitempty"` // 本版本包含、数据库尚未执行的迁移（需调用 Migrate）
+	// Changed 是已执行、但内容与本版本不同的迁移（Migrate 会返回 ErrMigrationChanged，需人工处理）。
+	Changed []string `json:"changed,omitempty"`
+	// Unknown 是数据库已执行、本版本没有的迁移（已由更新的版本迁移过）；迁移向前兼容，不影响 Ready。
+	Unknown []string `json:"unknown,omitempty"`
+	// MissingTables 是已执行的迁移应当建出、当前 schema 中却不存在的表；迁移记录表本身不存在时为 lingo_schema_migrations。
+	MissingTables []string `json:"missing_tables,omitempty"`
+}
+
+var (
+	createTableRe = regexp.MustCompile(`(?i)\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)`)
+	dropTableRe   = regexp.MustCompile(`(?i)\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)`)
+)
+
+// CheckMigrations 只读地检查 db 当前 schema（search_path 第一项，与 Migrate 相同）的迁移是否就绪，供接入方在
+// 迁移未执行、缺表时降级（如只禁用反馈入口）而不影响宿主其他功能。检查在只读事务中进行：不建表、不加锁、
+// 不回填校验和，也不修改任何数据；可在 New 之前、任意实例上频繁调用。
+//
+// 返回 err == nil 时，MigrationStatus.Ready 说明是否就绪（未执行迁移、缺表、迁移内容被改都是 Ready=false，
+// 不是错误）；返回 err != nil 表示检查本身失败（连接失败、超时、权限不足、ctx 取消等），此时无法判断是否就绪，
+// 调用方应按“状态未知”处理（重试或告警），不要当作未就绪去执行迁移。
+func CheckMigrations(ctx context.Context, db *sql.DB) (MigrationStatus, error) {
+	ms, err := loadMigrations()
+	if err != nil {
+		return MigrationStatus{}, err
+	}
+	applied, tables, err := readMigrationState(ctx, db)
+	if err != nil {
+		return MigrationStatus{}, fmt.Errorf("lingo: check migrations: %w", err)
+	}
+	return migrationStatus(ms, applied, tables), nil
+}
+
+// readMigrationState 在只读事务中读取当前 schema 的表名与迁移记录；迁移记录表不存在时 applied 为 nil。
+func readMigrationState(ctx context.Context, db *sql.DB) (applied map[string]string, tables map[string]bool, err error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // 只读事务，回滚即结束
+	rows, err := tx.QueryContext(ctx, "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()")
+	if err != nil {
+		return nil, nil, err
+	}
+	tables = map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		tables[n] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if !tables["lingo_schema_migrations"] {
+		return nil, tables, nil
+	}
+	// 早期迁移记录表可能没有 checksum 列（Migrate 会补列）：只读检查不补列，按空校验和处理
+	var hasChecksum bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'lingo_schema_migrations' AND column_name = 'checksum')`).Scan(&hasChecksum); err != nil {
+		return nil, nil, err
+	}
+	q := "SELECT name, '' FROM lingo_schema_migrations"
+	if hasChecksum {
+		q = "SELECT name, checksum FROM lingo_schema_migrations"
+	}
+	if rows, err = tx.QueryContext(ctx, q); err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	applied = map[string]string{}
+	for rows.Next() {
+		var n, c string
+		if err := rows.Scan(&n, &c); err != nil {
+			return nil, nil, err
+		}
+		applied[n] = c
+	}
+	return applied, tables, rows.Err()
+}
+
+// migrationStatus 对比内嵌迁移与数据库状态。applied 为 nil 表示迁移记录表不存在；空校验和（早期记录，Migrate 会按
+// 当前内容回填）视为一致。应有的表按已执行迁移中的 CREATE TABLE / DROP TABLE 依次推算。
+func migrationStatus(ms []migration, applied map[string]string, tables map[string]bool) MigrationStatus {
+	st := MigrationStatus{Applied: []string{}}
+	if applied == nil {
+		for _, m := range ms {
+			st.Pending = append(st.Pending, m.name)
+		}
+		st.MissingTables = []string{"lingo_schema_migrations"}
+		return st
+	}
+	known := map[string]bool{}
+	want := map[string]bool{}
+	var order []string
+	for _, m := range ms {
+		known[m.name] = true
+		sum, ok := applied[m.name]
+		switch {
+		case !ok:
+			st.Pending = append(st.Pending, m.name)
+			continue
+		case sum != "" && sum != m.checksum:
+			st.Changed = append(st.Changed, m.name)
+		default:
+			st.Applied = append(st.Applied, m.name)
+		}
+		for _, mt := range createTableRe.FindAllStringSubmatch(m.body, -1) {
+			if n := strings.ToLower(mt[1]); !want[n] {
+				want[n] = true
+				order = append(order, n)
+			}
+		}
+		for _, mt := range dropTableRe.FindAllStringSubmatch(m.body, -1) {
+			delete(want, strings.ToLower(mt[1]))
+		}
+	}
+	for n := range applied {
+		if !known[n] {
+			st.Unknown = append(st.Unknown, n)
+		}
+	}
+	sort.Strings(st.Unknown)
+	for _, n := range order {
+		if want[n] && !tables[n] {
+			st.MissingTables = append(st.MissingTables, n)
+		}
+	}
+	st.Ready = len(st.Pending) == 0 && len(st.Changed) == 0 && len(st.MissingTables) == 0
+	return st
+}
+
 func apply(ctx context.Context, conn *sql.Conn, m migration) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {

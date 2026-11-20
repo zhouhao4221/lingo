@@ -23,6 +23,7 @@ type memStore struct {
 	auto     map[string]bool     // "project:type"
 	notes    []Comment
 	tasks    map[string]Task
+	states   map[string]*TaskState // 任务执行状态（测试设置）；有任务而未设置时为 pending
 	reminded map[int64]time.Time
 
 	perspectives []Perspective
@@ -203,6 +204,17 @@ func (m *memStore) Enqueue(_ context.Context, t Task) error {
 		m.tasks[t.Key] = t
 	}
 	return nil
+}
+
+func (m *memStore) TaskState(_ context.Context, key string) (*TaskState, error) {
+	if _, ok := m.tasks[key]; !ok {
+		return nil, nil
+	}
+	if st, ok := m.states[key]; ok {
+		c := *st
+		return &c, nil
+	}
+	return &TaskState{Key: key, Status: "pending"}, nil
 }
 
 func (m *memStore) HasIssue(ctx context.Context, repo string, n int64) (bool, error) {

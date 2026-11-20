@@ -28,6 +28,8 @@ type giteaServer struct {
 	comments  []string         // 机器人发出的评论正文
 	edits     []string         // 编辑后的 Issue / 评论正文
 	added     []int64          // POST issues/{n}/labels 追加的标签 id
+	closes    []string         // PATCH state=closed 的 Issue 路径
+	closeErr  int              // 非 0 时 PATCH state 返回该状态码
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +87,22 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.HasPrefix(p, "/repos/demo/api/issues/") && r.Method == "PATCH":
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if st, ok := req["state"].(string); ok && !strings.Contains(p, "/comments/") {
+			if g.closeErr != 0 {
+				http.Error(w, `{"message":"forbidden"}`, g.closeErr)
+				return
+			}
+			g.closes = append(g.closes, p)
+			for _, is := range g.issues {
+				if "/repos/demo/api/issues/"+jsonNum(int64(is["number"].(int))) == p {
+					is["state"] = st
+					_ = json.NewEncoder(w).Encode(is)
+					return
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		body, _ := req["body"].(string)
 		g.edits = append(g.edits, body)
 		for _, is := range g.issues { // 编辑 Issue 正文后 GET 读到新正文

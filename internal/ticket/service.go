@@ -493,6 +493,21 @@ func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via 
 			// Webhook 已按标记补记了同一个 Issue：正文里的补充评论仍要标记已转出，避免再单独发一遍
 			return tx.MarkCommentsForwarded(ctx, t.ID, commentIDs)
 		}
+		if t.IssueNumber == 0 && t.Status == StatusRejected {
+			// 建单途中工单被驳回：Issue 是为本工单建的，补记关联后入队关闭，避免 Gitea 中留下无人跟进的 Issue
+			t.IssueNumber = number
+			if err := tx.Update(ctx, t); err != nil {
+				return err
+			}
+			if err := tx.MarkCommentsForwarded(ctx, t.ID, commentIDs); err != nil {
+				return err
+			}
+			if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "system", Kind: "issue.created",
+				Payload: map[string]any{"issue": number, "repo": t.Repo, "via": via, "rejected": true}}); err != nil {
+				return err
+			}
+			return enqueueClose(ctx, tx, t, 1)
+		}
 		if t.IssueNumber != 0 || t.Status != StatusSubmitted {
 			return nil
 		}

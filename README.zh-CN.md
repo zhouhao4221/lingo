@@ -34,6 +34,9 @@ import _ "github.com/jackc/pgx/v5/stdlib" // 或任意 database/sql 的 PostgreS
 
 if err := lingo.Migrate(ctx, db); err != nil { ... } // 在发布流程中执行
 
+// 只读检查迁移是否就绪（不建表、不改数据），未就绪时可只禁用反馈入口：
+st, err := lingo.CheckMigrations(ctx, db) // err != nil：检查失败、状态未知；err == nil && !st.Ready：未就绪（st.Pending / st.MissingTables …）
+
 l, err := lingo.New(lingo.Config{
 	DB:           db,       // *sql.DB（PostgreSQL）
 	LightModel:   light,    // 可选：便宜、快速的 lingo.Model，建 Issue 前整理工单
@@ -124,6 +127,7 @@ lingo.Config{
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
+| `POST /tickets/{id}/reject-forwarded`、`GET /tickets/{id}/issue-close`、`POST /tickets/{id}/issue-close/retry` | 驳回已转研发工单（只关闭关联 Issue，异步可重试）及关闭进度 / 重试（reviewer / admin） |
 | `GET /events?after=` | 变更流（与 `Notifier` 同源） |
 | `GET /releases`、`GET /releases/{id}` | 版本记录、关联工单与上线记录 |
 | `GET` / `PUT /settings/auto-forward` | 自动转出开关（修改需 admin） |
@@ -133,7 +137,7 @@ lingo.Config{
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`list_releases`、`get_release`、`get_llm_usage`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`。
 
 ### 事件
 
