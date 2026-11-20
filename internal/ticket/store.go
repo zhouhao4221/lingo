@@ -118,6 +118,7 @@ type Triage struct {
 const (
 	OpCreateIssue   = "create_issue"
 	OpCreateComment = "create_comment"
+	OpRemoveLabel   = "remove_label"
 )
 
 // Task 是 Gitea 写操作任务（outbox kind=gitea）。

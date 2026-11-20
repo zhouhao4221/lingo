@@ -61,6 +61,9 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.issues = append(g.issues, is)
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(is)
+	case strings.Contains(p, "/labels/") && r.Method == "DELETE":
+		g.edits = append(g.edits, "DELETE "+p)
+		w.WriteHeader(204)
 	case strings.HasSuffix(p, "/assets") && r.Method == "POST":
 		f, hdr, err := r.FormFile("attachment")
 		if err != nil {

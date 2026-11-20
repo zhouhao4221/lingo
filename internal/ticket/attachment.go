@@ -242,6 +242,13 @@ func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, bo
 			if err := tx.Update(ctx, t); err != nil {
 				return err
 			}
+			if s.o.NeedInfoLabel != "" && t.IssueNumber != 0 {
+				// 去掉 Issue 上的需补充标签：否则研发之后改其他标签时，工单会按仍在的标签被改回 need_info
+				if err := tx.Enqueue(ctx, Task{Key: fmt.Sprintf("%s:comment:%d", OpRemoveLabel, c.ID), TicketID: t.ID, Op: OpRemoveLabel,
+					Payload: map[string]any{"label": s.o.NeedInfoLabel}}); err != nil {
+					return err
+				}
+			}
 			return tx.Emit(ctx, s.event(t, notify.TicketStatus, prev, p.ID, ""))
 		}
 		return nil

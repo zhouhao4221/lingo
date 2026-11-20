@@ -41,6 +41,7 @@ type IssueWriter interface {
 	EditComment(ctx context.Context, owner, repo string, id int64, body string) (*gitea.Comment, error)
 	CreateIssueAttachment(ctx context.Context, owner, repo string, index int64, name string, r io.Reader) (*gitea.Attachment, error)
 	CreateCommentAttachment(ctx context.Context, owner, repo string, commentID int64, name string, r io.Reader) (*gitea.Attachment, error)
+	RemoveIssueLabel(ctx context.Context, owner, repo string, index, labelID int64) error
 }
 
 // Forwarding 是转出 Issue 时读取的补充评论与附件，由 store.Store 实现。
@@ -155,6 +156,14 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 			return permanent(fmt.Errorf("task payload: %w", err))
 		}
 		return w.createIssue(ctx, t.TicketID, p.ForwardedBy, p.Note, p.AttachmentIDs, t.Attempts > 1)
+	case ticket.OpRemoveLabel:
+		var p struct {
+			Label string `json:"label"`
+		}
+		if err := json.Unmarshal(t.Payload, &p); err != nil || p.Label == "" {
+			return permanent(fmt.Errorf("task payload: %s", t.Payload))
+		}
+		return w.removeLabel(ctx, t.TicketID, p.Label)
 	case ticket.OpCreateComment:
 		var p struct {
 			CommentID int64 `json:"comment_id"`
@@ -433,6 +442,33 @@ func commentText(c *ticket.Comment) string {
 // commentWait 是补充评论等待 Issue 建好时的推迟间隔：建单任务可能在退避重试，不必频繁空转。
 const commentWait = time.Minute
 
+// removeLabel 从工单的 Issue 上移除标签；标签或 Issue 不存在时视为完成。
+func (w *Worker) removeLabel(ctx context.Context, ticketID int64, label string) error {
+	t, err := w.o.Drafts.Draft(ctx, ticketID)
+	if errors.Is(err, ticket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if t.IssueNumber == 0 {
+		return nil
+	}
+	owner, name, _ := strings.Cut(t.Repo, "/")
+	id, ok, err := w.labels.lookup(ctx, w.o.Issues, owner, name, label)
+	if err != nil || !ok {
+		return err
+	}
+	err = w.o.Issues.RemoveIssueLabel(ctx, owner, name, t.IssueNumber, id)
+	if errors.Is(err, gitea.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return giteaErr("remove label "+label, err)
+	}
+	return nil
+}
+
 // createComment 把补充评论由机器人发到 Issue，并上传评论附件；评论已发出时（上次附件未传完）只继续处理附件。
 // 建单前的补充已写进 Issue 正文，不再发。
 func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) error {
@@ -602,6 +638,26 @@ func clipRunes(s string, n int) string {
 type labelCache struct {
 	mu     sync.Mutex
 	byRepo map[string]map[string]int64
+}
+
+// lookup 返回仓库中标签 label 的 ID（不创建）；缓存未命中时重新列出标签。
+func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, label string) (int64, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := strings.ToLower(owner + "/" + name)
+	if id, ok := c.byRepo[key][strings.ToLower(label)]; ok {
+		return id, true, nil
+	}
+	ids, _, err := gitea.EnsureLabels(ctx, g, owner, name, nil)
+	if err != nil {
+		return 0, false, giteaErr("list labels", err)
+	}
+	if c.byRepo == nil {
+		c.byRepo = map[string]map[string]int64{}
+	}
+	c.byRepo[key] = ids
+	id, ok := ids[strings.ToLower(label)]
+	return id, ok, nil
 }
 
 func (c *labelCache) forget(owner, name string) {

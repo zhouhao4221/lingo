@@ -401,7 +401,57 @@ type eventPayload struct {
 	CommentID  int64  `json:"comment_id,omitempty"`
 }
 
+// mergedFanout 是转发给被合并工单提交人的事件类型：目标工单的对外进展（不含后台事件与提交回执）。
+var mergedFanout = map[notify.Kind]bool{notify.TicketStatus: true, notify.TicketComment: true, notify.TicketSchedule: true,
+	notify.TicketReleased: true, notify.TicketDeployed: true}
+
 func (x *ticketTx) Emit(ctx context.Context, e notify.Event) error {
+	if err := x.emit(ctx, e); err != nil {
+		return err
+	}
+	if e.TicketID == 0 || !mergedFanout[e.Kind] {
+		return nil
+	}
+	// 被合并到该工单的其他工单：其提交人一并收到目标工单的进展（PRD 3.2.1.2），事件挂在各自的工单上，
+	// 按提交人隔离；正文注明来自合并到的工单
+	rows, err := x.tx.QueryContext(ctx, "SELECT id, user_id FROM tickets WHERE merged_into_ticket_id = $1 AND status = 'merged' ORDER BY id", e.TicketID)
+	if err != nil {
+		return fmt.Errorf("store: merged tickets: %w", err)
+	}
+	type merged struct {
+		id   int64
+		user string
+	}
+	var ms []merged
+	for rows.Next() {
+		var m merged
+		if err := rows.Scan(&m.id, &m.user); err != nil {
+			rows.Close()
+			return err
+		}
+		ms = append(ms, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, m := range ms {
+		f := e
+		f.TicketID, f.UserID, f.CommentID = m.id, m.user, 0
+		note := fmt.Sprintf("（你的反馈已合并到工单 #%d）", e.TicketID)
+		if f.Body == "" {
+			f.Body = note
+		} else {
+			f.Body = note + f.Body
+		}
+		if err := x.emit(ctx, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (x *ticketTx) emit(ctx context.Context, e notify.Event) error {
 	payload, err := json.Marshal(eventPayload{TicketType: e.TicketType, Title: e.Title, Body: e.Body, URL: e.URL, CommentID: e.CommentID})
 	if err != nil {
 		return err
