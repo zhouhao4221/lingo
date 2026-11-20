@@ -65,6 +65,10 @@ type Drafts interface {
 type RepoConfig struct {
 	Assignees []string
 	Templates map[string]string // 工单类型 → 模板文件名
+
+	DeployWorkflow string // 部署工作流文件名，运行成功即上线
+	DeployStatus   string // 提交状态 context，state=success 即上线
+	DeployEnv      string // 环境名，默认 production
 }
 
 // ProcessTasks 领取并执行一批 Gitea 写操作任务，返回领取到的条数；未配置时返回 0。

@@ -13,6 +13,7 @@ import (
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/notify"
 	"github.com/zhouhao4221/lingo/internal/project"
+	"github.com/zhouhao4221/lingo/internal/release"
 	"github.com/zhouhao4221/lingo/internal/store"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 	"github.com/zhouhao4221/lingo/internal/webhook"
@@ -39,15 +40,16 @@ type Config struct {
 
 // Lingo 是一个灵问实例。
 type Lingo struct {
-	cfg     Config
-	log     *slog.Logger
-	gitea   *gitea.Client
-	store   *store.Store
-	webhook http.Handler
-	rest    http.Handler
-	worker  *worker.Worker
-	tickets *ticket.Service
-	tmpls   *gitea.TemplateCache
+	cfg      Config
+	log      *slog.Logger
+	gitea    *gitea.Client
+	store    *store.Store
+	webhook  http.Handler
+	rest     http.Handler
+	worker   *worker.Worker
+	tickets  *ticket.Service
+	releases *release.Service
+	tmpls    *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
 	projectsSynced bool // Config.Projects 已同步入库
@@ -103,6 +105,9 @@ func New(cfg Config) (*Lingo, error) {
 		IssueURL:    l.issueURL,
 		Declared:    l.declared,
 	}); err != nil {
+		return nil, fmt.Errorf("lingo: %w", err)
+	}
+	if l.releases, err = release.New(release.Options{Store: l.store, Git: worker.Git{R: l.gitea}}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	if l.worker, err = l.newWorker(); err != nil {
@@ -180,6 +185,8 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		LabelPrefix: l.labelPrefix(),
 		Templates:   l.tmpls,
 
+		Releases:       l.releases,
+		Git:            l.gitea,
 		Reminder:       l.tickets,
 		RemindEvery:    l.remindEvery(),
 		RemindProjects: l.projectKeys(),
@@ -256,10 +263,21 @@ func (l *Lingo) MCPHandler() http.Handler { return notImplemented() }
 // 并立即返回，由 Run 中的 worker 处理。未配置 Config.Gitea.WebhookSecret 时拒绝所有投递（503）。
 func (l *Lingo) WebhookHandler() http.Handler { return l.webhook }
 
-// MarkDeployed 告知灵问仓库 repo（"owner/name"）的版本 tag 已在环境 env 上线，
-// 关联工单变为已上线并通知提交人；用于部署流水线不经 Gitea Actions / 提交状态上报的场景。
+// MarkDeployed 告知灵问仓库 repo（"owner/name"）的版本 tag 已在环境 env（为空取 "production"）上线，
+// 修复版本不晚于它的工单变为已上线并通知提交人；用于部署流水线不经 Gitea Actions / 提交状态上报的场景。
+// 灵问尚未记录该版本（Release 或 tag 未同步）时返回 ErrNotFound。
 func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
-	return errNotImplemented
+	if repo == "" || tag == "" {
+		return fmt.Errorf("%w: repo and tag are required", ErrInvalidInput)
+	}
+	if err := l.ensureProjects(ctx); err != nil {
+		return err
+	}
+	err := l.releases.Deployed(ctx, release.Deployment{Repo: repo, Tag: tag, Env: env, Source: "manual"})
+	if errors.Is(err, release.ErrNotFound) {
+		return ErrNotFound
+	}
+	return err
 }
 
 // Run 运行后台任务直到 ctx 取消，取消后处理完在途任务再返回；多实例运行安全。

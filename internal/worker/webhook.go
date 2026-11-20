@@ -105,8 +105,7 @@ func (w *Worker) processDelivery(ctx context.Context, d store.Delivery) error {
 	case webhook.PullOpened, webhook.PullEdited, webhook.PullReopened, webhook.PullClosed, webhook.PullMerged:
 		return w.applyPull(ctx, ev)
 	}
-	// Release、tag、提交状态、Actions 运行由版本模块处理（尚未实现），先标记完成
-	return nil
+	return w.applyRelease(ctx, ev, d.ReceivedAt)
 }
 
 // needsBot 报告处理该类事件是否依赖机器人账号：评论要识别机器人自己发的，opened 要采信机器人建单的标记。
@@ -116,6 +115,36 @@ func needsBot(k webhook.Kind) bool {
 		return true
 	}
 	return false
+}
+
+// resolvedRef 是补全了仓库的 Issue 引用。
+type resolvedRef struct {
+	Repo   string
+	Number int64
+	Closes bool   // 任一处带关闭关键词
+	Text   string // 首次出现的写法，如 "#5"、"org/api#5"
+}
+
+// resolveRefs 补全引用的仓库并去重："#5" 与 "owner/repo#5" 可能指同一 Issue（仓库名不区分大小写）。
+func resolveRefs(repo string, refs []gitea.IssueRef) []resolvedRef {
+	var out []resolvedRef
+	seen := map[string]int{}
+	for _, r := range refs {
+		full, text := repo, "#"+strconv.FormatInt(r.Index, 10)
+		if r.Owner != "" {
+			full = r.Owner + "/" + r.Repo
+			text = full + text
+		}
+		k := strings.ToLower(full) + "#" + strconv.FormatInt(r.Index, 10)
+		closes := r.Action == gitea.RefCloses
+		if i, ok := seen[k]; ok {
+			out[i].Closes = out[i].Closes || closes
+			continue
+		}
+		seen[k] = len(out)
+		out = append(out, resolvedRef{Repo: full, Number: r.Index, Closes: closes, Text: text})
+	}
+	return out
 }
 
 func (w *Worker) applyIssue(ctx context.Context, ev *webhook.Event, received time.Time) error {
@@ -195,21 +224,8 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 func (w *Worker) applyPull(ctx context.Context, ev *webhook.Event) error {
 	u := ticket.PullUpdate{Change: ticket.PullChange(ev.Kind), Repo: ev.Repo, Number: ev.IssueNumber, Sender: ev.Sender,
 		DeliveryID: ev.DeliveryID, MergeCommit: ev.PullRequest.MergeCommitSHA}
-	// "#5" 与 "owner/repo#5" 可能指同一 Issue（仓库名不区分大小写）：补全仓库后合并，任一带关闭关键词即算关闭
-	seen := map[string]int{}
-	for _, r := range ev.Refs {
-		repo := ev.Repo
-		if r.Owner != "" {
-			repo = r.Owner + "/" + r.Repo
-		}
-		k := strings.ToLower(repo) + "#" + strconv.FormatInt(r.Index, 10)
-		closes := r.Action == gitea.RefCloses
-		if i, ok := seen[k]; ok {
-			u.Refs[i].Closes = u.Refs[i].Closes || closes
-			continue
-		}
-		seen[k] = len(u.Refs)
-		u.Refs = append(u.Refs, ticket.IssueRef{Repo: repo, Number: r.Index, Closes: closes})
+	for _, r := range resolveRefs(ev.Repo, ev.Refs) {
+		u.Refs = append(u.Refs, ticket.IssueRef{Repo: r.Repo, Number: r.Number, Closes: r.Closes})
 	}
 	if len(u.Refs) == 0 {
 		return nil

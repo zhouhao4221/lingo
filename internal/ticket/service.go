@@ -542,9 +542,14 @@ func (s *Service) IssueFailed(ctx context.Context, id int64, reason string) erro
 	})
 }
 
-func (s *Service) event(t *Ticket, kind notify.Kind, prev Status, actor, body string) notify.Event {
-	e := notify.Event{Kind: kind, ProjectID: t.ProjectID, ProjectKey: t.ProjectKey, TicketID: t.ID, TicketType: t.Type,
+// EventFor 构造工单的对外事件（不含链接），供其他领域（如版本）发事件使用。
+func EventFor(t *Ticket, kind notify.Kind, prev Status, actor, body string) notify.Event {
+	return notify.Event{Kind: kind, ProjectID: t.ProjectID, ProjectKey: t.ProjectKey, TicketID: t.ID, TicketType: t.Type,
 		Title: t.Title, Status: string(t.Status), PrevStatus: string(prev), UserID: t.UserID, ActorID: actor, Body: body}
+}
+
+func (s *Service) event(t *Ticket, kind notify.Kind, prev Status, actor, body string) notify.Event {
+	e := EventFor(t, kind, prev, actor, body)
 	if s.o.IssueURL != nil && t.Repo != "" && t.IssueNumber != 0 {
 		e.URL = s.o.IssueURL(t.Repo, t.IssueNumber)
 	}

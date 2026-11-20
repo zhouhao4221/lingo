@@ -63,33 +63,35 @@ func (s Status) forwarded() bool {
 
 // Ticket 是工单在领域层的视图。
 type Ticket struct {
-	ID           int64
-	ProjectID    int64
-	ProjectKey   string
-	RepoID       int64  // 未选定仓库时为 0
-	Repo         string // "owner/name"，未选定仓库时为空
-	Type         string // consult | bug | feature
-	Title        string
-	Body         string
-	Fields       map[string][]string // Issue 表单模板字段取值（按字段 ID）
-	Context      map[string]string   // 页面 URL、浏览器等提交环境
-	Version      string              // 提交人使用的版本
-	Status       Status
-	UserID       string // 提交人（接入方用户 ID）
-	UserName     string // 提交人姓名快照，仅展示
-	UserEmail    string
-	Conversation int64 // 从问答转出时的会话 ID
-	IssueNumber  int64 // 主 Issue 编号，Issue 创建前为 0
-	MergedInto   int64
-	TriageSince  *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	FixedTag     string     // 修复版本（只读）
-	DeployedAt   *time.Time // 上线时间（只读）
+	ID             int64
+	ProjectID      int64
+	ProjectKey     string
+	RepoID         int64  // 未选定仓库时为 0
+	Repo           string // "owner/name"，未选定仓库时为空
+	Type           string // consult | bug | feature
+	Title          string
+	Body           string
+	Fields         map[string][]string // Issue 表单模板字段取值（按字段 ID）
+	Context        map[string]string   // 页面 URL、浏览器等提交环境
+	Version        string              // 提交人使用的版本
+	Status         Status
+	UserID         string // 提交人（接入方用户 ID）
+	UserName       string // 提交人姓名快照，仅展示
+	UserEmail      string
+	Conversation   int64 // 从问答转出时的会话 ID
+	IssueNumber    int64 // 主 Issue 编号，Issue 创建前为 0
+	MergedInto     int64
+	TriageSince    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	FixedTag       string     // 修复版本（只读，取自 FixedReleaseID）
+	FixedReleaseID int64      // 最早包含修复的正式版本
+	DeployedAt     *time.Time // 上线时间
 
 	GiteaUpdatedAt time.Time // 最近一次采纳的 Issue updated_at，用于丢弃乱序到达的旧事件
 	FixedPR        int64
 	FixedCommit    string
+	FixedRepo      string // 修复 PR 所在仓库 "owner/name"；为空表示与工单仓库相同
 	Milestone      string
 	DueDate        *time.Time
 }

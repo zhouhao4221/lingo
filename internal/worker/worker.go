@@ -67,6 +67,10 @@ type Options struct {
 	LabelPrefix string                       // 默认 "lingo"
 	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
 
+	// Releases 非空时处理 Release、tag、提交状态与 Actions 运行事件；Repos 提供各仓库的上线信号配置。
+	Releases Releases
+	Git      GitReader // Releases 非空时必填
+
 	// Reminder 非空时每分钟清理孤儿附件；RemindEvery > 0 时同时检查待确认超时（triage.overdue）。
 	Reminder       Reminder
 	RemindEvery    time.Duration
@@ -143,6 +147,9 @@ func New(o Options) (*Worker, error) {
 	}
 	if o.LabelPrefix == "" {
 		o.LabelPrefix = "lingo"
+	}
+	if o.Releases != nil && o.Git == nil {
+		return nil, errors.New("worker: Git is required with Releases")
 	}
 	if o.Tasks != nil && (o.Issues == nil || o.Drafts == nil || o.Forwarding == nil) {
 		return nil, errors.New("worker: Issues, Drafts and Forwarding are required with Tasks")
