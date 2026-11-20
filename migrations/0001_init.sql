@@ -76,6 +76,8 @@ CREATE TABLE releases (
     prerelease       boolean     NOT NULL DEFAULT false,
     published_at     timestamptz,
     gitea_release_id bigint,
+    commit_sha       text        NOT NULL DEFAULT '', -- tag 所指提交，用于按提交识别上线
+    html_url         text        NOT NULL DEFAULT '',
     synced_at        timestamptz NOT NULL DEFAULT now(),
     UNIQUE (repo_id, tag)
 );

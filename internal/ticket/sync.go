@@ -272,7 +272,7 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 		}
 		if t.Status == StatusClosed || t.Status.fixed() {
 			// 修复被否定：清掉修复记录，之后的合并重新记录
-			t.Status, t.FixedPR, t.FixedCommit = StatusInProgress, 0, ""
+			t.Status, t.FixedPR, t.FixedCommit, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", 0, nil
 		}
 	case IssueDeleted:
 		t.Status = StatusAbnormal

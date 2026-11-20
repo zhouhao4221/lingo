@@ -44,6 +44,13 @@ func (c *Client) ListTags(ctx context.Context, owner, repo string, o ListOptions
 	return ts, resp, err
 }
 
+// GetTag 返回 tag（含所指提交）；不存在时 errors.Is(err, ErrNotFound)。
+func (c *Client) GetTag(ctx context.Context, owner, repo, tag string) (*Tag, error) {
+	var t Tag
+	_, err := c.do(ctx, "GET", repoPath(owner, repo)+"/tags/"+escRef(tag), nil, nil, &t)
+	return &t, err
+}
+
 // Compare 返回 base...head 之间的提交，用于找出两个版本 tag 之间包含的修复。
 func (c *Client) Compare(ctx context.Context, owner, repo, base, head string) (*Compare, error) {
 	var cp Compare

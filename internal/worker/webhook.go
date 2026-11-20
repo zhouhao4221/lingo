@@ -105,8 +105,7 @@ func (w *Worker) processDelivery(ctx context.Context, d store.Delivery) error {
 	case webhook.PullOpened, webhook.PullEdited, webhook.PullReopened, webhook.PullClosed, webhook.PullMerged:
 		return w.applyPull(ctx, ev)
 	}
-	// Release、tag、提交状态、Actions 运行由版本模块处理（尚未实现），先标记完成
-	return nil
+	return w.applyRelease(ctx, ev, d.ReceivedAt)
 }
 
 // needsBot 报告处理该类事件是否依赖机器人账号：评论要识别机器人自己发的，opened 要采信机器人建单的标记。
@@ -117,6 +116,8 @@ func needsBot(k webhook.Kind) bool {
 	}
 	return false
 }
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (w *Worker) applyIssue(ctx context.Context, ev *webhook.Event, received time.Time) error {
 	change := ticket.IssueChange(ev.Kind)

@@ -67,6 +67,9 @@ type Options struct {
 	LabelPrefix string                       // 默认 "lingo"
 	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
 
+	// Releases 非空时处理 Release、tag、提交状态与 Actions 运行事件；Repos 提供各仓库的上线信号配置。
+	Releases Releases
+
 	// Reminder 非空时每分钟清理孤儿附件；RemindEvery > 0 时同时检查待确认超时（triage.overdue）。
 	Reminder       Reminder
 	RemindEvery    time.Duration

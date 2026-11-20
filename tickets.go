@@ -402,7 +402,8 @@ func (l *Lingo) repoConfig(repo string) worker.RepoConfig {
 	for _, p := range l.cfg.Projects {
 		for _, r := range p.Repos {
 			if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
-				return worker.RepoConfig{Assignees: r.Assignees, Templates: r.Templates}
+				return worker.RepoConfig{Assignees: r.Assignees, Templates: r.Templates,
+					DeployWorkflow: r.Deploy.Workflow, DeployStatus: r.Deploy.StatusContext, DeployEnv: r.Deploy.Env}
 			}
 		}
 	}
