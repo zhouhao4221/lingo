@@ -69,6 +69,16 @@ func (m *memStore) Get(_ context.Context, id int64) (*Ticket, error) {
 	return nil, ErrNotFound
 }
 
+func (m *memStore) GetMany(ctx context.Context, ids []int64) ([]*Ticket, error) {
+	var out []*Ticket
+	for _, id := range ids {
+		if t, err := m.Get(ctx, id); err == nil {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) Insert(_ context.Context, t *Ticket) error {
 	t.ID = int64(len(m.tickets) + 1)
 	c := *t

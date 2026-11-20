@@ -109,8 +109,14 @@ func TestAddComment(t *testing.T) {
 	if _, err := s.AddComment(ctx, bob, fwd.ID, "x", nil); !errors.Is(err, ErrNotFound) {
 		t.Errorf("other user: %v", err)
 	}
-	if _, err := s.AddComment(ctx, agent, fwd.ID, "x", nil); !errors.Is(err, ErrForbidden) {
-		t.Errorf("agent: %v", err)
+	if ac, err := s.AddComment(ctx, agent, fwd.ID, "正在排查", nil); err != nil || ac.Source != "agent" {
+		t.Errorf("agent reply: %+v %v", ac, err)
+	}
+	if _, err := s.AddComment(ctx, agent, pending.ID, "x", nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("agent on pending ticket: %v", err)
+	}
+	if _, err := s.AddComment(ctx, agent, fwd.ID, "x", []int64{7}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("agent attachment: %v", err)
 	}
 	if _, err := s.AddComment(ctx, alice, fwd.ID, "x", []int64{8}); !errors.Is(err, ErrInvalid) {
 		t.Errorf("foreign attachment: %v", err)

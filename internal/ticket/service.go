@@ -479,6 +479,11 @@ func (s *Service) SetAutoForward(ctx context.Context, p auth.Principal, project,
 	})
 }
 
+// GetMany 一次读取多张工单（不做访问控制，调用方用 Visible 过滤）。
+func (s *Service) GetMany(ctx context.Context, ids []int64) ([]*Ticket, error) {
+	return s.o.Store.GetMany(ctx, ids)
+}
+
 // Draft 读取待建 Issue 的工单（供 worker 使用，不做访问控制）。
 func (s *Service) Draft(ctx context.Context, id int64) (*Ticket, error) {
 	return s.o.Store.Get(ctx, id)

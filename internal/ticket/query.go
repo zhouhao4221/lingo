@@ -39,6 +39,9 @@ const (
 	MaxLimit     = 200
 )
 
+// Limit 把请求的条数规范到 [1, MaxLimit]，≤0 时取 def。
+func Limit(n, def int) int { return limitOf(n, def) }
+
 func limitOf(n, def int) int {
 	switch {
 	case n <= 0:

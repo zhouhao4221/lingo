@@ -171,7 +171,8 @@ func (l *Lingo) GetAttachment(ctx context.Context, u User, id int64) (Attachment
 	return publicAttachment(a), a.Data, nil
 }
 
-// AddTicketComment 为工单补充说明（提交人本人或 reviewer / admin），可带已上传的附件；对提交人可见。
+// AddTicketComment 在工单上写一条对提交人可见的评论：提交人本人补充、reviewer / admin 答复（二者可带已上传的附件），
+// 或研发 Agent 回复提交人（agent 只能回复已有 Gitea Issue 的工单，否则返回 ErrConflict；不能带附件）。
 // 工单已转出时由机器人同步为 Issue 评论；提交人在 need_info 时补充，工单回到 in_progress。
 func (l *Lingo) AddTicketComment(ctx context.Context, u User, id int64, body string, attachmentIDs []int64) (Comment, error) {
 	c, err := l.tickets.AddComment(ctx, l.principal(u), id, body, attachmentIDs)

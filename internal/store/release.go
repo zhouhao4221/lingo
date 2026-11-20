@@ -21,6 +21,84 @@ func (s *Store) InReleaseTx(ctx context.Context, fn func(release.Tx) error) erro
 	return s.inTx(ctx, func(x *ticketTx) error { return fn(releaseTx{x}) })
 }
 
+// ListReleases 实现 release.Store：按记录 ID 倒序（与 before 游标一致，翻页不重不漏），通常即发布先后。
+func (s *Store) ListReleases(ctx context.Context, q release.Query) ([]*release.Release, error) {
+	owner, name, _ := strings.Cut(q.Repo, "/")
+	rows, err := s.db.QueryContext(ctx, "SELECT "+releaseColumns+`, rp.owner || '/' || rp.name FROM releases r
+		JOIN repos rp ON rp.id = r.repo_id JOIN projects p ON p.id = rp.project_id
+		WHERE ($7 OR p.key = ANY(($1::text)::text[])) AND ($2 = '' OR p.key = $2)
+		  AND ($3 = '' OR (lower(rp.owner) = lower($3) AND lower(rp.name) = lower($4)))
+		  AND ($5::bigint = 0 OR r.id < $5::bigint)
+		ORDER BY r.id DESC LIMIT $6`,
+		textArray(q.Projects), q.Project, owner, name, q.BeforeID, q.Limit, q.All)
+	if err != nil {
+		return nil, fmt.Errorf("store: list releases: %w", err)
+	}
+	defer rows.Close()
+	var out []*release.Release
+	for rows.Next() {
+		var r release.Release
+		if err := rows.Scan(&r.ID, &r.RepoID, &r.Tag, &r.Name, &r.Body, &r.Prerelease, &r.PublishedAt, &r.GiteaID, &r.CommitSHA,
+			&r.URL, &r.Repo); err != nil {
+			return nil, err
+		}
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// GetRelease 实现 release.Store。
+func (s *Store) GetRelease(ctx context.Context, id int64) (*release.Release, string, error) {
+	var r release.Release
+	var key string
+	err := s.db.QueryRowContext(ctx, "SELECT "+releaseColumns+`, rp.owner || '/' || rp.name, p.key FROM releases r
+		JOIN repos rp ON rp.id = r.repo_id JOIN projects p ON p.id = rp.project_id WHERE r.id = $1`, id).Scan(
+		&r.ID, &r.RepoID, &r.Tag, &r.Name, &r.Body, &r.Prerelease, &r.PublishedAt, &r.GiteaID, &r.CommitSHA, &r.URL, &r.Repo, &key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", release.ErrNotFound
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("store: release %d: %w", id, err)
+	}
+	return &r, key, nil
+}
+
+// ReleaseTicketIDs 实现 release.Store。
+func (s *Store) ReleaseTicketIDs(ctx context.Context, id int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT ticket_id FROM release_tickets WHERE release_id = $1 ORDER BY ticket_id", id)
+	if err != nil {
+		return nil, fmt.Errorf("store: release tickets: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var t int64
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ReleaseDeployments 实现 release.Store。
+func (s *Store) ReleaseDeployments(ctx context.Context, id int64) ([]release.DeploymentRecord, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT env, source, deployed_at FROM deployments WHERE release_id = $1 ORDER BY deployed_at", id)
+	if err != nil {
+		return nil, fmt.Errorf("store: release deployments: %w", err)
+	}
+	defer rows.Close()
+	var out []release.DeploymentRecord
+	for rows.Next() {
+		var d release.DeploymentRecord
+		if err := rows.Scan(&d.Env, &d.Source, &d.At); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 func (x releaseTx) RepoID(ctx context.Context, repo string) (int64, error) {
 	owner, name, ok := strings.Cut(repo, "/")
 	if !ok {

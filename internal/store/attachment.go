@@ -174,7 +174,7 @@ func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url
 func (s *Store) PendingComments(ctx context.Context, ticketID int64) ([]ticket.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ticket_id, source, author_id, author_name, body, public, created_at FROM ticket_comments
-		WHERE ticket_id = $1 AND source IN ('user', 'staff') AND public AND gitea_posted_id IS NULL AND forwarded_at IS NULL
+		WHERE ticket_id = $1 AND source IN ('user', 'staff', 'agent') AND public AND gitea_posted_id IS NULL AND forwarded_at IS NULL
 		  AND deleted_at IS NULL
 		ORDER BY created_at, id`, ticketID)
 	if err != nil {

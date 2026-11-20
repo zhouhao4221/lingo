@@ -208,7 +208,7 @@ type Ticket struct {
 // Comment 是工单评论：提交人补充、后台答复、研发在 Gitea 的回复。external 只能看到对外评论。
 type Comment struct {
 	ID         int64     `json:"id"`
-	Source     string    `json:"source"` // user | staff | gitea
+	Source     string    `json:"source"` // user（提交人）| staff（后台人员）| agent（研发 Agent 经 MCP 回复）| gitea（Gitea 评论）
 	AuthorID   string    `json:"author_id,omitempty"`
 	AuthorName string    `json:"author_name,omitempty"` // 来自 Gitea 时为研发账号 login
 	Body       string    `json:"body"`
@@ -225,6 +225,47 @@ type Attachment struct {
 	CommentID   int64     `json:"comment_id,omitempty"` // 随补充评论上传时为评论 ID
 	Forwarded   bool      `json:"forwarded"`            // 已上传到 Gitea
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ProjectInfo 是调用者可访问的项目及其仓库。
+type ProjectInfo struct {
+	Key         string     `json:"key"`
+	Name        string     `json:"name"`
+	Description string     `json:"description,omitempty"`
+	DefaultRepo string     `json:"default_repo,omitempty"`
+	Repos       []RepoInfo `json:"repos"`
+}
+
+// RepoInfo 是项目下的仓库。
+type RepoInfo struct {
+	Repo string   `json:"repo"` // "owner/name"
+	Kind RepoKind `json:"kind"`
+}
+
+// Release 是同步自 Gitea 的版本记录（或只打了 tag 的版本）。
+type Release struct {
+	ID          int64     `json:"id"`
+	Repo        string    `json:"repo"`
+	Tag         string    `json:"tag"`
+	Name        string    `json:"name,omitempty"`
+	Body        string    `json:"body,omitempty"` // 版本说明
+	Prerelease  bool      `json:"prerelease"`
+	PublishedAt time.Time `json:"published_at"`
+	URL         string    `json:"url,omitempty"`
+}
+
+// ReleaseDetail 是版本详情：关联的工单（按调用者可见性过滤）与上线记录。
+type ReleaseDetail struct {
+	Release
+	Tickets     []Ticket     `json:"tickets"`
+	Deployments []Deployment `json:"deployments"`
+}
+
+// Deployment 是一条上线记录。
+type Deployment struct {
+	Env    string    `json:"env"`
+	Source string    `json:"source"` // workflow | status | manual
+	At     time.Time `json:"at"`
 }
 
 // TicketTypeInfo 是某类工单可填写的表单，取自仓库 Issue 表单模板；没有模板时 Fields 为空（只填正文）。

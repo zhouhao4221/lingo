@@ -178,8 +178,9 @@ func dedupIDs(ids []int64) []int64 {
 	return out
 }
 
-// AddComment 写一条补充评论：提交人本人或后台人员（reviewer / admin）可写，对提交人可见；工单已转出时
-// 由机器人同步为 Issue 评论（建单前的补充随 Issue 正文一起转出）。提交人在 need_info 时补充，工单回到 in_progress。
+// AddComment 写一条对提交人可见的评论：提交人本人补充、后台人员（reviewer / admin）答复，或研发 Agent
+// 回复（agent 只能对已有 Gitea Issue 的工单回复）。工单已转出时由机器人同步为 Issue 评论（建单前的补充随 Issue 正文一起转出）。
+// 提交人在 need_info 时补充，工单回到 in_progress。
 func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, body string, attachmentIDs []int64) (*Comment, error) {
 	body = strings.TrimSpace(body)
 	if body == "" && len(attachmentIDs) == 0 {
@@ -201,7 +202,13 @@ func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, bo
 		case t.UserID == p.ID && p.Role == auth.RoleExternal:
 			source = "user"
 		case p.Role == auth.RoleAgent:
-			return fmt.Errorf("%w: agents reply in Gitea", ErrForbidden)
+			source = "agent" // 研发 Agent 经 MCP 回复提交人：由机器人同步到 Issue
+			if len(attachmentIDs) > 0 {
+				return fmt.Errorf("%w: agents cannot attach files", ErrInvalid)
+			}
+			if t.IssueNumber == 0 || t.Status == StatusAbnormal {
+				return fmt.Errorf("%w: ticket %d has no Gitea issue yet", ErrConflict, t.ID)
+			}
 		default:
 			return ErrNotFound
 		}
