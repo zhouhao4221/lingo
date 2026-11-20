@@ -3,9 +3,9 @@
 | 字段 | 内容 |
 |-----|------|
 | 产品名称 | 灵问 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
-| 文档版本 | v1.8 |
+| 文档版本 | v1.24 |
 | 创建日期 | 2026-11-13 |
-| 最后更新 | 2026-11-17 |
+| 最后更新 | 2026-11-21 |
 | 文档负责人 | haiqing |
 | 状态 | 草稿 |
 
@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.24 | 2026-11-21 | haiqing | 新增需求多视角补充（REQ-001；视角标签 `<前缀>/视角/<视角名>`）：固定视角使用者 / 业务方 / 专家 / 决策者（`User.Perspective`，由 `Authenticate` 提供，与权限角色无关）；需求类工单可由各视角追加补充（转出前后均可、只追加），Issue 正文按视角分层渲染（标记区块，单向同步）并打固定视角标签；必填视角（`Config` 默认、`Project` 覆盖）与缺失标注；新增事件 `ticket.perspective_added`、`ticket.perspective_missing`；数据隔离新增两条例外：补充人姓名写入 Issue、视角补充的追加与查询由接入方判定权限 |
 | v1.23 | 2026-11-21 | haiqing | 数据模型精简：表名统一加 `lingo_` 前缀（避免与接入方业务表重名）；表从 23 张减到 12 张——尚未实现的问答、知识库、需求评审、业务数据审计、多仓库拆单的表待实现时再经新迁移加入，自动转出覆盖值、上线记录并为项目 / 版本上的 jsonb 列，后台确认记录并入工单审计（`triage.*`），Webhook 连通时间与对账游标合并为 `lingo_repo_state`；附件不再存数据库：由接入方自己的附件系统保存与鉴权，提交时传引用（ID、文件名、地址），转出时经可选的 `Config.FetchAttachment` 读取内容上传为 Gitea 附件，未配置时只把地址写进 Issue；去掉 `UploadAttachment` / `GetAttachment`、`POST /attachments`、`GET /attachments/{id}` 与 `MaxAttachmentBytes`；`conversation_id` 随问答一并延后 |
 | v1.22 | 2026-11-21 | haiqing | 模型用量与缓存：解析接口返回的 token 用量（含命中服务端前缀缓存的部分：OpenAI `cached_tokens`、DeepSeek `prompt_cache_hit_tokens`），每次调用写入 `llm_usage` 并记日志；`l.LLMUsage` / `GET /usage` / MCP `get_llm_usage`（admin）按天、用途、模型汇总并给出缓存命中率；自定义模型可实现 `UsageModel` 报告用量；建单整理的提示词按“不变在前、变化在后”排布；进程内缓存（Issue 模板、标签、整理结果）统一为带过期时间与容量上限的 `internal/cache` |
 | v1.21 | 2026-11-21 | haiqing | 内置模型适配：`NewOpenAIModel`（OpenAI 及兼容接口，Chat Completions + Embeddings）、`NewDeepSeekModel`（DeepSeek，无向量接口）；标准库 HTTP 实现，429 / 5xx / 网络错误重试两次 |
@@ -162,10 +163,11 @@ journey
 | P0 | 项目与对接仓库 | 在代码中声明项目及其多个仓库（前后端等）；按项目提问，Issue 落到项目内合适的仓库 | 用户按产品提问，问题直达对应仓库 | 是 |
 | P0 | 工单提交 | 咨询、Bug、需求；文字 + 截图 / 附件，接口供接入方弹窗组件调用；转出时整理为结构化 Issue | AI 研发可直接处理 | 是 |
 | P0 | 后台确认转出 | 后台人员确认后转出到 Gitea，或直接答复、合并、驳回；按项目与类型设自动 / 手动开关 | 过滤无效反馈，Issue 质量可控 | 是 |
-| P0 | 数据隔离 | 工单、会话、附件按提交人 ID 归属，按角色与项目控制可见范围；个人信息不外传 Gitea | 用户之间、项目之间互不可见 | 是 |
+| P0 | 数据隔离 | 工单、会话、附件按提交人 ID 归属，按角色与项目控制可见范围；个人信息不外传 Gitea（需求视角补充人姓名除外，见 3.2.2.1） | 用户之间、项目之间互不可见 | 是 |
 | P0 | Gitea 同步 | 按仓库 Issue 模板建 Issue + 作用域标签；评论双向往来；Webhook 回流评论、指派、标签、里程碑、PR 合并、关闭 / 重开；定时对账 | 研发留在 Gitea 工作 | 是 |
 | P0 | 信息反馈（Notifier） | 工单 / 版本事件经 outbox 回调接入方 `Notifier`，失败重试 | 提交人及时获知进度，渠道由接入方决定 | 是 |
 | P1 | 需求评审 | 内部人员评审需求类工单并回复，结论回写 Gitea | 评审有入口、有记录 | 是 |
+| P2 | 需求多视角补充 | 使用者 / 业务方 / 专家 / 决策者分视角追加补充需求，Issue 按视角分层呈现并标注缺失视角 | 开发者看清各方意见、发现信息缺口 | 否 |
 | P0 | 身份与固定角色 | 预置固定角色，身份由接入方经 `Authenticate` 提供并映射角色；按角色控制权限 | 复用接入方用户体系，权限清晰 | 是 |
 | P0 | 知识库 | 结案工单与问答会话抽取问答对，供问答 Agent 检索 | 问答 Agent 的知识来源 | 是 |
 | P1 | 对接版本记录 | 同步 Gitea Release，版本说明入知识库，工单关联修复版本并通知；识别上线 | 用户知道问题在哪个版本解决、何时上线 | 否 |
@@ -225,6 +227,7 @@ flowchart LR
 | `get_ticket` | 查询工单状态、对调用者可见的评论与附件列表、Issue 与修复版本 | 两侧 |
 | `list_my_tickets` | 本人提交的工单 | 用户侧 AI 客户端 |
 | `reply_ticket` | 在工单中留言：提交人补充、后台答复，或研发 Agent 回复提交人（同步为带对外标记的 Issue 评论并通知提交人） | 两侧 |
+| `add_perspective` / `list_perspectives` | 以调用者视角追加需求补充 / 查询按视角分组的补充与缺失视角（见 3.2.2.1，名称暂定） | 两侧 |
 | `list_events` | 按 ID 增量拉取进展事件 | 两侧 |
 | `list_triage` / `forward_ticket` / `answer_ticket` / `merge_ticket` / `reject_ticket` | 后台确认（reviewer / admin） | 研发负责人 |
 | `list_releases` / `get_release` | 版本记录、关联工单与上线记录 | 两侧 |
@@ -244,7 +247,9 @@ flowchart LR
 
 #### 3.2.0.2 身份与固定角色（由接入方提供）
 
-**功能描述**：lingo 不存用户表、不做登录、不发令牌。接入方通过 `Config.Authenticate`（`func(r *http.Request) (lingo.User, error)`）解析请求身份，返回 `lingo.User{ID, Name, Email, Role, Scopes}`：`ID` 为接入方自己的用户 ID，`Role` 由接入方把自身用户映射为下列固定角色之一，可选 `Projects` 限制可访问的项目（见 3.2.0.3）。系统预置一组固定角色，不支持自定义角色或细粒度权限配置。
+**功能描述**：lingo 不存用户表、不做登录、不发令牌。接入方通过 `Config.Authenticate`（`func(r *http.Request) (lingo.User, error)`）解析请求身份，返回 `lingo.User{ID, Name, Email, Role, Perspective, Scopes}`：`ID` 为接入方自己的用户 ID，`Role` 由接入方把自身用户映射为下列固定角色之一，可选 `Projects` 限制可访问的项目（见 3.2.0.3）。系统预置一组固定角色，不支持自定义角色或细粒度权限配置。
+
+`Perspective` 是与权限无关的**视角**（使用者 `user` / 业务方 `business` / 专家 `expert` / 决策者 `leader`），由接入方按自身用户身份映射，为空视为 `user`；只决定需求补充归入哪一层，不授予任何权限（见 3.2.2.1）。
 
 **固定角色**：
 
@@ -262,6 +267,7 @@ flowchart LR
 - 角色集合固定，权限随角色内置，不提供角色编辑
 - 登录、用户管理、令牌签发由接入方负责；每个 AI Agent 的身份如何区分由接入方在 `Authenticate` 中处理
 - 同一角色的多个用户权限相同，操作记录按 `User.ID` 留痕
+- 视角集合同样固定，与角色相互独立；每个用户同一时刻只有一个视角
 
 **验收标准**：
 - [ ] `Authenticate` 返回不同角色时，只能执行该角色权限内的操作
@@ -451,15 +457,16 @@ flowchart LR
 
 - **越权返回 404**：访问不属于自己的工单、附件时返回“不存在”，不暴露其存在
 - **存储层强制带范围**：store 层查询函数必须接收访问范围（用户 ID / 项目集合），不提供不带范围的列表查询；测试覆盖越权场景
-- **对 Gitea 脱敏**：Issue 与评论中不写提交人姓名、邮箱、手机号与业务系统账号，只写工单号（`lingo:ticket=<id>`）；研发需要联系提交人时通过灵问评论往来。附件转出前由后台人员勾选（3.2.1.2）
+- **对 Gitea 脱敏**：Issue 与评论中不写提交人姓名、邮箱、手机号与业务系统账号，只写工单号（`lingo:ticket=<id>`）；例外：需求视角补充在 Issue 中标注补充人 `User.Name`（不含邮箱与 `User.ID`，见 3.2.2.1）；研发需要联系提交人时通过灵问评论往来。附件转出前由后台人员勾选（3.2.1.2）
 - **研发回复的可见性**：只有按 `ReplyMode` 判定为对外的评论（3.2.2）才出现在提交人的工单详情中
 - **知识库**：从工单抽取问答对时去除提交人身份信息与附件内容；业务数据工具的结果不入库（3.2.0.5）
 - **合并工单**：被合并工单的提交人只能看到目标工单的对外进展，看不到其他提交人的内容与附件
+- **需求视角补充（例外）**：项目内需求类工单的视角补充，追加与查询不受 `external` 仅本人可见的限制，只校验 `User.Projects` 与工单类型，“谁能补充 / 查看哪条需求”由接入方在调用前判断；查询只返回视角补充，不含其他评论、附件与提交人 Email / ID（见 3.2.2.1）
 
 **验收标准**：
 - [ ] `external` 用户用他人的工单 ID、附件 ID 访问时返回 404
 - [ ] `agent` / `reviewer` 无法访问 `User.Projects` 之外项目的工单
-- [ ] 转出的 Issue 正文与评论中不包含提交人姓名、邮箱
+- [ ] 转出的 Issue 正文与评论中不包含提交人姓名、邮箱（视角补充区块中的补充人姓名除外）
 - [ ] 知识库条目中不出现提交人身份信息
 
 #### 3.2.1 接入与配置
@@ -642,7 +649,7 @@ flowchart LR
   1. `GET /version` ≥ 1.22，低于 1.25 时关闭 Actions 上线信号并告警；`GET /settings/api`、`/settings/attachment` 读取分页上限与附件限制
   2. 每个仓库可访问、`has_issues=true`、未启用外部 Issue 跟踪
   3. 机器人对每个仓库有 write 权限（`GET /collaborators/{bot}/permission`）
-  4. 标签齐全（缺的补上）
+  4. 标签齐全（缺的补上，含固定视角标签，以默认前缀为例 `lingo/视角/使用者`、`lingo/视角/业务方`、`lingo/视角/专家`、`lingo/视角/决策者`）
   5. Webhook 存在、已启用、事件订阅完整，测试投递成功；失败时提示检查 Gitea `[security] ALLOWED_HOST_LIST`
   6. `Repo.Templates` 中的模板文件存在，`GET /issue_config/validate` 通过
   7. 配置了 `Repo.Deploy.Workflow` 时，`GET /actions/workflows` 中能找到该工作流
@@ -651,6 +658,7 @@ flowchart LR
 **模板提单**：
 - `GET /repos/{o}/{r}/issue_templates` 读取仓库 `.gitea/ISSUE_TEMPLATE/`（兼容 `.github/`）下的模板；工单类型到模板的映射见 `Repo.Templates`，未配置时按模板 `labels` 匹配类型标签，都没有时用内置结构（现象 / 复现步骤 / 期望 / 环境）
 - 表单模板（YAML）中必填的 `input` / `textarea` / `dropdown` / `checkboxes` 字段作为问答 Agent 的追问槽位，`dropdown` 选项作为候选；字段补齐后才建单
+- 需求类工单正文另含视角分层区块 `<!-- lingo:perspectives -->…<!-- /lingo:perspectives -->`，由 lingo 单向维护（见 3.2.2.1）
 - 正文按 Gitea 表单渲染格式 `### <label>\n\n<value>` 拼接，末尾附项目、仓库、`reported_version`、环境，以及隐藏标记 `<!-- lingo:ticket=<id> -->`；不写入提交人邮箱等个人信息
 - `POST /issues`：标题 = 模板标题前缀 + 摘要，`labels` 传标签 id，`assignees` 取 `Repo.Assignees`；附件建单后经 `POST /issues/{index}/assets` 上传并在正文引用
 - 幂等：outbox 重试建单前按隐藏标记查重，避免重复 Issue
@@ -714,8 +722,48 @@ flowchart LR
 | Gitea 不可用 | 工单正常创建，Issue 创建任务进入 outbox 重试 |
 | Issue 在 Gitea 被删除 | 工单标记 `abnormal`，待定是否通知提交人 |
 | Webhook 乱序到达 | 按 Issue `updated_at` 比较，旧于本地记录的事件只记 ticket_events 不改状态；有疑问时以 `GET /issues/{index}` 当前状态为准 |
+| Issue 正文中的视角区块被删除或手改 | 下次补充重写时按 lingo 数据渲染：标记缺失则追加到正文末尾，标记内手改内容被覆盖 |
 | outbox 重试时 Issue 其实已创建 | 按隐藏标记 `lingo:ticket=<id>` 查到后补记关联，不再新建 |
 | 仓库无模板 / 模板不合法 | 用内置结构建单；启动时 `GET /issue_config/validate` 报告问题 |
+
+#### 3.2.2.1 需求多视角补充（REQ-001）
+
+**功能描述**：一条需求通常要靠不同身份的人一起补全：使用者说明现象和诉求，业务方说明影响范围，专家给出方案建议，决策者决定做不做、先后顺序和期限。为此在权限角色之外引入固定的**视角**（`lingo.Perspective`），由接入方在 `Authenticate` 返回的 `User.Perspective` 中提供。需求类工单（`feature`）可以由不同视角的人分别追加补充，转出前后都可以补充；Issue 正文按视角分段展示，并打上对应的视角标签；缺少必填视角时在 Issue 中标明并通知接入方。详见 [REQ-001](active/REQ-001-需求多视角分层补充.md)。
+
+**固定视角**：
+
+| 视角 | 标识 | Issue 段落 | 主要补充 | 标签 |
+|-----|-----|-----|-----|-----|
+| 使用者 | `user` | 使用者反馈 | 现象、诉求、复现步骤 | `lingo/视角/使用者` |
+| 业务方 | `business` | 业务补充 | 业务场景、影响范围、业务价值 | `lingo/视角/业务方` |
+| 专家 | `expert` | 专家意见 | 专业判断、方案建议、风险与约束 | `lingo/视角/专家` |
+| 决策者 | `leader` | 决策意见 | 做不做、优先级、范围取舍、期限 | `lingo/视角/决策者` |
+
+**用户故事**：
+> 作为开发者（AI 研发 Agent / reviewer），我希望打开 Issue 就能看清使用者要什么、业务方说影响多大、专家怎么建议、决策者怎么定，并知道还缺哪个视角。
+
+**业务规则**：
+- **视角与权限无关**：视角只用来给补充内容分类，不授予任何权限。`User.Perspective` 为空时按 `user` 处理，其他非法值返回参数错误。`admin` 不是视角，管理员补充时同样以自己的 `Perspective` 发言。视角集合与视角标签固定，不可配置或修改
+- **只对需求类工单开放**：只有 `feature` 工单能补充；工单关闭后不能再补充。补充只能追加，不能修改或撤回；同一视角补充多次时按时间依次列出。单段内容不能为空，不超过 10000 字，本期不带附件
+- **提交即首段**：提交需求时，提交内容记为提交人视角的第一段补充
+- **谁能补充、谁能查看由接入方判断**：lingo 只校验三点：工单存在、属于调用者 `User.Projects` 内的项目、类型为需求。追加和查询都不受 `external` 只能看本人数据的限制（3.2.0.6 的例外），接入方必须在调用前自行判断。查询只返回视角补充（视角、姓名、时间、内容），不含工单其他评论、附件和提交人的 Email / ID
+- **Issue 分层区块**：lingo 只维护 Issue 正文中 `<!-- lingo:perspectives -->…<!-- /lingo:perspectives -->` 之间的区块，区块外的内容不改动。每段标注视角、补充人 `User.Name`（为空时不写）和时间。首段的原始提交已经按表单模板渲染在正文里，区块中只写"原始提交见正文"，不重复内容。区块被删掉后，下次重写时追加到正文末尾。reviewer 经 `forward_ticket` 修改正文后转出时，区块追加在其正文末尾；正文中已有区块标记的，标记内的内容用 lingo 渲染结果替换
+- **同步时机**：转出时把所有补充渲染进区块；转出后每次补充，经 outbox 重写区块、打视角标签，并在 Issue 下发一条评论提示（如"业务方 · 张三 补充了内容"）。多次补充同时发生时，以库中最新状态渲染
+- **单向同步**：视角补充以 lingo 数据库为准，只从 lingo 写到 Issue，lingo 不从 Issue 正文读回区块内容。收到 `issues` edited 事件时不做视角相关处理，避免 lingo 自己的改动形成回环。在 Gitea 里手改区块内容，下次重写时会被覆盖
+- **必填视角**：`Config` 配置默认必填视角，`Project` 可以覆盖；不配置就不检查。有缺失时，区块末尾写"缺少：xxx"，该标注随每次重写更新；转出时如果缺必填视角，发出 `ticket.perspective_missing`。本期不发"已补齐"事件
+- **标签**：Issue 中出现过哪个视角，就打哪个视角标签；标签名为 `<GiteaConfig.LabelPrefix>/视角/<视角名>`（下表按默认前缀 `lingo` 书写），视角名固定不可修改，前缀与其他 lingo 标签一致；仓库中没有这些标签时，`Run` 初始化时补齐
+
+**接口**（名称暂定，开发阶段确定）：
+- Go：`l.AddPerspective(ctx, user, ticketID, content)`、`l.ListPerspectives(ctx, user, ticketID)`（按视角分组，并返回缺失的必填视角）
+- REST：`POST /tickets/{id}/perspectives`、`GET /tickets/{id}/perspectives`
+- MCP：`add_perspective`、`list_perspectives`
+
+**验收标准**：
+- [ ] 使用者提交需求，业务方和决策者补充后转出：Gitea Issue 中按视角分段，每段有姓名和时间，并带对应视角标签
+- [ ] 转出后专家补充：Issue 区块自动更新，出现 `lingo/视角/专家` 标签，Issue 下有补充提示评论；区块外的正文不变
+- [ ] 配置必填视角后，缺少决策意见的需求在 Issue 中标注"缺少：决策意见"，接入方收到 `ticket.perspective_missing`；补齐后标注消失
+- [ ] 咨询 / Bug 工单、已关闭工单补充失败；`User.Projects` 之外的项目返回 404
+- [ ] lingo 自己改正文触发的 Webhook 不会引起视角数据变化，也不会再次重写
 
 #### 3.2.3 信息反馈（Notifier）
 
@@ -735,6 +783,8 @@ flowchart LR
 | `review.decision` | 需求评审结论 | 通知提交人 |
 | `ticket.released` | 修复版本已发布 | 通知提交人 |
 | `ticket.deployed` | 修复版本已上线 | 通知提交人 |
+| `ticket.perspective_added` | 需求新增一段视角补充（`Body` 为视角） | 提醒关注该需求的人 |
+| `ticket.perspective_missing` | 需求转出时缺少必填视角（`Body` 为缺失视角） | 提醒相应视角的人补充 |
 
 **Event 字段**：`ID`（全局递增，去重与排序用）、`Kind`、`At`、`ProjectKey`、`TicketID`、`TicketType`、`Title`、`Status`、`PrevStatus`、`Action`、`UserID`（提交人）、`ActorID`（触发人，系统触发为空）、`Body`、`URL`。字段足够直接使用，多数场景不必回查。
 
@@ -747,7 +797,7 @@ flowchart LR
 | REST | `GET /tickets/{id}`、`GET /triage`、`GET /triage/summary`、`GET /events?after=` | 接入方后台前端 |
 | 变更流 | `l.ListEvents(ctx, user, afterID, limit)` / `GET /events?after=<ID>` | 把工单同步进接入方自己的库；补回漏处理的推送（P1，可在 MVP 之后提供） |
 
-推送与变更流使用同一个 `Event.ID`：接入方平时收推送，定期按最后处理的 ID 拉变更流对账。变更流同样按 3.2.0.6 做数据隔离：`external` 只能拉到本人工单的对外事件，`triage.*` 事件只对 `reviewer` / `admin` 可见。
+推送与变更流使用同一个 `Event.ID`：接入方平时收推送，定期按最后处理的 ID 拉变更流对账。变更流同样按 3.2.0.6 做数据隔离：`external` 只能拉到本人工单的对外事件，`triage.*` 事件只对 `reviewer` / `admin` 可见；`ticket.perspective_*` 的可见范围同其他 `ticket.*` 事件，其他视角的人是否需要收到由接入方经推送自行分发。
 
 **业务规则**：
 - 事件先写入 `events` 表（分配 `ID`）并写 `outbox`，再由 worker 投递给 `Notifier`，失败按策略重试并记录尝试次数
@@ -943,8 +993,9 @@ flowchart LR
 | `l.SetAutoForward(ctx, user, project, type, on)` / `l.ResetAutoForward(ctx, user, project, type)` | Go | 运行时覆盖 / 恢复自动转出开关（admin） |
 | `l.CreateTicket(ctx, user, TicketInput)` | Go | 提交工单，按开关自动转出或进入待确认 |
 | `l.ForwardTicket` / `l.AnswerTicket` / `l.MergeTicket` / `l.RejectTicket` | Go | 后台处理待确认工单（reviewer / admin），发出 `triage.resolved` |
+| `l.AddPerspective` / `l.ListPerspectives` | Go | 需求视角补充的追加与查询（见 3.2.2.1，名称暂定） |
 | `l.GetTicket` / `l.ListTriage` / `l.TriageSummary` / `l.ListEvents` | Go | 查询工单、待确认列表、待确认统计、变更流（均接收 `lingo.User` 做数据隔离） |
-| 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2（`/ticket-types`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
+| 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2、3.2.2.1（`/tickets/{id}/perspectives`、`/ticket-types`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
 | `l.MarkDeployed(ctx, repo, tag, env)` | Go | 接入方部署完成后告知灵问某仓库版本已上线（`repo` 为 `owner/name`） |
 | `l.Handler()`（示例挂载 `/lingo/`） | - | REST JSON：提问、工单、评审、知识库、版本，路径待设计 |
 | `l.MCPHandler()`（示例挂载 `/mcp`） | POST/GET | MCP Server（Streamable HTTP），工具见 3.2.0.1、3.2.0.4；提问 / 工单接口支持 `project`、`repo`、`version` 参数 |
@@ -1021,7 +1072,7 @@ flowchart LR
 
 | 编号 | 标题 | 模块 | 状态 | 创建日期 | 完成日期 |
 |-----|------|------|------|---------|---------|
-| - | 暂无需求 | - | - | - | - |
+| REQ-001 | 需求多视角分层补充 | 工单 | 评审通过 | 2026-11-21 | - |
 
 ---
 
