@@ -2,11 +2,14 @@ package tests
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zhouhao4221/lingo"
@@ -184,3 +187,206 @@ func TestPerspectivesREST(t *testing.T) {
 }
 
 func jsonString(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+// newPerspectiveLingo 创建按请求头 X-User / X-Role / X-Perspective 认证、放行全部视角补充的实例。
+func newPerspectiveLingo(t *testing.T, g *giteaServer) (*lingo.Lingo, *sql.DB) {
+	t.Helper()
+	db := testDB(t, true)
+	srv := httptest.NewServer(g)
+	t.Cleanup(srv.Close)
+	l, err := lingo.New(lingo.Config{
+		DB: db, Model: nopModel{},
+		Gitea:                lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s"},
+		RequiredPerspectives: []lingo.Perspective{lingo.PerspectiveLeader},
+		Projects:             []lingo.Project{{Key: "demo", Name: "Demo", Repos: []lingo.Repo{{Owner: "demo", Name: "api"}}}},
+		Authenticate: func(r *http.Request) (lingo.User, error) {
+			if r.Header.Get("X-User") == "" {
+				return lingo.User{}, errors.New("anonymous")
+			}
+			return lingo.User{ID: r.Header.Get("X-User"), Name: r.Header.Get("X-User"), Role: lingo.Role(r.Header.Get("X-Role")),
+				Perspective: lingo.Perspective(r.Header.Get("X-Perspective"))}, nil
+		},
+		AuthorizePerspective: func(context.Context, lingo.User, lingo.Ticket, bool) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l, db
+}
+
+// 并发补充后 Issue 区块与库一致；改标题 / 备注转出区块照常生成；lingo 自己改正文触发的 edited Webhook 不引起视角变化；
+// 视角事件对 external 只在本人工单可见。
+func TestPerspectivesConcurrentWebhookAndEvents(t *testing.T) {
+	g := &giteaServer{templates: "[]"}
+	l, db := newPerspectiveLingo(t, g)
+	ctx := context.Background()
+	tk, err := l.CreateTicket(ctx, alice, lingo.TicketInput{Type: lingo.TicketFeature, Content: "批量导出"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ForwardTicket(ctx, rita, tk.ID, lingo.ForwardOptions{Title: "支持批量导出", Note: "优先处理"}); err != nil {
+		t.Fatal(err)
+	}
+	runLingo(t, l)
+	waitTicket(t, l, alice, tk.ID, "open")
+	g.mu.Lock()
+	created, _ := g.created[0]["body"].(string)
+	g.mu.Unlock()
+	if !strings.Contains(created, "<!-- lingo:perspectives -->") || !strings.Contains(created, "> 优先处理") || !strings.Contains(created, "> 缺少：决策意见") {
+		t.Fatalf("forwarded with title/note:\n%s", created)
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := []lingo.Perspective{lingo.PerspectiveBusiness, lingo.PerspectiveExpert, lingo.PerspectiveLeader, ""}[i%4]
+			u := lingo.User{ID: fmt.Sprintf("c%d", i), Name: fmt.Sprintf("人员%d", i), Role: lingo.RoleExternal, Perspective: p}
+			_, err := l.AddPerspective(ctx, u, tk.ID, fmt.Sprintf("并发补充-%d", i))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, func() bool {
+		var pending int
+		_ = db.QueryRow("SELECT count(*) FROM lingo_outbox WHERE kind = 'gitea' AND status <> 'done'").Scan(&pending)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return pending == 0 && len(g.comments) == n
+	})
+	g.mu.Lock()
+	body, _ := g.issues[0]["body"].(string)
+	edits := len(g.edits)
+	g.mu.Unlock()
+	ps, err := l.ListPerspectives(ctx, rita, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, gr := range ps.Groups {
+		for _, e := range gr.Entries {
+			total++
+			if !e.Original && strings.Count(body, "> "+e.Content+"\n") != 1 {
+				t.Errorf("issue body has %q %d times", e.Content, strings.Count(body, "> "+e.Content+"\n"))
+			}
+		}
+	}
+	if total != n+1 || strings.Count(body, "<!-- lingo:perspectives -->") != 1 || strings.Contains(body, "缺少") || len(ps.Missing) != 0 {
+		t.Errorf("entries %d, missing %v, body:\n%s", total, ps.Missing, body)
+	}
+
+	// lingo 自己改正文触发的 edited Webhook：不新增视角数据，也不再重写正文
+	var rows, tasks int
+	_ = db.QueryRow("SELECT count(*) FROM lingo_ticket_perspectives").Scan(&rows)
+	_ = db.QueryRow("SELECT count(*) FROM lingo_outbox WHERE kind = 'gitea'").Scan(&tasks)
+	payload, _ := json.Marshal(map[string]any{"action": "edited",
+		"issue":      map[string]any{"id": 1000, "number": 40, "state": "open", "body": body, "user": map[string]any{"login": "lingo-bot"}, "updated_at": "2026-11-21T10:00:00Z"},
+		"changes":    map[string]any{"body": map[string]any{"from": created}},
+		"repository": map[string]any{"full_name": "demo/api"}, "sender": map[string]any{"login": "lingo-bot"}})
+	if w := deliver(l.WebhookHandler(), "p-edit-1", "issues", string(payload), "s"); w.Code != 200 {
+		t.Fatalf("deliver = %d %s", w.Code, w.Body)
+	}
+	waitProcessed(t, db, 1)
+	var rows2, tasks2 int
+	_ = db.QueryRow("SELECT count(*) FROM lingo_ticket_perspectives").Scan(&rows2)
+	_ = db.QueryRow("SELECT count(*) FROM lingo_outbox WHERE kind = 'gitea'").Scan(&tasks2)
+	g.mu.Lock()
+	edits2 := len(g.edits)
+	g.mu.Unlock()
+	if rows2 != rows || tasks2 != tasks || edits2 != edits {
+		t.Errorf("edited webhook changed state: rows %d→%d tasks %d→%d edits %d→%d", rows, rows2, tasks, tasks2, edits, edits2)
+	}
+
+	// 视角事件：提交人看得到本人工单的，其他 external 看不到
+	count := func(u lingo.User) int {
+		evs, err := l.ListEvents(ctx, u, 0, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := 0
+		for _, e := range evs {
+			if e.Kind == lingo.EventTicketPerspectiveAdded || e.Kind == lingo.EventTicketPerspectiveMissing {
+				c++
+			}
+		}
+		return c
+	}
+	waitFor(t, func() bool { return count(rita) == n+1 })
+	if got := count(alice); got != n+1 {
+		t.Errorf("owner sees %d perspective events", got)
+	}
+	if got := count(lingo.User{ID: "c1", Role: lingo.RoleExternal}); got != 0 {
+		t.Errorf("other external sees %d perspective events", got)
+	}
+}
+
+func TestPerspectivesMCP(t *testing.T) {
+	g := &giteaServer{templates: "[]"}
+	l, _ := newPerspectiveLingo(t, g)
+	tk, err := l.CreateTicket(context.Background(), alice, lingo.TicketInput{Type: lingo.TicketFeature, Content: "导出"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := l.MCPHandler()
+	call := func(user, persp, tool string, args any) (map[string]any, bool) {
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": args}})
+		r := httptest.NewRequest("POST", "/mcp", strings.NewReader(string(b)))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-User", user)
+		r.Header.Set("X-Role", "external")
+		r.Header.Set("X-Perspective", persp)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		var resp struct {
+			Result struct {
+				IsError           bool           `json:"isError"`
+				StructuredContent map[string]any `json:"structuredContent"`
+				Content           []struct{ Text string }
+			}
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s: %d %s", tool, w.Code, w.Body)
+		}
+		if resp.Result.IsError {
+			return map[string]any{"error": resp.Result.Content[0].Text}, false
+		}
+		return resp.Result.StructuredContent, true
+	}
+	added, ok := call("b1", "business", "add_perspective", map[string]any{"id": tk.ID, "content": "影响 30 家门店"})
+	if !ok || added["perspective"] != "business" || added["author_name"] != "b1" || added["content"] != "影响 30 家门店" {
+		t.Fatalf("add_perspective = %v", added)
+	}
+	if out, ok := call("b1", "boss", "add_perspective", map[string]any{"id": tk.ID, "content": "x"}); ok || !strings.Contains(out["error"].(string), "invalid input") {
+		t.Errorf("bad perspective = %v", out)
+	}
+	if out, ok := call("b1", "business", "add_perspective", map[string]any{"content": "x"}); ok || !strings.Contains(out["error"].(string), "id is required") {
+		t.Errorf("missing id = %v", out)
+	}
+	list, ok := call("e1", "expert", "list_perspectives", map[string]any{"id": tk.ID})
+	if !ok {
+		t.Fatalf("list_perspectives = %v", list)
+	}
+	// 与 Go 方法结果一致
+	want, err := l.ListPerspectives(context.Background(), rita, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, _ := json.Marshal(want)
+	var wantMap map[string]any
+	_ = json.Unmarshal(wantJSON, &wantMap)
+	if jsonString(list) != jsonString(wantMap) {
+		t.Errorf("mcp = %s\ngo  = %s", jsonString(list), jsonString(wantMap))
+	}
+	if gs := list["groups"].([]any); len(gs) != 2 || list["missing"].([]any)[0] != "leader" {
+		t.Errorf("groups/missing = %v", list)
+	}
+}

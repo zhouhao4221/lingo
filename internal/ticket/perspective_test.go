@@ -242,3 +242,18 @@ func TestAbnormalWithIssueEnqueues(t *testing.T) {
 		t.Errorf("tasks = %+v", m.tasks)
 	}
 }
+
+func TestForwardWithoutRequiredEmitsNoMissing(t *testing.T) {
+	m := newMem(Ticket{ID: 1, ProjectKey: "demo", Type: TypeFeature, Status: StatusPendingTriage, UserID: "u1"})
+	s := newPerspectiveService(t, m, nil)
+	if _, err := s.Forward(context.Background(), reviewer, 1, ForwardInput{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(kindsOf(m.events, notify.TicketPerspectiveMissing)); n != 0 {
+		t.Errorf("missing events without required perspectives: %d", n)
+	}
+	set, _ := s.ListPerspectives(context.Background(), reviewer, 1)
+	if len(set.Missing) != 0 {
+		t.Errorf("missing = %v", set.Missing)
+	}
+}
