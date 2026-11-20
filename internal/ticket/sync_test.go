@@ -164,17 +164,21 @@ func (m *memStore) AddComment(_ context.Context, c Comment) (int64, error) {
 
 func (m *memStore) MarkCommentsForwarded(context.Context, int64, []int64) error { return nil }
 
-func (m *memStore) CountAttachments(_ context.Context, id int64) (int, error) {
-	n := 0
+func (m *memStore) AttachmentIDs(_ context.Context, id int64) ([]string, error) {
+	var out []string
 	if t, ok := m.tickets[id]; ok {
-		n = len(t.Attachments)
+		for _, a := range t.Attachments {
+			out = append(out, a.ID)
+		}
 	}
 	for _, c := range m.notes {
 		if c.TicketID == id {
-			n += len(c.Attachments)
+			for _, a := range c.Attachments {
+				out = append(out, a.ID)
+			}
 		}
 	}
-	return n, nil
+	return out, nil
 }
 func (m *memStore) Enqueue(_ context.Context, t Task) error {
 	if _, ok := m.tasks[t.Key]; !ok {

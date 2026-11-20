@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -197,7 +198,7 @@ func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, 
 	return nil
 }
 
-// enqueueCreate 入队建 Issue；attachments 为要转出的工单附件，nil 表示全部。
+// enqueueCreate 入队建 Issue；attachments 为后台人员勾选转出的附件 ID，nil 表示全部。
 func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, attachments *[]string, retry time.Time) error {
 	key := OpCreateIssue + ":ticket:" + strconv.FormatInt(t.ID, 10)
 	if !retry.IsZero() {
@@ -205,7 +206,18 @@ func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note stri
 	}
 	payload := map[string]any{"forwarded_by": forwardedBy, "note": note}
 	if attachments != nil {
-		payload["attachment_ids"] = dedupStrings(*attachments) // 非 nil：空切片表示一个都不转出（null 表示全部）
+		// 记下未勾选的附件（含建单前补充评论的）：之后才补充的附件不受这次勾选限制
+		have, err := tx.AttachmentIDs(ctx, t.ID)
+		if err != nil {
+			return err
+		}
+		exclude := []string{}
+		for _, id := range have {
+			if !slices.Contains(*attachments, id) {
+				exclude = append(exclude, id)
+			}
+		}
+		payload["exclude_attachment_ids"] = exclude
 	}
 	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue, Payload: payload})
 }

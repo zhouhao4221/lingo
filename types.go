@@ -220,7 +220,7 @@ type Comment struct {
 // 传入 ID、Name、URL（及可选的 ContentType、Size），转出时写进 Gitea Issue；配置了 Config.FetchAttachment 时
 // 读取内容上传为 Gitea 附件。
 type Attachment struct {
-	ID          string `json:"id"`                     // 接入方的附件 ID，必填，同一工单或评论内唯一
+	ID          string `json:"id"`                     // 接入方的附件 ID，必填，在整个工单（含补充评论）内唯一
 	Name        string `json:"name"`                   // 文件名；为空时取 ID
 	URL         string `json:"url,omitempty"`          // http(s) 绝对地址，写进 Issue 供研发查看（访问控制由接入方负责）
 	ContentType string `json:"content_type,omitempty"` // 图片类型上传到 Gitea 后在 Issue 中直接显示

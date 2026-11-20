@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -20,22 +21,19 @@ func marshalAttachments(as []ticket.Attachment) ([]byte, error) {
 	return json.Marshal(as)
 }
 
-// ticketAttachmentsSQL 列出工单的附件：工单本身的（comment_id = 0）与各补充评论的，按评论、序号排序。
-// $1 工单 ID；$2 为真时排除内部评论与已删除评论的附件。
-const ticketAttachmentsSQL = `
-	SELECT 0 AS comment_id, x.ord, x.a, true AS fwd FROM lingo_tickets t, jsonb_array_elements(t.attachments) WITH ORDINALITY x(a, ord)
-	WHERE t.id = $1
-	UNION ALL
-	SELECT c.id, x.ord, x.a, c.forwarded_at IS NOT NULL FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) WITH ORDINALITY x(a, ord)
-	WHERE c.ticket_id = $1 AND (NOT $2 OR (c.public AND c.deleted_at IS NULL))`
-
-type scannedAttachment struct {
-	ticket.Attachment
-	inBody bool // 工单本身的附件，或已随 Issue 正文转出的补充评论的附件
-}
-
-func (s *Store) queryAttachments(ctx context.Context, ticketID int64, publicOnly bool) ([]scannedAttachment, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT comment_id, a, fwd FROM ("+ticketAttachmentsSQL+") q ORDER BY comment_id, ord", ticketID, publicOnly)
+// queryAttachments 列出工单的附件：工单本身的（CommentID = 0）与各补充评论的，按评论、序号排序，并回填提交人。
+// commentID 非 0 时只取该评论的；publicOnly 时排除内部评论与已删除评论的附件。
+func (s *Store) queryAttachments(ctx context.Context, ticketID, commentID int64, publicOnly bool) ([]scannedAttachment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT comment_id, user_id, a, in_body FROM (
+			SELECT 0::bigint AS comment_id, t.user_id, x.ord, x.a, true AS in_body
+			FROM lingo_tickets t, jsonb_array_elements(t.attachments) WITH ORDINALITY x(a, ord)
+			WHERE t.id = $1 AND $2 = 0
+			UNION ALL
+			SELECT c.id, c.author_id, x.ord, x.a, c.forwarded_at IS NOT NULL
+			FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) WITH ORDINALITY x(a, ord)
+			WHERE c.ticket_id = $1 AND ($2 = 0 OR c.id = $2) AND (NOT $3 OR (c.public AND c.deleted_at IS NULL))
+		) q ORDER BY comment_id, ord`, ticketID, commentID, publicOnly)
 	if err != nil {
 		return nil, fmt.Errorf("store: ticket attachments: %w", err)
 	}
@@ -44,20 +42,27 @@ func (s *Store) queryAttachments(ctx context.Context, ticketID int64, publicOnly
 	for rows.Next() {
 		var a scannedAttachment
 		var raw []byte
-		if err := rows.Scan(&a.CommentID, &raw, &a.inBody); err != nil {
+		if err := rows.Scan(&a.CommentID, &a.UserID, &raw, &a.inBody); err != nil {
 			return nil, err
 		}
+		cid, uid := a.CommentID, a.UserID
 		if err := json.Unmarshal(raw, &a.Attachment); err != nil {
 			return nil, fmt.Errorf("store: decode attachment: %w", err)
 		}
+		a.CommentID, a.UserID = cid, uid
 		out = append(out, a)
 	}
 	return out, rows.Err()
 }
 
+type scannedAttachment struct {
+	ticket.Attachment
+	inBody bool // 工单本身的附件，或已随 Issue 正文转出的补充评论的附件
+}
+
 // TicketAttachments 实现 ticket.QueryStore。
 func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]ticket.Attachment, error) {
-	all, err := s.queryAttachments(ctx, ticketID, publicOnly)
+	all, err := s.queryAttachments(ctx, ticketID, 0, publicOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -70,32 +75,19 @@ func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnl
 	return out, nil
 }
 
-// ForwardAttachments 返回一次转出涉及的附件（含已处理的），按顺序：commentID 为 0 时为随 Issue 转出的附件——工单本身的
-// （ids 非 nil 时只取其中勾选的），以及已写进 Issue 正文的补充评论的（之后由提交人加的，不受勾选限制）；否则为该评论的附件。
-func (s *Store) ForwardAttachments(ctx context.Context, ticketID, commentID int64, ids *[]string) ([]ticket.Attachment, error) {
-	all, err := s.queryAttachments(ctx, ticketID, false)
+// ForwardAttachments 返回一次转出涉及的附件（含已处理的），按顺序：commentID 为 0 时为随 Issue 转出的附件——工单本身的，
+// 以及已写进 Issue 正文的补充评论的；否则为该评论的附件。exclude 是后台人员转出时未勾选的附件 ID，尚未处理的跳过。
+func (s *Store) ForwardAttachments(ctx context.Context, ticketID, commentID int64, exclude []string) ([]ticket.Attachment, error) {
+	all, err := s.queryAttachments(ctx, ticketID, commentID, false)
 	if err != nil {
 		return nil, err
 	}
-	var pick map[string]bool
-	if ids != nil {
-		pick = map[string]bool{}
-		for _, id := range *ids {
-			pick[id] = true
-		}
-	}
 	var out []ticket.Attachment
 	for _, a := range all {
-		switch {
-		case commentID != 0:
-			if a.CommentID != commentID {
-				continue
-			}
-		case a.CommentID == 0:
-			if pick != nil && !pick[a.ID] && !a.Forwarded() {
-				continue
-			}
-		case !a.inBody:
+		if commentID == 0 && !a.inBody {
+			continue
+		}
+		if !a.Forwarded() && slices.Contains(exclude, a.ID) {
 			continue
 		}
 		out = append(out, a.Attachment)
@@ -111,11 +103,13 @@ func (s *Store) MarkAttachment(ctx context.Context, ticketID int64, a ticket.Att
 	}
 	const update = ` SET attachments = (SELECT COALESCE(jsonb_agg(CASE WHEN x.a->>'id' = $2 THEN x.a || $3::jsonb ELSE x.a END ORDER BY x.ord), '[]')
 		FROM jsonb_array_elements(attachments) WITH ORDINALITY x(a, ord))`
+	const hasID = `attachments @> jsonb_build_array(jsonb_build_object('id', $2::text))` // 确实有这个附件，否则报错而不是静默成功
 	var res sql.Result
 	if a.CommentID == 0 {
-		res, err = s.db.ExecContext(ctx, "UPDATE lingo_tickets"+update+" WHERE id = $1", ticketID, a.ID, patch)
+		res, err = s.db.ExecContext(ctx, "UPDATE lingo_tickets"+update+" WHERE id = $1 AND "+hasID, ticketID, a.ID, patch)
 	} else {
-		res, err = s.db.ExecContext(ctx, "UPDATE lingo_ticket_comments"+update+" WHERE id = $1 AND ticket_id = $4", a.CommentID, a.ID, patch, ticketID)
+		res, err = s.db.ExecContext(ctx, "UPDATE lingo_ticket_comments"+update+" WHERE id = $1 AND ticket_id = $4 AND "+hasID,
+			a.CommentID, a.ID, patch, ticketID)
 	}
 	if err != nil {
 		return fmt.Errorf("store: mark attachment %s: %w", a.ID, err)
@@ -184,11 +178,22 @@ func (x *ticketTx) MarkCommentsForwarded(ctx context.Context, ticketID int64, id
 	return nil
 }
 
-func (x *ticketTx) CountAttachments(ctx context.Context, ticketID int64) (int, error) {
-	var n int
-	if err := x.tx.QueryRowContext(ctx, `SELECT (SELECT jsonb_array_length(attachments) FROM lingo_tickets WHERE id = $1)
-		+ COALESCE((SELECT sum(jsonb_array_length(attachments)) FROM lingo_ticket_comments WHERE ticket_id = $1), 0)`, ticketID).Scan(&n); err != nil {
-		return 0, fmt.Errorf("store: count attachments: %w", err)
+func (x *ticketTx) AttachmentIDs(ctx context.Context, ticketID int64) ([]string, error) {
+	rows, err := x.tx.QueryContext(ctx, `
+		SELECT a->>'id' FROM lingo_tickets t, jsonb_array_elements(t.attachments) a WHERE t.id = $1
+		UNION ALL
+		SELECT a->>'id' FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) a WHERE c.ticket_id = $1`, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("store: attachment ids: %w", err)
 	}
-	return n, nil
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

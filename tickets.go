@@ -43,8 +43,8 @@ type ForwardOptions struct {
 	Type  TicketType
 	Repo  string // "owner/name"，须属于工单所在项目
 	Note  string // 补充说明，写入 Issue
-	// AttachmentIDs 是要随 Issue 转出的工单附件 ID（截图可能含敏感信息，由后台人员勾选）；nil 表示全部，空切片表示不转出。
-	// 提交人之后补充的附件不受勾选限制。
+	// AttachmentIDs 是要随 Issue 转出的附件 ID（截图可能含敏感信息，由后台人员勾选；含转出前补充评论的附件，附件 ID
+	// 在整个工单内唯一）；nil 表示全部，空切片表示不转出。转出之后提交人再补充的附件不受勾选限制。
 	AttachmentIDs *[]string
 }
 
@@ -103,7 +103,11 @@ func (l *Lingo) SetAutoForward(ctx context.Context, u User, project string, t Ti
 	if err := l.ensureProjects(ctx); err != nil {
 		return err
 	}
-	return publicErr(l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), &on))
+	if err := l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), &on); err != nil {
+		return publicErr(err)
+	}
+	l.log.Info("auto-forward override set", "project", project, "type", t, "on", on, "by", u.ID) // 开关变更留痕
+	return nil
 }
 
 // ResetAutoForward 删除运行时覆盖，恢复为 Project.AutoForward 的默认值（仅 admin）。
@@ -111,7 +115,11 @@ func (l *Lingo) ResetAutoForward(ctx context.Context, u User, project string, t 
 	if err := l.ensureProjects(ctx); err != nil {
 		return err
 	}
-	return publicErr(l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), nil))
+	if err := l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), nil); err != nil {
+		return publicErr(err)
+	}
+	l.log.Info("auto-forward override reset", "project", project, "type", t, "by", u.ID)
+	return nil
 }
 
 // ListMyTickets 返回 u 本人提交的工单，新的在前；status 可空；beforeID 为上一页最后一条的 ID（首页传 0）；
@@ -129,10 +137,14 @@ func (l *Lingo) ticketDetail(ctx context.Context, u User, id int64) (Ticket, []C
 	}
 	out := make([]Attachment, 0, len(as))
 	for _, a := range as {
-		out = append(out, Attachment{ID: a.ID, Name: a.Name, URL: a.URL, ContentType: a.ContentType, Size: a.Size, CommentID: a.CommentID,
-			Forwarded: a.Forwarded(), GiteaURL: a.GiteaURL, Error: a.Error})
+		out = append(out, publicAttachment(a))
 	}
 	return l.publicTicket(t), publicComments(cs), out, nil
+}
+
+func publicAttachment(a ticket.Attachment) Attachment {
+	return Attachment{ID: a.ID, Name: a.Name, URL: a.URL, ContentType: a.ContentType, Size: a.Size, CommentID: a.CommentID,
+		Forwarded: a.Forwarded(), GiteaURL: a.GiteaURL, Error: a.Error}
 }
 
 func internalAttachments(as []Attachment) []ticket.Attachment {

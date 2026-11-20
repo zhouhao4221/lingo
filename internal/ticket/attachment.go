@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -17,7 +18,7 @@ import (
 // Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存，灵问只记录引用（ID、文件名、地址），
 // 以及转出到 Gitea 的结果。随工单 / 评论一起存在 jsonb 列中。
 type Attachment struct {
-	ID          string `json:"id"`            // 接入方的附件 ID，同一工单或评论内唯一
+	ID          string `json:"id"`            // 接入方的附件 ID，在整个工单（含补充评论）内唯一
 	Name        string `json:"name"`          // 文件名
 	URL         string `json:"url,omitempty"` // http(s) 地址，转出时写进 Issue
 	ContentType string `json:"content_type,omitempty"`
@@ -27,7 +28,8 @@ type Attachment struct {
 	GiteaURL string          `json:"gitea_url,omitempty"` // 上传到 Gitea 后的下载地址
 	Error    string          `json:"error,omitempty"`     // 上传失败的原因（不再重试）
 
-	CommentID int64 `json:"-"` // 读取时回填：所属评论，工单本身的附件为 0
+	CommentID int64  `json:"-"` // 读取时回填：所属评论，工单本身的附件为 0
+	UserID    string `json:"-"` // 读取时回填：提交该附件的用户（工单提交人或评论作者）
 }
 
 // AttachmentState 是附件转出到 Gitea 的结果。
@@ -43,7 +45,7 @@ const (
 // Forwarded 报告附件是否已转出（已上传、已写入链接或已写明失败），研发能在 Issue 中看到。
 func (a Attachment) Forwarded() bool { return a.State != AttachmentPending }
 
-// MaxAttachmentsPerTicket 是单个工单（含补充评论）的附件上限。
+// MaxAttachmentsPerTicket 是单个工单（含补充评论）的附件上限；附件 ID 在整个工单内唯一（后台人员按 ID 勾选转出）。
 const MaxAttachmentsPerTicket = 10
 
 const (
@@ -132,31 +134,24 @@ func cleanFilename(name string) string {
 	return name
 }
 
-// checkAttachmentLimit 检查工单（含补充评论）加上 n 个附件后不超过上限。
-func checkAttachmentLimit(ctx context.Context, tx Tx, ticketID int64, n int) error {
-	if n == 0 {
+// checkAttachments 检查工单（含补充评论）加上 add 后不超过上限，且附件 ID 不与已有的重复。
+func checkAttachments(ctx context.Context, tx Tx, ticketID int64, add []Attachment) error {
+	if len(add) == 0 {
 		return nil
 	}
-	have, err := tx.CountAttachments(ctx, ticketID)
+	have, err := tx.AttachmentIDs(ctx, ticketID)
 	if err != nil {
 		return err
 	}
-	if have+n > MaxAttachmentsPerTicket {
+	if len(have)+len(add) > MaxAttachmentsPerTicket {
 		return fmt.Errorf("%w: at most %d attachments per ticket", ErrInvalid, MaxAttachmentsPerTicket)
 	}
-	return nil
-}
-
-func dedupStrings(ids []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, id := range ids {
-		if id = strings.TrimSpace(id); id != "" && !seen[id] {
-			seen[id] = true
-			out = append(out, id)
+	for _, a := range add {
+		if slices.Contains(have, a.ID) {
+			return fmt.Errorf("%w: attachment id %q already used in this ticket", ErrInvalid, a.ID)
 		}
 	}
-	return out
+	return nil
 }
 
 // AddComment 写一条对提交人可见的评论：提交人本人补充、后台人员（reviewer / admin）答复，或研发 Agent
@@ -200,7 +195,7 @@ func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, bo
 		if t.Status == StatusMerged {
 			return fmt.Errorf("%w: ticket %d was merged into %d", ErrConflict, t.ID, t.MergedInto)
 		}
-		if err := checkAttachmentLimit(ctx, tx, t.ID, len(attachments)); err != nil {
+		if err := checkAttachments(ctx, tx, t.ID, attachments); err != nil {
 			return err
 		}
 		c = &Comment{TicketID: t.ID, Source: source, AuthorID: p.ID, AuthorName: p.Name, Body: body, Public: true, At: s.o.Now(),

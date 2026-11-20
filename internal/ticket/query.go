@@ -177,6 +177,11 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Tick
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if ext {
+		for i := range as { // 转出失败的原因（Gitea / 接入方返回的错误原文）与 Gitea 地址是内部信息
+			as[i].Error, as[i].GiteaURL = "", ""
+		}
+	}
 	return t, cs, as, nil
 }
 

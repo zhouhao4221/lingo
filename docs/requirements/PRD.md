@@ -548,8 +548,8 @@ sequenceDiagram
 
 **业务规则**：
 - 身份由接入方 `Authenticate` 从请求中解析（同域 cookie 或接入方令牌），lingo 不另发凭据；未登录用户能否提交由接入方在 `Authenticate` 中决定
-- 附件由接入方自己的附件系统保存，文件的类型、大小与下载权限由接入方控制；lingo 只记录引用（随工单 / 补充评论存为 jsonb），单工单含补充最多 10 个；`id` 必填且不重复，`url` 须为 http(s) 绝对地址
-- 转出：配置了 `Config.FetchAttachment` 时经它读取内容上传为 Issue / 评论附件（图片在 Issue 中直接显示），读取失败或被 Gitea 拒收（超出 `/settings/attachment` 限制）时在 Issue 中写链接并注明；未配置时只把附件地址写进 Issue。lingo 不会自己请求附件地址（避免以服务端身份访问用户填写的地址）
+- 附件由接入方自己的附件系统保存，文件的类型、大小与下载权限由接入方控制；lingo 只记录引用（随工单 / 补充评论存为 jsonb），单工单含补充最多 10 个；`id` 必填且在整个工单内唯一（后台人员按 ID 勾选转出，勾选同样作用于转出前补充评论的附件），`url` 须为 http(s) 绝对地址
+- 转出：配置了 `Config.FetchAttachment` 时经它读取内容上传为 Issue / 评论附件（图片在 Issue 中直接显示，单个最多 100 MB）。附件 ID 由前端传入、lingo 不校验归属，`FetchAttachment` 收到提交人 ID，接入方必须校验附件属于该用户，否则返回 `ErrNotFound` / `ErrForbidden`；读取被拒、连续 3 次临时失败、或被 Gitea 拒收（超出 `/settings/attachment` 限制或实例关闭附件）时在 Issue 中写链接并注明，失败原因只对后台人员可见；未配置时只把附件地址写进 Issue。lingo 不会自己请求附件地址（避免以服务端身份访问用户填写的地址）
 - 截图由弹窗在浏览器侧完成（如截取当前页面或粘贴剪贴板图片），lingo 只接收图片文件
 - 弹窗提交与问答转出走同一套工单逻辑；直接提交时，问答 Agent 仍可按模板必填字段追问缺失信息（追问经 `GET /tickets/{id}` 返回的 `pending_questions` 呈现）
 

@@ -56,18 +56,35 @@ func TestCleanFilenameLongExtension(t *testing.T) {
 	}
 }
 
-func TestForwardEmptySelection(t *testing.T) {
+func TestForwardSelection(t *testing.T) {
 	m := newMem()
 	s := newService(t, m, nil)
 	ctx := context.Background()
-	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x"})
-	none := []string{}
-	if _, err := s.Forward(ctx, reviewer, tk.ID, ForwardInput{Attachments: &none}); err != nil {
+	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x", Attachments: []Attachment{{ID: "a"}, {ID: "b"}}})
+	// 转出前的补充：附件 ID 在整个工单内唯一，补充评论的附件同样受勾选限制
+	if _, err := s.AddComment(ctx, alice, tk.ID, "再补一张", []Attachment{{ID: "a"}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("duplicate id across ticket: %v", err)
+	}
+	if _, err := s.AddComment(ctx, alice, tk.ID, "再补一张", []Attachment{{ID: "c"}}); err != nil {
+		t.Fatal(err)
+	}
+	pick := []string{"a"}
+	if _, err := s.Forward(ctx, reviewer, tk.ID, ForwardInput{Attachments: &pick}); err != nil {
 		t.Fatal(err)
 	}
 	for _, task := range m.tasks {
-		if ids, ok := task.Payload["attachment_ids"].([]string); !ok || ids == nil {
-			t.Errorf("empty selection encoded as %#v", task.Payload["attachment_ids"])
+		if ex, ok := task.Payload["exclude_attachment_ids"].([]string); !ok || len(ex) != 2 || ex[0] != "b" || ex[1] != "c" {
+			t.Errorf("exclude = %#v", task.Payload["exclude_attachment_ids"])
+		}
+	}
+	// 未勾选（nil）：全部转出，不记排除
+	tk2, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "y", Attachments: []Attachment{{ID: "a"}}})
+	if _, err := s.Forward(ctx, reviewer, tk2.ID, ForwardInput{}); err != nil {
+		t.Fatal(err)
+	}
+	for k, task := range m.tasks {
+		if task.TicketID == tk2.ID && task.Payload["exclude_attachment_ids"] != nil {
+			t.Errorf("%s: %#v", k, task.Payload)
 		}
 	}
 }

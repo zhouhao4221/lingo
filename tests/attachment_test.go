@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,16 +38,18 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 	srv := httptest.NewServer(g)
 	t.Cleanup(srv.Close)
 	files := map[string][]byte{"shot": pngData, "trace": []byte("stack"), "log": []byte("panic: boom")}
+	var fetchedBy sync.Map // 附件 ID → FetchAttachment 收到的提交人
 	l, err := lingo.New(lingo.Config{
 		DB: db, Model: nopModel{},
 		Gitea: lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s"},
 		Projects: []lingo.Project{{Key: "demo", AutoForward: map[lingo.TicketType]bool{lingo.TicketBug: true},
 			Repos: []lingo.Repo{{Owner: "demo", Name: "api"}}}},
 		Authenticate: headerAuth,
-		FetchAttachment: func(_ context.Context, a lingo.Attachment) (io.ReadCloser, error) {
+		FetchAttachment: func(_ context.Context, userID string, a lingo.Attachment) (io.ReadCloser, error) {
+			fetchedBy.Store(a.ID, userID)
 			b, ok := files[a.ID]
-			if !ok {
-				return nil, errors.New("file deleted")
+			if !ok { // 接入方校验归属：不是该用户的附件
+				return nil, fmt.Errorf("file %s not owned by %s: %w", a.ID, userID, lingo.ErrNotFound)
 			}
 			return io.NopCloser(bytes.NewReader(b)), nil
 		},
@@ -124,12 +128,22 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 		t.Fatalf("attachments = %v", detail["attachments"])
 	}
 	first := as[0].(map[string]any)
-	if first["id"] != "shot" || first["name"] != "截图.png" || first["forwarded"] != true || first["gitea_url"] != "http://g/attachments/1" {
+	if first["id"] != "shot" || first["name"] != "截图.png" || first["forwarded"] != true {
 		t.Errorf("first = %v", first)
 	}
-	if gone := as[1].(map[string]any); gone["forwarded"] != true || !strings.Contains(gone["error"].(string), "file deleted") {
-		t.Errorf("gone = %v", gone)
+	if gone := as[1].(map[string]any); gone["forwarded"] != true || gone["error"] != nil || gone["gitea_url"] != nil {
+		t.Errorf("gone (external) = %v", gone) // 失败原因与 Gitea 地址是内部信息
 	}
+	_, staff, _ := c.do("r1", "reviewer", "GET", "/tickets/"+jsonNum(id), nil)
+	if gone := staff["attachments"].([]any)[1].(map[string]any); !strings.Contains(gone["error"].(string), "not owned by u1") {
+		t.Errorf("gone (reviewer) = %v", gone)
+	}
+	fetchedBy.Range(func(k, v any) bool {
+		if v != "u1" {
+			t.Errorf("FetchAttachment(%v) user = %v", k, v)
+		}
+		return true
+	})
 	var uploaded int
 	if err := db.QueryRow(`SELECT (SELECT count(*) FROM lingo_tickets t, jsonb_array_elements(t.attachments) a WHERE a->>'state' = 'uploaded')
 		+ (SELECT count(*) FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) a WHERE a->>'state' = 'uploaded')`).Scan(&uploaded); err != nil || uploaded != 3 {

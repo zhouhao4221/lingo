@@ -46,8 +46,8 @@ type Tx interface {
 	AddComment(ctx context.Context, c Comment) (int64, error)
 	// MarkCommentsForwarded 标记工单的补充评论已随 Issue 正文转出。
 	MarkCommentsForwarded(ctx context.Context, ticketID int64, ids []int64) error
-	// CountAttachments 返回工单已关联的附件数。
-	CountAttachments(ctx context.Context, ticketID int64) (int, error)
+	// AttachmentIDs 返回工单（含补充评论）已有附件的 ID。
+	AttachmentIDs(ctx context.Context, ticketID int64) ([]string, error)
 	// Enqueue 写一条 Gitea 写操作任务；Key 已存在时忽略（同一操作只入队一次）。
 	Enqueue(ctx context.Context, t Task) error
 	// RepointMerged 把合并到 from 的工单改为合并到 to。
