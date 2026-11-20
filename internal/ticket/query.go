@@ -95,7 +95,7 @@ type QueryStore interface {
 	Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]Comment, error)
 	AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error)
 	// TicketAttachments 返回工单的附件（不含内容）；publicOnly 时排除随内部评论上传的，forwardedOnly 时只含已上传到 Gitea 的。
-	TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]*Attachment, error)
+	TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]Attachment, error)
 }
 
 // ListTriage 列出调用者项目范围内的待确认工单（reviewer / admin），按进入待确认的先后（ID 升序）。
@@ -162,7 +162,7 @@ func (s *Service) Comments(ctx context.Context, p auth.Principal, id int64) ([]C
 }
 
 // Detail 返回工单、评论与附件（一次鉴权），可见范围同 Comments。
-func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, []*Attachment, error) {
+func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, []Attachment, error) {
 	t, err := s.Get(ctx, p, id)
 	if err != nil {
 		return nil, nil, nil, err
@@ -172,7 +172,7 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Tick
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// agent 只看已转出到 Gitea 的附件：后台人员没勾选的截图可能含敏感信息
+	// agent 只看已转出到 Gitea 的附件：后台人员没勾选的截图可能含敏感信息（附件地址本身的访问控制由接入方负责）
 	as, err := s.queries().TicketAttachments(ctx, id, ext, p.Role == auth.RoleAgent)
 	if err != nil {
 		return nil, nil, nil, err

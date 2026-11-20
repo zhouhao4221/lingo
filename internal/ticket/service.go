@@ -32,8 +32,6 @@ func sourceOf(ctx context.Context) string {
 type ServiceOptions struct {
 	Store   Store
 	Queries QueryStore // 列表与变更流查询；为空时用 Store（若其实现了 QueryStore）
-	// Attachments 是附件仓储；为空时用 Store（若其实现了 AttachmentStore）。
-	Attachments AttachmentStore
 	// AutoForward 返回代码中声明的默认值（lingo.Project.AutoForward），运行时覆盖优先；为空时一律手动确认。
 	AutoForward func(projectKey, typ string) bool
 	IssueURL    func(repo string, number int64) string
@@ -68,11 +66,6 @@ func NewService(o ServiceOptions) (*Service, error) {
 		}
 		o.Queries = q
 	}
-	if o.Attachments == nil {
-		if a, ok := o.Store.(AttachmentStore); ok {
-			o.Attachments = a
-		}
-	}
 	if o.Declared == nil {
 		o.Declared = func(string, string) bool { return true }
 	}
@@ -89,8 +82,8 @@ type NewTicket struct {
 	Fields      map[string][]string
 	Context     map[string]string
 	Version     string
-	Source      string  // api | mcp | go
-	Attachments []int64 // 调用者已上传、尚未关联的附件
+	Source      string       // api | mcp | go
+	Attachments []Attachment // 接入方附件系统中的附件引用
 }
 
 const (
@@ -113,6 +106,10 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 	if in.Body == "" && !textutil.AnyValue(in.Fields) {
 		return nil, fmt.Errorf("%w: content is required", ErrInvalid)
 	}
+	atts, err := CleanAttachments(in.Attachments)
+	if err != nil {
+		return nil, err
+	}
 	titleAuto := in.Title == ""
 	if titleAuto {
 		in.Title = summarize(in.Body, in.Fields)
@@ -121,13 +118,13 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 		in.Source = sourceOf(ctx)
 	}
 	var t *Ticket
-	err := s.o.Store.InTx(ctx, func(tx Tx) error {
+	err = s.o.Store.InTx(ctx, func(tx Tx) error {
 		proj, err := tx.Project(ctx, in.Project)
 		if err != nil {
 			return err
 		}
 		t = &Ticket{ProjectID: proj.ID, ProjectKey: proj.Key, Type: in.Type, Title: in.Title, Body: in.Body,
-			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email, TitleAuto: titleAuto}
+			Fields: in.Fields, Context: in.Context, Version: in.Version, UserID: p.ID, UserName: p.Name, UserEmail: p.Email, TitleAuto: titleAuto, Attachments: atts}
 		if err := s.setRepo(ctx, tx, t, proj, in.Repo); err != nil {
 			return err
 		}
@@ -148,9 +145,6 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in NewTicket) (*
 			t.Status, t.TriageSince = StatusPendingTriage, &now
 		}
 		if err := tx.Insert(ctx, t); err != nil {
-			return err
-		}
-		if err := linkAttachments(ctx, tx, p, t.ID, 0, in.Attachments); err != nil {
 			return err
 		}
 		if err := tx.AddHistory(ctx, History{TicketID: t.ID, ActorID: p.ID, Source: in.Source, Kind: string(notify.TicketCreated),
@@ -204,18 +198,14 @@ func (s *Service) setRepo(ctx context.Context, tx Tx, t *Ticket, proj *Project, 
 }
 
 // enqueueCreate 入队建 Issue；attachments 为要转出的工单附件，nil 表示全部。
-func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, attachments *[]int64, retry time.Time) error {
+func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note string, attachments *[]string, retry time.Time) error {
 	key := OpCreateIssue + ":ticket:" + strconv.FormatInt(t.ID, 10)
 	if !retry.IsZero() {
 		key += ":retry:" + strconv.FormatInt(retry.UnixNano(), 10) // 上次建单已放弃，重新入队需要新键
 	}
 	payload := map[string]any{"forwarded_by": forwardedBy, "note": note}
 	if attachments != nil {
-		ids := dedupIDs(*attachments)
-		if ids == nil {
-			ids = []int64{} // 指向空切片表示一个都不转出，不能编码成 null（null 表示全部）
-		}
-		payload["attachment_ids"] = ids
+		payload["attachment_ids"] = dedupStrings(*attachments) // 非 nil：空切片表示一个都不转出（null 表示全部）
 	}
 	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue, Payload: payload})
 }
@@ -251,7 +241,7 @@ type ForwardInput struct {
 	Repo  string
 	Note  string // 补充说明，写入 Issue
 	// Attachments 是要随 Issue 转出的工单附件（截图可能含敏感信息，由后台人员勾选）；nil 表示全部，空切片表示不转出。
-	Attachments *[]int64
+	Attachments *[]string // 附件 ID
 }
 
 // Forward 把待确认工单转出到 Gitea（reviewer / admin）；建 Issue 失败而变为 abnormal 的工单也可再次转出。

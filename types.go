@@ -216,15 +216,20 @@ type Comment struct {
 	At         time.Time `json:"at"`
 }
 
-// Attachment 是附件的元数据；内容经 GetAttachment 或 GET /attachments/{id} 下载。
+// Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存和鉴权，灵问只记录引用：提交工单或补充时
+// 传入 ID、Name、URL（及可选的 ContentType、Size），转出时写进 Gitea Issue；配置了 Config.FetchAttachment 时
+// 读取内容上传为 Gitea 附件。
 type Attachment struct {
-	ID          int64     `json:"id"`
-	Filename    string    `json:"filename"`
-	ContentType string    `json:"content_type"`
-	Size        int64     `json:"size"`
-	CommentID   int64     `json:"comment_id,omitempty"` // 随补充评论上传时为评论 ID
-	Forwarded   bool      `json:"forwarded"`            // 已上传到 Gitea
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`                     // 接入方的附件 ID，必填，同一工单或评论内唯一
+	Name        string `json:"name"`                   // 文件名；为空时取 ID
+	URL         string `json:"url,omitempty"`          // http(s) 绝对地址，写进 Issue 供研发查看（访问控制由接入方负责）
+	ContentType string `json:"content_type,omitempty"` // 图片类型上传到 Gitea 后在 Issue 中直接显示
+	Size        int64  `json:"size,omitempty"`
+	// 以下只在读取时返回
+	CommentID int64  `json:"comment_id,omitempty"` // 随补充评论提交时为评论 ID
+	Forwarded bool   `json:"forwarded"`            // 已转出到 Gitea（上传、写入链接或写明失败）
+	GiteaURL  string `json:"gitea_url,omitempty"`  // 已上传为 Gitea 附件时的地址
+	Error     string `json:"error,omitempty"`      // 读取或上传失败的原因
 }
 
 // CheckResult 是一项启动自检结果；Repo 为空表示实例级检查。Level 为 ok / warn（功能受限）/ error（该仓库无法对接）。

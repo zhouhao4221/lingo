@@ -70,6 +70,8 @@ CREATE TABLE lingo_tickets (
     merged_into_ticket_id bigint      REFERENCES lingo_tickets (id) ON DELETE SET NULL,
     context               jsonb       NOT NULL DEFAULT '{}', -- 页面 URL、浏览器、版本等
     fields                jsonb       NOT NULL DEFAULT '{}', -- Issue 表单模板字段取值（字段 ID → 值列表）
+    -- 附件引用：文件在接入方的附件系统中，这里只存 ID、文件名、地址与转出结果（见 internal/ticket.Attachment）
+    attachments           jsonb       NOT NULL DEFAULT '[]',
     gitea_issue_number    bigint,
     gitea_updated_at      timestamptz, -- Webhook 乱序判断
     reported_version      text        NOT NULL DEFAULT '',
@@ -105,32 +107,12 @@ CREATE TABLE lingo_ticket_comments (
     gitea_comment_id bigint      UNIQUE,                -- 已同步到 / 来自 Gitea 的评论
     gitea_posted_id  bigint      UNIQUE, -- 灵问补充由机器人发到 Gitea 后的评论 ID（与 gitea_comment_id 分开，研发编辑机器人评论不会改写原文）
     forwarded_at     timestamptz, -- 已随 Issue 正文转出（建单前的补充），不再单独发评论
+    attachments      jsonb       NOT NULL DEFAULT '[]', -- 随补充提交的附件引用，同 tickets.attachments
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
     deleted_at       timestamptz
 );
 CREATE INDEX lingo_ticket_comments_ticket_idx ON lingo_ticket_comments (ticket_id, id);
-
--- 附件：存数据库，不依赖对象存储；访问按 user_id / 工单归属校验
-CREATE TABLE lingo_attachments (
-    id                    bigserial PRIMARY KEY,
-    user_id               text        NOT NULL,
-    ticket_id             bigint      REFERENCES lingo_tickets (id) ON DELETE CASCADE,
-    comment_id            bigint      REFERENCES lingo_ticket_comments (id) ON DELETE CASCADE,
-    filename              text        NOT NULL,
-    content_type          text        NOT NULL,
-    size                  bigint      NOT NULL CHECK (size >= 0),
-    sha256                bytea       NOT NULL,
-    data                  bytea       NOT NULL,
-    forwarded             boolean     NOT NULL DEFAULT false, -- 已上传到 Gitea
-    gitea_attachment_uuid text        NOT NULL DEFAULT '',
-    gitea_url             text        NOT NULL DEFAULT '', -- Gitea 中的下载地址，用于在 Issue / 评论正文引用
-    forward_error         text        NOT NULL DEFAULT '', -- 上传被 Gitea 拒绝（类型、大小限制）的原因，不再重试
-    created_at            timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX lingo_attachments_ticket_idx ON lingo_attachments (ticket_id);
--- 未关联工单的附件 24 小时后清理
-CREATE INDEX lingo_attachments_orphan_idx ON lingo_attachments (created_at) WHERE ticket_id IS NULL;
 
 -- 版本关联工单：以 tag 区间提交匹配 fixed_commit / fixed_pr 为主，版本说明中的 Issue 引用补漏
 CREATE TABLE lingo_release_tickets (

@@ -15,13 +15,14 @@ func TestMigrateFreshAndIdempotent(t *testing.T) {
 	if err := lingo.Migrate(ctx, db); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	var n int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema = current_schema() AND table_name <> 'lingo_schema_migrations'`).Scan(&n); err != nil {
+	// 表名一律带 lingo_ 前缀，避免与接入方业务表重名
+	var n, unprefixed int
+	if err := db.QueryRowContext(ctx, `SELECT count(*), count(*) FILTER (WHERE table_name NOT LIKE 'lingo\_%') FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name <> 'lingo_schema_migrations'`).Scan(&n, &unprefixed); err != nil {
 		t.Fatal(err)
 	}
-	if n < 20 {
-		t.Errorf("tables = %d", n)
+	if n != 12 || unprefixed != 0 {
+		t.Errorf("tables = %d, without prefix = %d", n, unprefixed)
 	}
 	var name, sum string
 	if err := db.QueryRowContext(ctx, "SELECT name, checksum FROM lingo_schema_migrations ORDER BY name LIMIT 1").Scan(&name, &sum); err != nil {

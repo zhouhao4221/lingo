@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -65,11 +66,13 @@ type Options struct {
 	Drafts     Drafts
 	Forwarding Forwarding
 	// Drafter 非空时建 Issue 前用轻量模型整理工单内容（失败时按原内容建单）。
-	Drafter     Drafter
-	Usage       UsageRecorder                // 模型调用用量；为空时只写日志
-	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
-	LabelPrefix string                       // 默认 "lingo"
-	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
+	Drafter Drafter
+	Usage   UsageRecorder // 模型调用用量；为空时只写日志
+	// FetchAttachment 非空时读取附件内容上传为 Gitea 附件；为空时只把附件地址写进 Issue。
+	FetchAttachment func(ctx context.Context, a ticket.Attachment) (io.ReadCloser, error)
+	Repos           func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
+	LabelPrefix     string                       // 默认 "lingo"
+	Templates       *gitea.TemplateCache         // 可与其他组件共用；为空时自建
 
 	// Releases 非空时处理 Release、tag、提交状态与 Actions 运行事件；Repos 提供各仓库的上线信号配置。
 	Releases Releases
@@ -78,7 +81,7 @@ type Options struct {
 	// Reconcile 配置定时对账（Interval > 0 时运行）。
 	Reconcile ReconcileOptions
 
-	// Reminder 非空时每分钟清理孤儿附件；RemindEvery > 0 时同时检查待确认超时（triage.overdue）。
+	// Reminder 非空且 RemindEvery > 0 时每分钟检查待确认超时（triage.overdue）。
 	Reminder       Reminder
 	RemindEvery    time.Duration
 	RemindProjects []string // 只提醒这些项目（当前声明的项目）
@@ -104,14 +107,10 @@ type UsageRecorder interface {
 	RecordLLMUsage(ctx context.Context, u store.LLMUsage) error
 }
 
-// Reminder 发出待确认超时提醒并清理孤儿附件，由 ticket.Service 实现。
+// Reminder 发出待确认超时提醒，由 ticket.Service 实现。
 type Reminder interface {
 	RemindOverdue(ctx context.Context, projects []string, every time.Duration, limit int) (int, error)
-	CleanupAttachments(ctx context.Context, maxAge time.Duration) (int, error)
 }
-
-// orphanAge 是未关联工单的附件的保留时长。
-const orphanAge = 24 * time.Hour
 
 // reconcileStartDelay 是 Run 启动后首次对账前的等待。
 const reconcileStartDelay = 30 * time.Second
@@ -236,7 +235,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 		}()
 	}
-	if w.o.Reminder != nil {
+	if w.o.Reminder != nil && w.o.RemindEvery > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -244,9 +243,6 @@ func (w *Worker) Run(ctx context.Context) error {
 			defer t.Stop()
 			limit := min(w.o.BatchSize, ticket.MaxLimit)
 			for {
-				if _, err := w.o.Reminder.CleanupAttachments(ctx, orphanAge); err != nil && ctx.Err() == nil {
-					w.log.Error("worker loop failed", "loop", "cleanup", "err", err)
-				}
 				for w.o.RemindEvery > 0 {
 					n, err := w.o.Reminder.RemindOverdue(ctx, w.o.RemindProjects, w.o.RemindEvery, limit)
 					if err != nil && ctx.Err() == nil {

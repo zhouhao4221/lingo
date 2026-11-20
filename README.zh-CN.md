@@ -10,7 +10,7 @@
 
 ## 功能
 
-- **反馈工单**：咨询 / Bug / 需求，支持文字、表单字段、截图与附件；接口按接入方自建的弹窗组件设计
+- **反馈工单**：咨询 / Bug / 需求，支持文字、表单字段、截图与附件（灵问只存附件引用，文件在接入方自己的附件系统中，可经 `Config.FetchAttachment` 读取后上传到 Gitea）；接口按接入方自建的弹窗组件设计
 - **后台确认**：转出到 Gitea、直接答复、合并或驳回；按项目与类型的自动 / 手动开关；超时提醒
 - **工单整理**：可选的轻量模型生成清晰标题、从自由描述中抽取表单字段、整理描述（按模板逐项校验，并保留原始描述）
 - **Gitea 对接**：按仓库 Issue 表单模板建单、评论双向同步、识别 PR 合并、按提交包含关系关联版本、上线信号（Actions 工作流、提交状态或 `MarkDeployed`）
@@ -67,7 +67,6 @@ light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
 | 接口 | 说明 |
 |---|---|
 | `GET /projects`、`GET /ticket-types` | 项目与仓库；工单类型及 Issue 模板表单字段 |
-| `POST /attachments`（multipart，字段 `file`）、`GET /attachments/{id}` | 上传与下载附件 |
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
 | `GET /events?after=` | 变更流（与 `Notifier` 同源） |

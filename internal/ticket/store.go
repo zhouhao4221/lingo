@@ -48,8 +48,6 @@ type Tx interface {
 	MarkCommentsForwarded(ctx context.Context, ticketID int64, ids []int64) error
 	// CountAttachments 返回工单已关联的附件数。
 	CountAttachments(ctx context.Context, ticketID int64) (int, error)
-	// LinkAttachments 把 userID 上传、尚未关联工单的附件 ids 关联到工单（与评论，commentID 为 0 表示工单本身），返回关联条数。
-	LinkAttachments(ctx context.Context, ids []int64, userID string, ticketID, commentID int64) (int, error)
 	// Enqueue 写一条 Gitea 写操作任务；Key 已存在时忽略（同一操作只入队一次）。
 	Enqueue(ctx context.Context, t Task) error
 	// RepointMerged 把合并到 from 的工单改为合并到 to。
@@ -90,6 +88,8 @@ type Comment struct {
 	At         time.Time
 	Forwarded  bool  // 已随 Issue 正文转出
 	PostedID   int64 // 已由机器人发到 Gitea 的评论 ID
+	// Attachments 是随评论提交的附件引用（写入时使用）
+	Attachments []Attachment
 }
 
 // Project 是已同步入库的项目。

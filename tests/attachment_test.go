@@ -2,9 +2,9 @@ package tests
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
-	"mime/multipart"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,101 +18,61 @@ import (
 var pngData = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" +
 	"\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa7\x35\x81\x84\x00\x00\x00\x00IEND\xaeB\x60\x82")
 
-func upload(t *testing.T, h http.Handler, user, role, name string, data []byte) (int, map[string]any) {
-	t.Helper()
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	fw, _ := mw.CreateFormFile("file", name)
-	_, _ = fw.Write(data)
-	_ = mw.Close()
-	r := httptest.NewRequest("POST", "/attachments", &buf)
-	r.Header.Set("Content-Type", mw.FormDataContentType())
-	r.Header.Set("X-User", user)
-	r.Header.Set("X-Role", role)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	var out map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	return w.Code, out
+func headerAuth(r *http.Request) (lingo.User, error) {
+	if r.Header.Get("X-User") == "" {
+		return lingo.User{}, errors.New("anonymous")
+	}
+	return lingo.User{ID: r.Header.Get("X-User"), Role: lingo.Role(r.Header.Get("X-Role"))}, nil
 }
 
+func ref(id, name, ctype string) map[string]any {
+	return map[string]any{"id": id, "name": name, "url": "https://app.example.com/files/" + id, "content_type": ctype}
+}
+
+// 附件由接入方保存，灵问只记引用；配置 FetchAttachment 时读取内容上传为 Gitea 附件，读取失败的退回为链接。
 func TestAttachmentsAndCommentsFlow(t *testing.T) {
 	g := &giteaServer{templates: "[]"}
 	db := testDB(t, true)
 	srv := httptest.NewServer(g)
 	t.Cleanup(srv.Close)
+	files := map[string][]byte{"shot": pngData, "trace": []byte("stack"), "log": []byte("panic: boom")}
 	l, err := lingo.New(lingo.Config{
 		DB: db, Model: nopModel{},
 		Gitea: lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s"},
 		Projects: []lingo.Project{{Key: "demo", AutoForward: map[lingo.TicketType]bool{lingo.TicketBug: true},
 			Repos: []lingo.Repo{{Owner: "demo", Name: "api"}}}},
-		Authenticate: func(r *http.Request) (lingo.User, error) {
-			if r.Header.Get("X-User") == "" {
-				return lingo.User{}, errors.New("anonymous")
+		Authenticate: headerAuth,
+		FetchAttachment: func(_ context.Context, a lingo.Attachment) (io.ReadCloser, error) {
+			b, ok := files[a.ID]
+			if !ok {
+				return nil, errors.New("file deleted")
 			}
-			return lingo.User{ID: r.Header.Get("X-User"), Role: lingo.Role(r.Header.Get("X-Role"))}, nil
+			return io.NopCloser(bytes.NewReader(b)), nil
 		},
-		MaxAttachmentBytes: 1024,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := restClient{t: t, h: l.Handler()}
-	h := l.Handler()
 
-	// 上传校验
-	if code, body := upload(t, h, "u1", "external", "evil.exe", []byte("MZ")); code != 400 {
-		t.Errorf("exe: %d %v", code, body)
+	// 引用校验：地址须为 http(s) 绝对地址
+	if code, _, _ := c.do("u1", "external", "POST", "/tickets", map[string]any{"type": "bug", "content": "x",
+		"attachments": []any{map[string]any{"id": "a", "url": "javascript:alert(1)"}}}); code != 400 {
+		t.Errorf("bad url: %d", code)
 	}
-	if code, _ := upload(t, h, "u1", "external", "fake.png", []byte("not an image")); code != 400 {
-		t.Errorf("fake png: %d", code)
-	}
-	if code, _ := upload(t, h, "u1", "external", "big.txt", bytes.Repeat([]byte("x"), 2048)); code != 400 {
-		t.Errorf("too big: %d", code)
-	}
-	code, shot := upload(t, h, "u1", "external", "../../截图.png", pngData)
-	if code != 201 || shot["filename"] != "截图.png" || shot["content_type"] != "image/png" {
-		t.Fatalf("upload: %d %v", code, shot)
-	}
-	shotID := int64(shot["id"].(float64))
-	_, logf := upload(t, h, "u1", "external", "app.log", []byte("panic: boom"))
-	logID := int64(logf["id"].(float64))
-	_, other := upload(t, h, "u2", "external", "x.txt", []byte("x"))
-	otherID := int64(other["id"].(float64))
-
-	// 别人的附件不能挂到自己的工单上
-	if code, _, _ := c.do("u1", "external", "POST", "/tickets", map[string]any{"type": "bug", "content": "x", "attachment_ids": []int64{otherID}}); code != 400 {
-		t.Errorf("foreign attachment: %d", code)
-	}
-	code, created, _ := c.do("u1", "external", "POST", "/tickets", map[string]any{"type": "bug", "content": "登录白屏", "attachment_ids": []int64{shotID}})
+	code, created, _ := c.do("u1", "external", "POST", "/tickets", map[string]any{"type": "bug", "content": "登录白屏",
+		"attachments": []any{ref("shot", "../../截图.png", "image/png"), ref("gone", "gone.txt", "text/plain")}})
 	if code != 201 {
 		t.Fatalf("create: %d %v", code, created)
 	}
 	id := int64(created["id"].(float64))
 	// 建单前补充（带附件）：写进 Issue 正文，附件随 Issue 上传，不单独发评论
-	_, early := upload(t, h, "u1", "external", "trace.txt", []byte("stack"))
-	earlyID := int64(early["id"].(float64))
-	if code, _, _ := c.do("u1", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "只在 Safari 出现", "attachment_ids": []int64{earlyID}}); code != 201 {
+	if code, _, _ := c.do("u1", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "只在 Safari 出现",
+		"attachments": []any{ref("trace", "trace.txt", "text/plain")}}); code != 201 {
 		t.Fatalf("comment before issue: %d", code)
 	}
 	if code, _, _ := c.do("u2", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "x"}); code != 404 {
 		t.Errorf("other user's comment: %d", code)
-	}
-	// 下载：本人可以，他人不行
-	r := httptest.NewRequest("GET", "/attachments/"+jsonNum(shotID), nil)
-	r.Header.Set("X-User", "u1")
-	r.Header.Set("X-Role", "external")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), pngData) || w.Header().Get("X-Content-Type-Options") != "nosniff" ||
-		!strings.Contains(w.Header().Get("Content-Disposition"), "attachment") {
-		t.Errorf("download: %d %v", w.Code, w.Header())
-	}
-	r.Header.Set("X-User", "u2")
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 404 {
-		t.Errorf("other user download: %d", w.Code)
 	}
 
 	runLingo(t, l)
@@ -132,13 +92,15 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 		!strings.HasPrefix(assets[1], "/repos/demo/api/issues/40/assets:trace.txt") {
 		t.Errorf("issue body / assets: %s %v", body, assets)
 	}
-	if !strings.Contains(edited, "![截图.png](http://g/attachments/1)") || !strings.Contains(edited, "[trace.txt](http://g/attachments/2)") ||
+	if !strings.Contains(edited, "![截图.png](<http://g/attachments/1>)") || !strings.Contains(edited, "[trace.txt](<http://g/attachments/2>)") ||
+		!strings.Contains(edited, "[gone.txt](<https://app.example.com/files/gone>)（未能上传到 Gitea）") ||
 		!strings.HasSuffix(strings.TrimSpace(edited), "<!-- lingo:ticket="+jsonNum(id)+" -->") {
 		t.Errorf("edited body:\n%s", edited)
 	}
 
 	// 建单后补充（带附件）：机器人发 Issue 评论并上传评论附件
-	if code, _, _ := c.do("u1", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "补充日志", "attachment_ids": []int64{logID}}); code != 201 {
+	if code, _, _ := c.do("u1", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "补充日志",
+		"attachments": []any{ref("log", "app.log", "text/plain")}}); code != 201 {
 		t.Fatalf("comment after issue: %d", code)
 	}
 	waitFor(t, func() bool {
@@ -147,16 +109,68 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 		return len(g.edits) == 2
 	})
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if len(g.comments) != 1 || !strings.Contains(g.comments[0], "补充（提交人）") || !strings.Contains(g.comments[0], "补充日志") {
 		t.Errorf("comments = %v", g.comments)
 	}
 	if len(g.assets) != 3 || !strings.HasPrefix(g.assets[2], "/repos/demo/api/issues/comments/501/assets:app.log") {
 		t.Errorf("comment assets = %v", g.assets)
 	}
-	var forwarded int
-	if err := db.QueryRow("SELECT count(*) FROM lingo_attachments WHERE forwarded").Scan(&forwarded); err != nil || forwarded != 3 {
-		t.Errorf("forwarded = %d %v", forwarded, err)
+	g.mu.Unlock()
+
+	// 详情：附件引用与转出结果
+	_, detail, _ := c.do("u1", "external", "GET", "/tickets/"+jsonNum(id), nil)
+	as, _ := detail["attachments"].([]any)
+	if len(as) != 4 {
+		t.Fatalf("attachments = %v", detail["attachments"])
+	}
+	first := as[0].(map[string]any)
+	if first["id"] != "shot" || first["name"] != "截图.png" || first["forwarded"] != true || first["gitea_url"] != "http://g/attachments/1" {
+		t.Errorf("first = %v", first)
+	}
+	if gone := as[1].(map[string]any); gone["forwarded"] != true || !strings.Contains(gone["error"].(string), "file deleted") {
+		t.Errorf("gone = %v", gone)
+	}
+	var uploaded int
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM lingo_tickets t, jsonb_array_elements(t.attachments) a WHERE a->>'state' = 'uploaded')
+		+ (SELECT count(*) FROM lingo_ticket_comments c, jsonb_array_elements(c.attachments) a WHERE a->>'state' = 'uploaded')`).Scan(&uploaded); err != nil || uploaded != 3 {
+		t.Errorf("uploaded = %d %v", uploaded, err)
+	}
+}
+
+// 未配置 FetchAttachment：只把附件地址写进 Issue，不上传。
+func TestAttachmentLinksWithoutFetch(t *testing.T) {
+	g := &giteaServer{templates: "[]"}
+	db := testDB(t, true)
+	srv := httptest.NewServer(g)
+	t.Cleanup(srv.Close)
+	l, err := lingo.New(lingo.Config{
+		DB: db, Model: nopModel{},
+		Gitea: lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s"},
+		Projects: []lingo.Project{{Key: "demo", AutoForward: map[lingo.TicketType]bool{lingo.TicketBug: true},
+			Repos: []lingo.Repo{{Owner: "demo", Name: "api"}}}},
+		Authenticate: headerAuth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := lingo.User{ID: "u1", Role: lingo.RoleExternal}
+	tk, err := l.CreateTicket(context.Background(), alice, lingo.TicketInput{Type: lingo.TicketBug, Content: "导出失败",
+		Attachments: []lingo.Attachment{{ID: "a", Name: "a.png", URL: "https://app.example.com/files/a", ContentType: "image/png"}, {ID: "b"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runLingo(t, l)
+	waitTicket(t, l, alice, tk.ID, "open")
+	waitFor(t, func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return len(g.edits) == 1
+	})
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.assets) != 0 || !strings.Contains(g.edits[0], "- [a.png](<https://app.example.com/files/a>)") ||
+		!strings.Contains(g.edits[0], "- b（请在业务系统中查看）") {
+		t.Errorf("assets %v body:\n%s", g.assets, g.edits[0])
 	}
 }
 

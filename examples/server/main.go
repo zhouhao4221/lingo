@@ -60,6 +60,9 @@ func main() {
 		}},
 		Authenticate: authenticate,
 		Notifier:     logNotifier{},
+		// 附件存在业务系统自己的附件服务中，提交工单时只传引用（ID、文件名、地址）。可选配置 FetchAttachment：
+		// 转出时读取内容上传为 Gitea 附件；不配置时只把附件地址写进 Issue。
+		// FetchAttachment: func(ctx context.Context, a lingo.Attachment) (io.ReadCloser, error) { return files.Open(ctx, a.ID) },
 	})
 	if err != nil {
 		log.Fatal(err)

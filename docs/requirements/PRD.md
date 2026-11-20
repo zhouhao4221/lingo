@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.23 | 2026-11-21 | haiqing | 数据模型精简：表名统一加 `lingo_` 前缀（避免与接入方业务表重名）；表从 23 张减到 12 张——尚未实现的问答、知识库、需求评审、业务数据审计、多仓库拆单的表待实现时再经新迁移加入，自动转出覆盖值、上线记录并为项目 / 版本上的 jsonb 列，后台确认记录并入工单审计（`triage.*`），Webhook 连通时间与对账游标合并为 `lingo_repo_state`；附件不再存数据库：由接入方自己的附件系统保存与鉴权，提交时传引用（ID、文件名、地址），转出时经可选的 `Config.FetchAttachment` 读取内容上传为 Gitea 附件，未配置时只把地址写进 Issue；去掉 `UploadAttachment` / `GetAttachment`、`POST /attachments`、`GET /attachments/{id}` 与 `MaxAttachmentBytes`；`conversation_id` 随问答一并延后 |
 | v1.22 | 2026-11-21 | haiqing | 模型用量与缓存：解析接口返回的 token 用量（含命中服务端前缀缓存的部分：OpenAI `cached_tokens`、DeepSeek `prompt_cache_hit_tokens`），每次调用写入 `llm_usage` 并记日志；`l.LLMUsage` / `GET /usage` / MCP `get_llm_usage`（admin）按天、用途、模型汇总并给出缓存命中率；自定义模型可实现 `UsageModel` 报告用量；建单整理的提示词按“不变在前、变化在后”排布；进程内缓存（Issue 模板、标签、整理结果）统一为带过期时间与容量上限的 `internal/cache` |
 | v1.21 | 2026-11-21 | haiqing | 内置模型适配：`NewOpenAIModel`（OpenAI 及兼容接口，Chat Completions + Embeddings）、`NewDeepSeekModel`（DeepSeek，无向量接口）；标准库 HTTP 实现，429 / 5xx / 网络错误重试两次 |
 | v1.20 | 2026-11-21 | haiqing | 建 Issue 前用轻量模型整理工单：新增 `Config.LightModel`（为空时用 `Model`，都为空按原内容建单），`Config.Model` 改为可选；生成标题（只改写灵问从正文生成的标题；提交人自己写的、后台确认转出的保留）、从描述中抽取模板字段（只采纳模板中的字段与选项，提交人已填的不改）、整理描述；Issue 末尾附提交人原始描述；模型失败或超时按原内容建单；不向模型发送提交人身份。后台预览留待下一步 |
@@ -497,7 +498,7 @@ go l.Run(ctx)
 | `Authenticate` | 接入方解析请求身份，返回 `lingo.User`（见 3.2.0.2） |
 | `Notifier` | `lingo.Notifier` 接口：工单 / 版本事件回调接入方（见 3.2.3） |
 | `Tools` | 业务数据工具，代用户取数（见 3.2.0.5） |
-| `MaxAttachmentBytes` | 单个附件大小上限，默认 10 MB（见 3.2.1.1） |
+| `FetchAttachment` | 可选：读取附件内容，转出时上传为 Gitea 附件；未配置时只把附件地址写进 Issue（见 3.2.1.1） |
 | `TriageRemindAfter` | 待确认工单的提醒间隔，默认 24 小时；负数关闭提醒（见 3.2.1.2） |
 | `Project.AutoForward` | 按工单类型的自动转出默认值，未配置为手动确认（见 3.2.1.2） |
 
@@ -512,7 +513,7 @@ go l.Run(ctx)
 
 #### 3.2.1.1 反馈提交接口（供接入方弹窗组件对接）
 
-**功能描述**：网页上的反馈入口是一个弹出窗口：用户选择类型（咨询 / Bug / 需求）、输入文字、截图或上传文件后提交。弹窗界面由接入方实现（lingo 不提供前端），lingo 提供它需要的全部接口与字段约定：上传附件、提交工单、查看本人工单与进展、补充信息。
+**功能描述**：网页上的反馈入口是一个弹出窗口：用户选择类型（咨询 / Bug / 需求）、输入文字、截图或上传文件后提交。弹窗界面由接入方实现（lingo 不提供前端），lingo 提供它需要的全部接口与字段约定：提交工单、查看本人工单与进展、补充信息。附件由接入方自己的附件系统上传与保存，提交时只传附件引用。
 
 **用户故事**：
 > 作为用户，我希望在出问题的页面点开弹窗，选“Bug”，粘贴截图、写两句话就能提交，之后在同一个弹窗里看到处理进展。
@@ -528,9 +529,8 @@ sequenceDiagram
   participant H as 接入方页面
   participant L as lingo Handler
   U->>H: 选类型、输入文字、截图 / 选文件
-  H->>L: POST /attachments（multipart，逐个上传）
-  L-->>H: attachment_id
-  H->>L: POST /tickets（type、content、attachment_ids、context）
+  H->>H: 截图 / 文件上传到接入方自己的附件系统
+  H->>L: POST /tickets（type、content、attachments 引用、context）
   L-->>H: ticket（status=pending_triage 或 submitted）
   H->>L: GET /tickets/mine、GET /tickets/{id}
   L-->>H: 状态、对外回复、版本 / 上线信息
@@ -541,23 +541,21 @@ sequenceDiagram
 | 接口 | 说明 |
 |-----|-----|
 | `GET /ticket-types` | 可选类型与每类的表单字段（取自对应仓库的 Issue 模板必填字段，见 3.2.2），弹窗据此渲染表单 |
-| `POST /attachments` | multipart 上传单个附件（截图、日志、文件），返回 `attachment_id`；未关联工单的附件 24 小时后清理 |
-| `POST /tickets` | 提交工单：`project`、`repo`（可选）、`type`、`title`（可选，缺省由模型生成）、`content`、`fields`（模板字段）、`attachment_ids`、`context`（页面 URL、页面标题、浏览器、`version`，由弹窗自动采集）、`conversation_id`（从问答转出时带上） |
+| `POST /tickets` | 提交工单：`project`、`repo`（可选）、`type`、`title`（可选，缺省由模型生成）、`content`、`fields`（模板字段）、`attachments`（附件引用：`id`、`name`、`url`，可选 `content_type`、`size`）、`context`（页面 URL、页面标题、浏览器、`version`，由弹窗自动采集） |
 | `GET /tickets/mine` | 本人工单列表，按状态过滤、分页 |
 | `GET /tickets/{id}` | 工单详情：状态时间线、对外回复、附件、修复版本、上线时间；不返回 Gitea 内部讨论 |
-| `POST /tickets/{id}/comments` | 用户补充说明，可带 `attachment_ids`；已转出时同步为 Issue 评论 |
-| `GET /attachments/{id}` | 下载附件，按 3.2.0.6 校验访问权限 |
+| `POST /tickets/{id}/comments` | 用户补充说明，可带 `attachments`；已转出时同步为 Issue 评论 |
 
 **业务规则**：
 - 身份由接入方 `Authenticate` 从请求中解析（同域 cookie 或接入方令牌），lingo 不另发凭据；未登录用户能否提交由接入方在 `Authenticate` 中决定
-- 附件限制：类型白名单默认 `png / jpg / gif / webp / pdf / txt / log / zip`，单个大小上限 `Config.MaxAttachmentBytes`（默认 10 MB），单工单最多 10 个；转出时还要满足 Gitea `/settings/attachment` 的限制，超出的附件只留在 lingo、Issue 中注明
-- 附件存在 lingo 数据库中（`attachments` 表），不依赖对象存储；转出到 Gitea 时再上传为 Issue 附件
+- 附件由接入方自己的附件系统保存，文件的类型、大小与下载权限由接入方控制；lingo 只记录引用（随工单 / 补充评论存为 jsonb），单工单含补充最多 10 个；`id` 必填且不重复，`url` 须为 http(s) 绝对地址
+- 转出：配置了 `Config.FetchAttachment` 时经它读取内容上传为 Issue / 评论附件（图片在 Issue 中直接显示），读取失败或被 Gitea 拒收（超出 `/settings/attachment` 限制）时在 Issue 中写链接并注明；未配置时只把附件地址写进 Issue。lingo 不会自己请求附件地址（避免以服务端身份访问用户填写的地址）
 - 截图由弹窗在浏览器侧完成（如截取当前页面或粘贴剪贴板图片），lingo 只接收图片文件
 - 弹窗提交与问答转出走同一套工单逻辑；直接提交时，问答 Agent 仍可按模板必填字段追问缺失信息（追问经 `GET /tickets/{id}` 返回的 `pending_questions` 呈现）
 
 **验收标准**：
 - [ ] 弹窗按 `GET /ticket-types` 渲染类型与字段，提交带截图的 Bug 后返回工单号
-- [ ] 超过大小或类型不在白名单的附件被拒绝，并返回明确错误
+- [ ] 地址不是 http(s) 绝对地址、ID 缺失或重复的附件引用被拒绝，并返回明确错误
 - [ ] 用户在弹窗中只能看到本人的工单与对外回复
 
 #### 3.2.1.2 后台确认转出（自动 / 手动开关）
@@ -818,8 +816,8 @@ flowchart LR
 | 数据安全 | Gitea token 与 Webhook 密钥经 `Config.Gitea` 传入 | P0 |
 | 集成安全 | Webhook 验签 + 按事件去重 | P0 |
 | 数据隔离 | 按 `user_id` 与 `User.Projects` 在领域层统一做访问控制，越权返回 404；store 查询强制带范围；个人信息不写入 Gitea（3.2.0.6） | P0 |
-| 附件安全 | 类型白名单 + 大小上限；按工单归属校验下载权限；转出 Gitea 前由后台人员勾选 | P0 |
-| 审计日志 | 工单事件全量记录于 ticket_events | P1 |
+| 附件安全 | 文件与下载权限由接入方的附件系统负责；lingo 只存引用、校验地址格式、不主动请求用户填写的地址；转出 Gitea 前由后台人员勾选 | P0 |
+| 审计日志 | 工单事件全量记录于 lingo_ticket_events（含后台确认 `triage.*` 的备注与合并目标） | P1 |
 
 ### 4.4 兼容性需求
 
@@ -838,28 +836,20 @@ flowchart LR
 
 | 实体 | 描述 | 关键字段 |
 |-----|-----|---------|
-| projects | 项目，`New` 时由 `Config.Projects` 同步 | key, name, description, default_repo_id, enabled |
-| repos | Gitea 仓库，归属一个项目 | project_id, owner, name, kind(frontend/backend/mobile/docs/other), enabled |
-| conversations | 问答会话 | user_id(接入方用户 ID，文本), project_id, channel(api/mcp/go), status, ticket_id |
-| messages | 会话消息 | conversation_id, role(user/assistant), content, sources |
-| tickets | 工单 | user_id(接入方用户 ID，文本), 提交人姓名/邮箱快照, project_id, repo_id, type(consult/bug/feature), title, body, status(见 3.2.2), gitea_issue_number, gitea_updated_at, reported_version, milestone, due_date, fixed_pr, fixed_commit, fixed_release_id, deployed_at |
-| attachments | 附件（截图、文件） | user_id, ticket_id(可空，未关联 24 小时后清理), comment_id(可空), filename, content_type, size, sha256, data(bytea), forwarded(是否已转 Gitea), gitea_attachment_uuid |
-| events | 对外事件（Notifier 推送与变更流共用） | id(递增), kind, project_id, ticket_id, user_id, actor_id, status, prev_status, action, payload, created_at |
-| triage_actions | 后台确认记录 | ticket_id, actor_id, action(forward/answer/merge/reject), note, target_ticket_id, created_at |
-| project_settings | 运行时设置（自动转出覆盖值） | project_id, ticket_type, auto_forward, updated_by, updated_at |
-| ticket_comments | 工单评论：用户补充、后台答复、研发对外回复 | ticket_id, author_id, author_name, source(user/staff/gitea), body, public, gitea_comment_id(唯一) |
-| ticket_issues | 工单拆到多个仓库时的附加 Issue | ticket_id, repo_id, gitea_issue_number, state, fixed_pr, fixed_commit |
-| deployments | 上线记录 | release_id, env, source(workflow/status/manual), ref, deployed_at |
-| sync_cursors | 对账游标 | repo_id, kind(issues/comments/releases), since |
-| releases | 版本记录 | repo_id, tag, name, body, prerelease, published_at, gitea_release_id |
-| release_tickets | 版本关联工单 | release_id, ticket_id, ref(`commit` 或引用原文) |
-| data_requests | 业务数据请求审计（只存摘要） | user_id, conversation_id, tool(Tool.Name), params_digest, status, latency_ms, idempotency_key |
-| ticket_events | 工单事件 | ticket_id, source, kind, payload |
-| reviews | 需求评审 | ticket_id, reviewer_id(接入方用户 ID), verdict(approve/reject/need_info), comment |
-| outbox | 异步任务 outbox（原 notifications）：Gitea 写操作、Notifier 投递 | 字段待确认（至少含 payload, status, attempts） |
-| webhook_deliveries | Webhook 投递（去重 + 待 worker 处理） | delivery_id(唯一), event, event_type, kind, dedup_key(唯一，业务键), repo, issue_number, from_bot, payload(bytea), parse_error, received_at, processed_at, attempts, next_attempt_at, locked_until, last_error |
-| webhook_pings | Webhook 连通记录（push / 测试投递） | repo(唯一), last_ping_at |
-| kb_entries | 知识库问答 | project_id, repo_id(可空), question, answer, source_ticket_id, tags, embedding |
+| lingo_projects | 项目，`New` 时由 `Config.Projects` 同步 | key, name, description, default_repo_id, enabled, auto_forward(jsonb：自动转出开关的运行时覆盖值) |
+| lingo_repos | Gitea 仓库，归属一个项目 | project_id, owner, name, kind(frontend/backend/mobile/docs/other), enabled |
+| lingo_tickets | 工单 | user_id(接入方用户 ID，文本), 提交人姓名/邮箱快照, project_id, repo_id, type(consult/bug/feature), title, body, fields, context, attachments(jsonb：附件引用与转出结果), status(见 3.2.2), gitea_issue_number, gitea_updated_at, reported_version, fixed_pr, fixed_commit, fixed_release_id, deployed_at |
+| lingo_ticket_comments | 工单评论：用户补充、后台答复、研发对外回复 | ticket_id, author_id, author_name, source(user/staff/agent/gitea), body, public, attachments(jsonb), gitea_comment_id(唯一), gitea_posted_id, forwarded_at |
+| lingo_ticket_events | 工单审计（含后台确认 `triage.*`） | ticket_id, actor_id, source, kind, payload |
+| lingo_events | 对外事件（Notifier 推送与变更流共用） | id(递增), kind, project_id, ticket_id, user_id, actor_id, status, prev_status, action, payload, txid |
+| lingo_releases | 版本记录 | repo_id, tag, name, body, prerelease, published_at, gitea_release_id, commit_sha, deployments(jsonb：环境 → 首次上线) |
+| lingo_release_tickets | 版本关联工单 | release_id, ticket_id, ref(`commit` 或引用原文) |
+| lingo_outbox | 异步任务：Gitea 写操作、Notifier 投递 | kind, key(幂等键), event_id, ticket_id, payload, status, attempts(租约令牌), failures, next_attempt_at, locked_until |
+| lingo_webhook_deliveries | Webhook 投递（去重 + 待 worker 处理） | delivery_id(唯一), event, event_type, kind, dedup_key(唯一，业务键), repo, issue_number, from_bot, payload(bytea), parse_error, received_at, processed_at, attempts, failures, next_attempt_at, locked_until, last_error |
+| lingo_repo_state | 仓库同步状态 | repo(小写 owner/name), kind(ping/issues/pulls/comments/releases/deployments), at |
+| lingo_llm_usage | 模型调用用量 | kind, model, ticket_id, input, output, cached, ok, latency_ms |
+
+问答会话、知识库、需求评审、业务数据请求审计与多仓库拆单的表在对应功能实现时经新迁移加入。
 
 ### 5.2 数据采集
 
@@ -954,7 +944,7 @@ flowchart LR
 | `l.CreateTicket(ctx, user, TicketInput)` | Go | 提交工单，按开关自动转出或进入待确认 |
 | `l.ForwardTicket` / `l.AnswerTicket` / `l.MergeTicket` / `l.RejectTicket` | Go | 后台处理待确认工单（reviewer / admin），发出 `triage.resolved` |
 | `l.GetTicket` / `l.ListTriage` / `l.TriageSummary` / `l.ListEvents` | Go | 查询工单、待确认列表、待确认统计、变更流（均接收 `lingo.User` 做数据隔离） |
-| 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2（`/ticket-types`、`/attachments`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
+| 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2（`/ticket-types`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
 | `l.MarkDeployed(ctx, repo, tag, env)` | Go | 接入方部署完成后告知灵问某仓库版本已上线（`repo` 为 `owner/name`） |
 | `l.Handler()`（示例挂载 `/lingo/`） | - | REST JSON：提问、工单、评审、知识库、版本，路径待设计 |
 | `l.MCPHandler()`（示例挂载 `/mcp`） | POST/GET | MCP Server（Streamable HTTP），工具见 3.2.0.1、3.2.0.4；提问 / 工单接口支持 `project`、`repo`、`version` 参数 |

@@ -166,13 +166,17 @@ func (x *ticketTx) Insert(ctx context.Context, t *ticket.Ticket) error {
 	if err != nil {
 		return err
 	}
+	atts, err := marshalAttachments(t.Attachments)
+	if err != nil {
+		return err
+	}
 	err = x.tx.QueryRowContext(ctx, `
 		INSERT INTO lingo_tickets (user_id, user_name, user_email, project_id, repo_id, type, title, body, status,
-		    context, fields, reported_version, triage_since, title_auto)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		    context, fields, reported_version, triage_since, title_auto, attachments)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id, created_at, updated_at`,
 		t.UserID, t.UserName, t.UserEmail, t.ProjectID, nullInt64(t.RepoID), t.Type, t.Title, t.Body,
-		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince), t.TitleAuto).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
+		string(t.Status), tctx, fields, t.Version, nullTime(t.TriageSince), t.TitleAuto, atts).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: insert ticket: %w", err)
 	}
@@ -255,10 +259,15 @@ func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) (int64, err
 	if at.IsZero() {
 		at = time.Now()
 	}
+	atts, err := marshalAttachments(c.Attachments)
+	if err != nil {
+		return 0, err
+	}
 	var id int64
 	if err := x.tx.QueryRowContext(ctx, `
-		INSERT INTO lingo_ticket_comments (ticket_id, author_id, author_name, source, body, public, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`, c.TicketID, c.AuthorID, c.AuthorName, c.Source, c.Body, c.Public, at).Scan(&id); err != nil {
+		INSERT INTO lingo_ticket_comments (ticket_id, author_id, author_name, source, body, public, created_at, updated_at, attachments)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8) RETURNING id`, c.TicketID, c.AuthorID, c.AuthorName, c.Source, c.Body, c.Public, at,
+		atts).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: add comment %d: %w", c.TicketID, err)
 	}
 	return id, nil

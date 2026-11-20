@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -35,8 +36,10 @@ type Config struct {
 	Authenticate Authenticator
 	Notifier     Notifier // 可空，为空时不回传进展
 	Tools        []Tool
-	// MaxAttachmentBytes 是单个附件大小上限，0 表示默认 10 MB。
-	MaxAttachmentBytes int64
+	// FetchAttachment 读取附件内容（可选）。附件由接入方自己的附件系统保存，灵问只记录引用；配置后转出 Issue 时
+	// 经它读取内容上传为 Gitea 附件（图片在 Issue 中直接显示），读取失败时退回为写链接；为空时只把附件地址写进 Issue。
+	// 灵问不会自己请求附件 URL（避免以服务端身份访问用户填写的地址）。
+	FetchAttachment func(ctx context.Context, a Attachment) (io.ReadCloser, error)
 	// TriageRemindAfter 是待确认工单的提醒间隔：超过该时长未处理发出 triage.overdue，之后按同样间隔重复；
 	// 0 表示默认 24 小时，负数关闭提醒（接入方可用 ListTriage 的 PendingBefore 自行实现）。
 	TriageRemindAfter time.Duration
@@ -262,11 +265,12 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		LabelPrefix: l.labelPrefix(),
 		Templates:   l.tmpls,
 
-		Releases:       l.releases,
-		Git:            l.gitea,
-		Reminder:       l.tickets,
-		RemindEvery:    l.remindEvery(),
-		RemindProjects: l.projectKeys(),
+		Releases:        l.releases,
+		Git:             l.gitea,
+		Reminder:        l.tickets,
+		FetchAttachment: l.fetchAttachment(),
+		RemindEvery:     l.remindEvery(),
+		RemindProjects:  l.projectKeys(),
 		Reconcile: worker.ReconcileOptions{Interval: l.reconcileInterval(), Repos: l.repoNames(), Cursors: l.store, Gitea: l.gitea,
 			Lock: func(ctx context.Context) (func(), bool, error) { return l.store.TryLock(ctx, reconcileLockKey) }},
 	}
@@ -381,3 +385,14 @@ func (l *Lingo) Run(ctx context.Context) error {
 
 // ErrNotFound 表示资源不存在或无权访问（两者不区分，避免暴露数据是否存在）。
 var ErrNotFound = errors.New("lingo: not found")
+
+// fetchAttachment 把 Config.FetchAttachment 适配给 worker；未配置时为 nil。
+func (l *Lingo) fetchAttachment() func(context.Context, ticket.Attachment) (io.ReadCloser, error) {
+	f := l.cfg.FetchAttachment
+	if f == nil {
+		return nil
+	}
+	return func(ctx context.Context, a ticket.Attachment) (io.ReadCloser, error) {
+		return f(ctx, Attachment{ID: a.ID, Name: a.Name, URL: a.URL, ContentType: a.ContentType, Size: a.Size, CommentID: a.CommentID})
+	}
+}
