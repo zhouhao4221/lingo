@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/notify"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -60,6 +61,30 @@ type Tx interface {
 // Store 是版本仓储，由 internal/store 实现。
 type Store interface {
 	InReleaseTx(ctx context.Context, fn func(Tx) error) error
+	// ListReleases 返回项目范围内的版本（新的在前）；project / repo 为空不过滤，beforeID 为游标。
+	ListReleases(ctx context.Context, q Query) ([]*Release, error)
+	// GetRelease 返回版本及其项目 key；不存在返回 ErrNotFound。
+	GetRelease(ctx context.Context, id int64) (*Release, string, error)
+	// ReleaseTicketIDs 返回关联到版本的工单 ID。
+	ReleaseTicketIDs(ctx context.Context, id int64) ([]int64, error)
+	// ReleaseDeployments 返回版本的上线记录。
+	ReleaseDeployments(ctx context.Context, id int64) ([]DeploymentRecord, error)
+}
+
+// Query 是版本列表的条件。
+type Query struct {
+	Projects []string // 调用者可访问的项目，必填
+	Project  string
+	Repo     string
+	BeforeID int64
+	Limit    int
+}
+
+// DeploymentRecord 是一条上线记录。
+type DeploymentRecord struct {
+	Env    string
+	Source string
+	At     time.Time
 }
 
 // Git 读取仓库提交信息，由 worker 基于 gitea.Client 实现。
@@ -89,6 +114,59 @@ func New(o Options) (*Service, error) {
 		o.Now = time.Now
 	}
 	return &Service{o: o}, nil
+}
+
+// List 返回调用者项目范围内的版本记录（新的在前），project 不在范围内时为空。
+func (s *Service) List(ctx context.Context, p auth.Principal, q Query) ([]*Release, error) {
+	if !p.Known() {
+		return nil, fmt.Errorf("%w: unknown role", ticket.ErrForbidden)
+	}
+	if q.Project != "" && !p.InProject(q.Project) {
+		return nil, nil
+	}
+	q.Projects = p.Projects
+	if q.Limit <= 0 || q.Limit > ticket.MaxLimit {
+		q.Limit = ticket.DefaultLimit
+	}
+	return s.o.Store.ListReleases(ctx, q)
+}
+
+// Detail 是版本详情。
+type Detail struct {
+	*Release
+	ProjectKey  string
+	Tickets     []*ticket.Ticket // 调用者可见的关联工单
+	Deployments []DeploymentRecord
+}
+
+// Get 返回版本详情；版本所在项目不在调用者范围内时返回 ErrNotFound。关联工单按 tickets 的可见性过滤。
+func (s *Service) Get(ctx context.Context, p auth.Principal, id int64, tickets func(ctx context.Context, id int64) (*ticket.Ticket, error)) (*Detail, error) {
+	r, key, err := s.o.Store.GetRelease(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Known() || !p.InProject(key) {
+		return nil, ErrNotFound
+	}
+	d := &Detail{Release: r, ProjectKey: key}
+	ids, err := s.o.Store.ReleaseTicketIDs(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, tid := range ids {
+		t, err := tickets(ctx, tid)
+		if errors.Is(err, ticket.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		d.Tickets = append(d.Tickets, t)
+	}
+	if d.Deployments, err = s.o.Store.ReleaseDeployments(ctx, id); err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
 // IssueRef 是版本说明中对 Issue 的引用，Repo 已补全。

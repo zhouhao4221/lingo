@@ -445,6 +445,10 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 	}
 	owner, name, _ := strings.Cut(t.Repo, "/")
 	body := "**来自" + commentAuthor(c) + "的补充：**\n\n" + stripMarkers(c.Body)
+	if c.Source == "agent" {
+		// 研发 Agent 经灵问回复提交人：带对外标记，研发在 Gitea 里能看出这条已转给提交人
+		body = "**已回复提交人：**\n\n" + stripMarkers(c.Body) + "\n\n" + gitea.PublicMarker
+	}
 	giteaID := c.PostedID
 	if giteaID == 0 {
 		gc, err := w.o.Issues.CreateComment(ctx, owner, name, t.IssueNumber, body)

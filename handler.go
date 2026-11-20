@@ -15,6 +15,7 @@ import (
 //
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
 // 附件：POST /attachments（multipart，字段 file）、GET /attachments/{id}；
+// 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward；变更流：GET /events?after=。
 func (l *Lingo) Handler() http.Handler { return l.rest }
@@ -207,6 +208,29 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		}
 		es, err := l.ListEvents(ctx(r), user(r), after, int(limit))
 		return list(es, err)
+	})
+	rt.Handle("GET /projects", func(r *httpapi.Request) (any, error) {
+		ps, err := l.ListProjects(ctx(r), user(r))
+		return list(ps, err)
+	})
+	rt.Handle("GET /releases", func(r *httpapi.Request) (any, error) {
+		before, err := r.QueryInt("before")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		rs, err := l.ListReleases(ctx(r), user(r), r.Query("project"), r.Query("repo"), before, int(limit))
+		return list(rs, err)
+	})
+	rt.Handle("GET /releases/{id}", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return l.GetRelease(ctx(r), user(r), id)
 	})
 	rt.Handle("GET /settings/auto-forward", func(r *httpapi.Request) (any, error) {
 		ss, err := l.AutoForwardSettings(ctx(r), user(r))

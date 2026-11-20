@@ -147,7 +147,7 @@ CREATE TABLE ticket_comments (
     ticket_id        bigint      NOT NULL REFERENCES tickets (id) ON DELETE CASCADE,
     author_id        text        NOT NULL DEFAULT '', -- 接入方用户 ID；来自 Gitea 时为空
     author_name      text        NOT NULL DEFAULT '', -- Gitea 评论为研发账号 login
-    source           text        NOT NULL CHECK (source IN ('user', 'staff', 'gitea')),
+    source           text        NOT NULL CHECK (source IN ('user', 'staff', 'agent', 'gitea')),
     body             text        NOT NULL,
     public           boolean     NOT NULL DEFAULT true, -- 对提交人可见
     gitea_comment_id bigint      UNIQUE,                -- 已同步到 / 来自 Gitea 的评论

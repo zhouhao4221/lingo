@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.16 | 2026-11-20 | haiqing | MCP Server 落地（14 个工具，与 REST 对齐）；研发 Agent 可经 `reply_ticket` 回复提交人；新增 Go 方法 `ListProjects`、`ListReleases`、`GetRelease` 与 REST `GET /projects`、`GET /releases`、`GET /releases/{id}` |
 | v1.15 | 2026-11-20 | haiqing | 版本与上线落地：处理 `release`（published / updated，草稿忽略，deleted 保留记录）、`create`（只打 tag，按 semver 后缀识别预发布）、`status`、`workflow_run` 事件与 `MarkDeployed`；正式版本逐个检查已修复工单的修复提交是否包含在该 tag 中（不依赖版本先后，维护分支并行发版也适用），修复提交未知的按说明中对本仓库 Issue 的引用补漏，工单 fixed → released 并发 `ticket.released`；预发布只记录关联；只认版本号形式的 tag，且 tag 已有 Release 时以 Release 为准；上线时修复提交包含在上线版本中的 released 工单 → deployed 并发 `ticket.deployed`，版本已上线后才关联的工单发布即上线；上线信号先于版本到达时等待 2 分钟，带 tag 的信号之后按 tag 补建版本 |
 | v1.14 | 2026-11-20 | haiqing | 附件与补充评论落地：`UploadAttachment` / `GetAttachment` / `AddTicketComment`，REST `POST /attachments`（multipart）、`GET /attachments/{id}`、`POST /tickets/{id}/comments`；附件随 Issue 上传并在正文引用，转出时可勾选；建单前的补充写进 Issue 正文，建单后的补充由机器人发为 Issue 评论并上传评论附件；Gitea 拒收的附件只留在灵问并在 Issue 中注明；未关联工单的附件 24 小时后清理 |
 | v1.13 | 2026-11-20 | haiqing | REST `Handler` 落地（工单、后台确认、待确认列表与统计、变更流、自动转出开关、`GET /ticket-types`）；新增 Go 方法 `ListMyTickets`、`ListTicketComments`、`TicketTypes`、`AutoForwardSettings`；实现 `ListTriage`、`TriageSummary`、`ListEvents` 与待确认超时提醒；变更流只返回早于所有进行中事务的事件，游标不会跳过；PostgreSQL 最低 13 |
@@ -207,22 +208,26 @@ flowchart LR
 - **Gitea Webhook**：`l.WebhookHandler()`，验签 + 去重
 - **后台 worker**：`l.Run(ctx)`，负责 outbox 投递、Gitea 同步补偿、知识库生成
 
-**MCP 工具（草案）**：
+**MCP 工具**（已实现的与 REST 对齐；`ask`、`search_knowledge` 随知识问答实现后提供）：
 
 | 工具 | 说明 | 主要使用方 |
 |-----|-----|----------|
 | `list_projects` | 列出当前身份可对接的项目及其仓库 | 两侧 |
-| `ask` | 向灵问提问（指定 `project`，可选 `repo`），返回回答与来源 | 用户侧 AI 客户端 |
-| `search_knowledge` | 检索知识库条目（按 `project` / `repo` 过滤） | 两侧 |
+| `list_ticket_types` | 可提交的工单类型与表单字段（取自仓库 Issue 模板） | 用户侧 AI 客户端 |
 | `create_ticket` | 提交咨询 / Bug / 需求工单（指定 `project`，可选 `repo`） | 用户侧 AI 客户端 |
-| `get_ticket` | 查询工单状态、回复、关联 Issue 与修复版本 | 两侧 |
-| `reply_ticket` | 在工单中回复用户（同步为 Issue 评论） | 研发侧 AI Agent |
+| `get_ticket` | 查询工单状态、对调用者可见的评论与附件列表、Issue 与修复版本 | 两侧 |
+| `list_my_tickets` | 本人提交的工单 | 用户侧 AI 客户端 |
+| `reply_ticket` | 在工单中留言：提交人补充、后台答复，或研发 Agent 回复提交人（同步为带对外标记的 Issue 评论并通知提交人） | 两侧 |
+| `list_events` | 按 ID 增量拉取进展事件 | 两侧 |
+| `list_triage` / `forward_ticket` / `answer_ticket` / `merge_ticket` / `reject_ticket` | 后台确认（reviewer / admin） | 研发负责人 |
+| `list_releases` / `get_release` | 版本记录、关联工单与上线记录 | 两侧 |
+| `ask` / `search_knowledge` | 提问与检索知识库（待知识问答实现） | 两侧 |
 
 **业务规则**：
 - Handler 内的路径为相对路径，挂载前缀由接入方决定（见 3.2.1）
 - REST 与 MCP 的请求身份均由接入方提供的 `Authenticate` 解析（见 3.2.0.2）；Go 方法如何传入身份：待确认
-- MCP 传输方式：Streamable HTTP（是否同时支持 stdio：待定）
-- 研发侧工具仅对 `reviewer` / `agent` 角色开放
+- MCP 传输方式：Streamable HTTP，无状态（只接受 POST、直接返回 JSON 响应，不开 SSE 流、不维护会话），多实例部署安全；带 Origin 头的请求须与 Host 同源；不支持 stdio
+- 工具的权限与数据隔离与 Go 方法相同，在领域层执行；工具执行错误以 `isError` 结果返回
 - Go 方法签名、REST 路径与请求格式：待设计
 
 **验收标准**：

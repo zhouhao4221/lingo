@@ -46,6 +46,7 @@ type Lingo struct {
 	store    *store.Store
 	webhook  http.Handler
 	rest     http.Handler
+	mcp      http.Handler
 	worker   *worker.Worker
 	tickets  *ticket.Service
 	releases *release.Service
@@ -114,6 +115,7 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, err
 	}
 	l.rest = l.newRESTHandler()
+	l.mcp = l.newMCPHandler()
 	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
 	return l, nil
 }
@@ -256,9 +258,6 @@ func (l *Lingo) fetchBotLogin() {
 	l.bot = u.Login
 }
 
-// MCPHandler 返回 MCP Server（Streamable HTTP），工具与 Handler 能力对齐。
-func (l *Lingo) MCPHandler() http.Handler { return notImplemented() }
-
 // WebhookHandler 接收 Gitea Webhook（Issue、评论、PR、Release、提交状态、Actions 运行）：验签、去重后落库
 // 并立即返回，由 Run 中的 worker 处理。未配置 Config.Gitea.WebhookSecret 时拒绝所有投递（503）。
 func (l *Lingo) WebhookHandler() http.Handler { return l.webhook }
@@ -294,12 +293,3 @@ func (l *Lingo) Run(ctx context.Context) error {
 
 // ErrNotFound 表示资源不存在或无权访问（两者不区分，避免暴露数据是否存在）。
 var ErrNotFound = errors.New("lingo: not found")
-
-var errNotImplemented = errors.New("lingo: not implemented")
-
-// TODO: 骨架阶段，接口待实现。
-func notImplemented() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "lingo: not implemented", http.StatusNotImplemented)
-	})
-}
