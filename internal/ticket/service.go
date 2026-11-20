@@ -549,8 +549,7 @@ func EventFor(t *Ticket, kind notify.Kind, prev Status, actor, body string) noti
 }
 
 func (s *Service) event(t *Ticket, kind notify.Kind, prev Status, actor, body string) notify.Event {
-	e := notify.Event{Kind: kind, ProjectID: t.ProjectID, ProjectKey: t.ProjectKey, TicketID: t.ID, TicketType: t.Type,
-		Title: t.Title, Status: string(t.Status), PrevStatus: string(prev), UserID: t.UserID, ActorID: actor, Body: body}
+	e := EventFor(t, kind, prev, actor, body)
 	if s.o.IssueURL != nil && t.Repo != "" && t.IssueNumber != 0 {
 		e.URL = s.o.IssueURL(t.Repo, t.IssueNumber)
 	}

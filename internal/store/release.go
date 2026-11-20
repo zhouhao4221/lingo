@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/release"
+	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
 var _ release.Store = (*Store)(nil)
@@ -17,18 +18,7 @@ type releaseTx struct{ *ticketTx }
 
 // InReleaseTx 实现 release.Store。
 func (s *Store) InReleaseTx(ctx context.Context, fn func(release.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck // 提交后回滚为空操作
-	if err := fn(releaseTx{&ticketTx{tx: tx, notify: s.notify}}); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit: %w", err)
-	}
-	return nil
+	return s.inTx(ctx, func(x *ticketTx) error { return fn(releaseTx{x}) })
 }
 
 func (x releaseTx) RepoID(ctx context.Context, repo string) (int64, error) {
@@ -87,31 +77,20 @@ func scanRelease(row rowScanner) (*release.Release, error) {
 	return &r, nil
 }
 
-func (x releaseTx) PreviousRelease(ctx context.Context, r *release.Release) (*release.Release, error) {
-	p, err := scanRelease(x.tx.QueryRowContext(ctx, "SELECT "+releaseColumns+` FROM releases r
-		WHERE r.repo_id = $1 AND r.id <> $2 AND NOT r.prerelease AND COALESCE(r.published_at, r.synced_at) < $3
-		ORDER BY COALESCE(r.published_at, r.synced_at) DESC, r.id DESC LIMIT 1`, r.RepoID, r.ID, r.PublishedAt))
-	if errors.Is(err, release.ErrNotFound) {
-		return nil, nil
-	}
-	return p, err
-}
-
-func (x releaseTx) FixedTickets(ctx context.Context, repoID int64) ([]release.FixedTicket, error) {
-	rows, err := x.tx.QueryContext(ctx, `SELECT t.id, r.owner || '/' || r.name, COALESCE(t.gitea_issue_number, 0), t.fixed_commit,
-		COALESCE(t.fixed_pr, 0), t.updated_at FROM tickets t JOIN repos r ON r.id = t.repo_id
-		WHERE t.repo_id = $1 AND t.status = 'fixed' ORDER BY t.id`, repoID)
+func (x releaseTx) Candidates(ctx context.Context, repoID int64, status ticket.Status) ([]release.Candidate, error) {
+	rows, err := x.tx.QueryContext(ctx, `SELECT id, fixed_commit FROM tickets WHERE repo_id = $1 AND status = $2 ORDER BY id`,
+		repoID, string(status))
 	if err != nil {
-		return nil, fmt.Errorf("store: fixed tickets: %w", err)
+		return nil, fmt.Errorf("store: release candidates: %w", err)
 	}
 	defer rows.Close()
-	var out []release.FixedTicket
+	var out []release.Candidate
 	for rows.Next() {
-		var t release.FixedTicket
-		if err := rows.Scan(&t.ID, &t.Repo, &t.IssueNumber, &t.FixedCommit, &t.FixedPR, &t.UpdatedAt); err != nil {
+		var c release.Candidate
+		if err := rows.Scan(&c.ID, &c.FixedCommit); err != nil {
 			return nil, err
 		}
-		out = append(out, t)
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }
@@ -130,32 +109,28 @@ func (x releaseTx) FindRelease(ctx context.Context, repoID int64, tag, sha strin
 		ORDER BY (r.tag = $2) DESC, r.prerelease, r.id DESC LIMIT 1`, repoID, tag, sha))
 }
 
-func (x releaseTx) AddDeployment(ctx context.Context, releaseID int64, env, source, ref string, at time.Time) (bool, error) {
-	res, err := x.tx.ExecContext(ctx, `INSERT INTO deployments (release_id, env, source, ref, deployed_at) VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (release_id, env) DO NOTHING`, releaseID, env, source, ref, at)
-	if err != nil {
-		return false, fmt.Errorf("store: add deployment: %w", err)
+func (x releaseTx) AddDeployment(ctx context.Context, releaseID int64, env, source, ref string, at time.Time) error {
+	if _, err := x.tx.ExecContext(ctx, `INSERT INTO deployments (release_id, env, source, ref, deployed_at) VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (release_id, env) DO NOTHING`, releaseID, env, source, ref, at); err != nil {
+		return fmt.Errorf("store: add deployment: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return nil
 }
 
-func (x releaseTx) ReleasedTickets(ctx context.Context, repoID int64, r *release.Release) ([]int64, error) {
-	rows, err := x.tx.QueryContext(ctx, `SELECT t.id FROM tickets t JOIN releases fr ON fr.id = t.fixed_release_id
-		WHERE t.repo_id = $1 AND t.status = 'released'
-		  AND (fr.id = $2 OR COALESCE(fr.published_at, fr.synced_at) <= $3)
-		ORDER BY t.id`, repoID, r.ID, r.PublishedAt)
+func (x releaseTx) Deployments(ctx context.Context, releaseID int64) (map[string]time.Time, error) {
+	rows, err := x.tx.QueryContext(ctx, "SELECT env, deployed_at FROM deployments WHERE release_id = $1", releaseID)
 	if err != nil {
-		return nil, fmt.Errorf("store: released tickets: %w", err)
+		return nil, fmt.Errorf("store: deployments: %w", err)
 	}
 	defer rows.Close()
-	var out []int64
+	out := map[string]time.Time{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var env string
+		var at time.Time
+		if err := rows.Scan(&env, &at); err != nil {
 			return nil, err
 		}
-		out = append(out, id)
+		out[env] = at
 	}
 	return out, rows.Err()
 }

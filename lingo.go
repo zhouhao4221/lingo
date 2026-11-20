@@ -186,6 +186,7 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Templates:   l.tmpls,
 
 		Releases:       l.releases,
+		Git:            l.gitea,
 		Reminder:       l.tickets,
 		RemindEvery:    l.remindEvery(),
 		RemindProjects: l.projectKeys(),

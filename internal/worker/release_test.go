@@ -25,4 +25,9 @@ func TestReleaseRefsAndPrerelease(t *testing.T) {
 			t.Errorf("prerelease(%s) != %v", tag, want)
 		}
 	}
+	for tag, want := range map[string]bool{"v1.2.0": true, "1.0.0-rc.1": true, "v2.0.0+build.5": true, "backup-2026-11-20": false, "v1.2": false, "deploy-marker": false} {
+		if versionTag.MatchString(tag) != want {
+			t.Errorf("versionTag(%s) != %v", tag, want)
+		}
+	}
 }

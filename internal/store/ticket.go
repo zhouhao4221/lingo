@@ -18,6 +18,11 @@ var _ ticket.Store = (*Store)(nil)
 
 // InTx 实现 ticket.Store。
 func (s *Store) InTx(ctx context.Context, fn func(ticket.Tx) error) error {
+	return s.inTx(ctx, func(x *ticketTx) error { return fn(x) })
+}
+
+// inTx 在一个事务中执行 fn，fn 返回错误时回滚；各领域的事务入口共用。
+func (s *Store) inTx(ctx context.Context, fn func(*ticketTx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin: %w", err)

@@ -22,9 +22,18 @@ func releaseGitea(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
 		case "/repos/demo/api/tags/v1.1.0":
 			_, _ = w.Write([]byte(`{"name":"v1.1.0","commit":{"sha":"tagsha110"}}`))
-		case "/repos/demo/api/compare/v1.0.0...v1.1.0":
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_commits": 2, "commits": []map[string]any{{"sha": "ABC123"}, {"sha": "tagsha110"}}})
 		default:
+			// compare/<ref>...<sha>：sha 已包含在 ref 中时没有新提交
+			if rest, ok := strings.CutPrefix(p, "/repos/demo/api/compare/"); ok {
+				base, head, _ := strings.Cut(rest, "...")
+				contained := (base == "v1.1.0" || base == "tagsha110") && strings.EqualFold(head, "abc123")
+				n := 1
+				if contained {
+					n = 0
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"total_commits": n, "commits": []map[string]any{}})
+				return
+			}
 			http.NotFound(w, r)
 		}
 	}))
@@ -38,7 +47,7 @@ func seedRelease(t *testing.T, db *sql.DB) (byCommit, byRef, untouched int64) {
 	for i, c := range []struct {
 		issue  int
 		commit string
-	}{{12, "abc123"}, {13, "zzz"}, {14, "yyy"}} {
+	}{{12, "ABC123"}, {13, ""}, {14, "yyy"}} {
 		if err := db.QueryRow(`INSERT INTO tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number, fixed_commit)
 			SELECT 'u1', p.id, r.id, 'bug', 't', 'fixed', $1, $2 FROM projects p JOIN repos r ON r.project_id = p.id
 			WHERE p.key = 'demo' AND r.name = 'api' RETURNING id`, c.issue, c.commit).Scan(&ids[i]); err != nil {
@@ -88,7 +97,7 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 	}
 	send("r0", "release", `{"action":"published","release":{"id":9,"tag_name":"v1.1.0-rc.1","name":"rc","body":"#13","prerelease":true,
 		"published_at":"2026-11-19T00:00:00Z","html_url":"http://g/demo/api/releases/v1.1.0-rc.1"},`+repo+`}`)
-	// 正式版本：#12 按区间提交命中，#13 按说明中的引用补漏，#14 不在版本中
+	// 正式版本：#12 的修复提交包含在 tag 中，#13 修复提交未知、按说明中的引用补漏，#14 的修复提交不在版本中
 	send("r1", "release", `{"action":"published","release":{"id":10,"tag_name":"v1.1.0","name":"1.1","body":"修复 #13","prerelease":false,
 		"published_at":"2026-11-20T00:00:00Z","html_url":"http://g/demo/api/releases/v1.1.0"},`+repo+`}`)
 	evs := rec.waitFor(t, 2)
@@ -133,5 +142,15 @@ func TestReleaseAndDeployFlow(t *testing.T) {
 	waitProcessed(t, db, 4)
 	if got := rec.waitFor(t, 4); len(got) != 4 {
 		t.Errorf("duplicate deploy events: %d", len(got))
+	}
+	// 版本已上线后才关联上的工单（如 Release 更新时补上）：发布即上线
+	if _, err := db.Exec("UPDATE tickets SET fixed_commit = 'abc123' WHERE id = $1", untouched); err != nil {
+		t.Fatal(err)
+	}
+	send("r2", "release", `{"action":"updated","release":{"id":10,"tag_name":"v1.1.0","name":"1.1","body":"修复 #13","prerelease":false,
+		"published_at":"2026-11-20T00:00:00Z","html_url":"http://g/demo/api/releases/v1.1.0"},`+repo+`}`)
+	evs = rec.waitFor(t, 6)
+	if evs[4].Kind != lingo.EventTicketReleased || evs[5].Kind != lingo.EventTicketDeployed || evs[5].TicketID != untouched {
+		t.Errorf("late link events = %+v", evs[4:])
 	}
 }

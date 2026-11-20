@@ -24,6 +24,7 @@ type Releases interface {
 type GitReader interface {
 	GetTag(ctx context.Context, owner, repo, tag string) (*gitea.Tag, error)
 	Compare(ctx context.Context, owner, repo, base, head string) (*gitea.Compare, error)
+	GetReleaseByTag(ctx context.Context, owner, repo, tag string) (*gitea.Release, error)
 }
 
 // Git 把 GitReader 适配为 release.Git。
@@ -45,28 +46,27 @@ func (g Git) TagCommit(ctx context.Context, repo, tag string) (string, error) {
 	return t.Commit.SHA, nil
 }
 
-// Commits 实现 release.Git。
-func (g Git) Commits(ctx context.Context, repo, base, head string) ([]string, bool, error) {
+// Contains 实现 release.Git：比较 ref...sha，sha 相对 ref 没有新提交即已包含。
+func (g Git) Contains(ctx context.Context, repo, ref, sha string) (bool, error) {
 	owner, name, _ := strings.Cut(repo, "/")
-	cp, err := g.R.Compare(ctx, owner, name, base, head)
+	cp, err := g.R.Compare(ctx, owner, name, ref, sha)
 	if errors.Is(err, gitea.ErrNotFound) {
-		return nil, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return nil, false, giteaErr("compare "+base+"..."+head, err)
+		return false, giteaErr("compare "+ref+"..."+sha, err)
 	}
-	shas := make([]string, 0, len(cp.Commits))
-	for _, c := range cp.Commits {
-		shas = append(shas, c.SHA)
-	}
-	return shas, true, nil
+	return cp.TotalCommits == 0, nil
 }
 
 // deployWait 是上线信号先于版本记录到达时的等待时间（release / tag 事件与部署事件之间没有顺序保证）。
 const deployWait = 2 * time.Minute
 
-// semverPre 匹配带预发布后缀的版本号，如 v1.2.0-rc.1。
-var semverPre = regexp.MustCompile(`^v?\d+\.\d+\.\d+-[0-9A-Za-z.-]+`)
+// semverPre 匹配带预发布后缀的版本号，如 v1.2.0-rc.1；versionTag 匹配版本号形式的 tag（可带预发布后缀）。
+var (
+	semverPre  = regexp.MustCompile(`^v?\d+\.\d+\.\d+-[0-9A-Za-z.-]+$`)
+	versionTag = regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+)
 
 func (w *Worker) applyRelease(ctx context.Context, ev *webhook.Event, received time.Time) error {
 	if w.o.Releases == nil {
@@ -86,9 +86,7 @@ func (w *Worker) applyRelease(ctx context.Context, ev *webhook.Event, received t
 		}
 		err = w.o.Releases.Published(ctx, rel, releaseRefs(ev.Repo, r.Body), false)
 	case webhook.TagCreated:
-		tag := strings.TrimPrefix(ev.Ref, "refs/tags/")
-		err = w.o.Releases.Published(ctx, release.Release{Repo: ev.Repo, Tag: tag, Name: tag, CommitSHA: ev.SHA,
-			Prerelease: semverPre.MatchString(tag), PublishedAt: received}, nil, true)
+		err = w.tagCreated(ctx, ev.Repo, strings.TrimPrefix(ev.Ref, "refs/tags/"), received)
 	case webhook.StatusChanged:
 		cfg := w.o.Repos(ev.Repo)
 		s := ev.Status
@@ -116,6 +114,30 @@ func (w *Worker) applyRelease(ctx context.Context, ev *webhook.Event, received t
 	return err
 }
 
+// tagCreated 处理只打 tag 的版本：只认版本号形式的 tag（备份、标记类 tag 忽略）。tag 常随 Gitea Release 一起创建，
+// 两个事件顺序不定，先等待 deployWait，之后若该 tag 已有 Release（是否预发布以它为准）交给 release 事件处理。
+// 提交用 GetTag 解析（附注 tag 的事件 sha 是 tag 对象而非提交）。
+func (w *Worker) tagCreated(ctx context.Context, repo, tag string, received time.Time) error {
+	if !versionTag.MatchString(tag) {
+		return nil
+	}
+	if wait := received.Add(deployWait); w.o.Now().Before(wait) {
+		return &ticket.DeferError{Until: wait, Reason: "waiting for a possible release event of the tag"}
+	}
+	owner, name, _ := strings.Cut(repo, "/")
+	_, err := w.o.Git.GetReleaseByTag(ctx, owner, name, tag)
+	switch {
+	case err == nil:
+		return nil
+	case !errors.Is(err, gitea.ErrNotFound):
+		return giteaErr("get release "+tag, err)
+	}
+	return w.o.Releases.Published(ctx, release.Release{Repo: repo, Tag: tag, Name: tag,
+		Prerelease: semverPre.MatchString(tag), PublishedAt: received}, nil, true)
+}
+
+// deployed 记录上线。版本记录尚未到达时等待 deployWait；之后带 tag 的信号（工作流以 tag 触发）按 tag 补建版本记录
+// 再记录上线，只有提交的信号无法对应版本时放弃。
 func (w *Worker) deployed(ctx context.Context, d release.Deployment, received time.Time) error {
 	err := w.o.Releases.Deployed(ctx, d)
 	if !errors.Is(err, release.ErrNotFound) {
@@ -124,7 +146,17 @@ func (w *Worker) deployed(ctx context.Context, d release.Deployment, received ti
 	if wait := received.Add(deployWait); w.o.Now().Before(wait) {
 		return &ticket.DeferError{Until: wait, Reason: "release for deployment not recorded yet"}
 	}
-	w.log.Debug("deployment does not match any release", "repo", d.Repo, "tag", d.Tag, "sha", d.SHA)
+	if d.Tag != "" && versionTag.MatchString(d.Tag) {
+		err := w.o.Releases.Published(ctx, release.Release{Repo: d.Repo, Tag: d.Tag, Name: d.Tag,
+			Prerelease: semverPre.MatchString(d.Tag), PublishedAt: d.At}, nil, true)
+		if err != nil && !errors.Is(err, release.ErrNotFound) {
+			return err
+		}
+		if err == nil {
+			return w.o.Releases.Deployed(ctx, d)
+		}
+	}
+	w.log.Warn("deployment does not match any release", "repo", d.Repo, "tag", d.Tag, "sha", d.SHA)
 	return nil
 }
 
