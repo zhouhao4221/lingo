@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.13 | 2026-11-20 | haiqing | REST `Handler` 落地（工单、后台确认、待确认列表与统计、变更流、自动转出开关、`GET /ticket-types`）；新增 Go 方法 `ListMyTickets`、`ListTicketComments`、`TicketTypes`、`AutoForwardSettings`；实现 `ListTriage`、`TriageSummary`、`ListEvents` 与待确认超时提醒；变更流只返回早于所有进行中事务的事件，游标不会跳过；PostgreSQL 最低 13 |
 | v1.12 | 2026-11-18 | haiqing | 工单提交与后台确认落地：Go 方法 `CreateTicket`、`ForwardTicket`、`AnswerTicket`、`MergeTicket`、`RejectTicket` 与公开错误 `ErrInvalidInput` / `ErrForbidden` / `ErrConflict`；项目在 `Run` 启动或首次调用时同步入库（不停用配置中删掉的项目与仓库，以当前 Config 为准校验，避免滚动发布时旧实例停掉新项目）；建 Issue 经 outbox 执行，重试时按隐藏标记查重，用户文本中的灵问标记被去掉，Issue 正文不含提交人身份；建单被放弃时工单变为 `abnormal`，可再次转出 |
 | v1.11 | 2026-11-18 | haiqing | Webhook 回流规则补充：新增事件 `ticket.scheduled`（排期）；Issue 关闭但尚无修复 PR 时等待 30 秒再判定；重开清除修复记录；标签全名带 `LabelPrefix`（如 `lingo/review/need-info`） |
 | v1.9 | 2026-11-18 | haiqing | 细化 Gitea 对接（含启动自检；调研见 [gitea-integration.md](../architecture/gitea-integration.md)）：按仓库 Issue 表单模板提单、评论往来与对外回复规则、工单状态机、PR 合并识别修复、按 tag 区间提交关联版本、上线信号、Webhook 自动注册与对账；Gitea 最低 1.22 |
@@ -810,7 +811,7 @@ flowchart LR
 ### 4.4 兼容性需求
 
 - Go 版本：Go 1.24
-- 数据库：PostgreSQL，驱动由接入方选择
+- 数据库：PostgreSQL ≥ 13（变更流用 `pg_current_xact_id` / `pg_snapshot_xmin`），驱动由接入方选择
 - Gitea 版本：最低 1.22（Issue 表单模板、依赖、timeline、Release、Webhook）；使用 Actions 上线信号需 1.25 及以上；不依赖仅 main 分支提供的项目看板 API
 - 部署环境：由接入方决定
 

@@ -338,7 +338,9 @@ func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
 			return err
 		}
 		if u.Public && (prev == nil || !prev.Public) {
-			return tx.Emit(ctx, s.event(t, notify.TicketComment, "", u.Body))
+			e := s.event(t, notify.TicketComment, "", u.Body)
+			e.CommentID = u.CommentID
+			return tx.Emit(ctx, e)
 		}
 		return nil
 	})

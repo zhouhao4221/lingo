@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
+	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/project"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 	"github.com/zhouhao4221/lingo/internal/worker"
@@ -53,15 +54,15 @@ func (l *Lingo) CreateTicket(ctx context.Context, u User, in TicketInput) (Ticke
 	if in.Project == "" {
 		in.Project = l.cfg.Projects[0].Key
 	}
-	t, err := l.tickets.Create(ctx, principal(u), ticket.NewTicket{Project: in.Project, Repo: in.Repo, Type: string(in.Type),
+	t, err := l.tickets.Create(ctx, l.principal(u), ticket.NewTicket{Project: in.Project, Repo: in.Repo, Type: string(in.Type),
 		Title: in.Title, Body: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version,
-		Conversation: in.ConversationID, Source: "go"})
+		Conversation: in.ConversationID})
 	return l.ticketResult(t, err)
 }
 
 // GetTicket 返回工单 id；无权访问时与不存在一样返回 ErrNotFound（见数据隔离）。
 func (l *Lingo) GetTicket(ctx context.Context, u User, id int64) (Ticket, error) {
-	t, err := l.tickets.Get(ctx, principal(u), id)
+	t, err := l.tickets.Get(ctx, l.principal(u), id)
 	return l.ticketResult(t, err)
 }
 
@@ -70,25 +71,25 @@ func (l *Lingo) ForwardTicket(ctx context.Context, u User, id int64, o ForwardOp
 	if err := l.ensureProjects(ctx); err != nil {
 		return Ticket{}, err
 	}
-	t, err := l.tickets.Forward(ctx, principal(u), id, ticket.ForwardInput{Title: o.Title, Type: string(o.Type), Repo: o.Repo, Note: o.Note})
+	t, err := l.tickets.Forward(ctx, l.principal(u), id, ticket.ForwardInput{Title: o.Title, Type: string(o.Type), Repo: o.Repo, Note: o.Note})
 	return l.ticketResult(t, err)
 }
 
 // AnswerTicket 直接答复待确认工单并结束，不转出（仅 reviewer / admin）；答复对提交人可见。
 func (l *Lingo) AnswerTicket(ctx context.Context, u User, id int64, answer string) (Ticket, error) {
-	t, err := l.tickets.Answer(ctx, principal(u), id, answer)
+	t, err := l.tickets.Answer(ctx, l.principal(u), id, answer)
 	return l.ticketResult(t, err)
 }
 
 // MergeTicket 把待确认工单合并到同项目的工单 target（仅 reviewer / admin）。
 func (l *Lingo) MergeTicket(ctx context.Context, u User, id, target int64, note string) (Ticket, error) {
-	t, err := l.tickets.Merge(ctx, principal(u), id, target, note)
+	t, err := l.tickets.Merge(ctx, l.principal(u), id, target, note)
 	return l.ticketResult(t, err)
 }
 
 // RejectTicket 驳回待确认工单（仅 reviewer / admin），reason 必填且对提交人可见。
 func (l *Lingo) RejectTicket(ctx context.Context, u User, id int64, reason string) (Ticket, error) {
-	t, err := l.tickets.Reject(ctx, principal(u), id, reason)
+	t, err := l.tickets.Reject(ctx, l.principal(u), id, reason)
 	return l.ticketResult(t, err)
 }
 
@@ -98,7 +99,7 @@ func (l *Lingo) SetAutoForward(ctx context.Context, u User, project string, t Ti
 	if err := l.ensureProjects(ctx); err != nil {
 		return err
 	}
-	return publicErr(l.tickets.SetAutoForward(ctx, principal(u), project, string(t), &on))
+	return publicErr(l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), &on))
 }
 
 // ResetAutoForward 删除运行时覆盖，恢复为 Project.AutoForward 的默认值（仅 admin）。
@@ -106,7 +107,159 @@ func (l *Lingo) ResetAutoForward(ctx context.Context, u User, project string, t 
 	if err := l.ensureProjects(ctx); err != nil {
 		return err
 	}
-	return publicErr(l.tickets.SetAutoForward(ctx, principal(u), project, string(t), nil))
+	return publicErr(l.tickets.SetAutoForward(ctx, l.principal(u), project, string(t), nil))
+}
+
+// ListMyTickets 返回 u 本人提交的工单，新的在前；status 可空；beforeID 为上一页最后一条的 ID（首页传 0）；
+// limit 为 0 时默认 50，最多 200。
+func (l *Lingo) ListMyTickets(ctx context.Context, u User, status string, beforeID int64, limit int) ([]Ticket, error) {
+	ts, err := l.tickets.ListMine(ctx, l.principal(u), ticket.MineQuery{Status: status, BeforeID: beforeID, Limit: limit})
+	return l.ticketList(ts, err)
+}
+
+// ticketDetail 返回工单与评论（一次鉴权），供 REST 详情接口使用。
+func (l *Lingo) ticketDetail(ctx context.Context, u User, id int64) (Ticket, []Comment, error) {
+	t, cs, err := l.tickets.Detail(ctx, l.principal(u), id)
+	if err != nil {
+		return Ticket{}, nil, publicErr(err)
+	}
+	return l.publicTicket(t), publicComments(cs), nil
+}
+
+func publicComments(cs []ticket.Comment) []Comment {
+	out := make([]Comment, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, Comment{ID: c.ID, Source: c.Source, AuthorID: c.AuthorID, AuthorName: c.AuthorName, Body: c.Body,
+			Public: c.Public, At: c.At})
+	}
+	return out
+}
+
+// ListTicketComments 返回工单评论（时间顺序）：external 只能看到对外评论；无权访问时返回 ErrNotFound。
+func (l *Lingo) ListTicketComments(ctx context.Context, u User, id int64) ([]Comment, error) {
+	cs, err := l.tickets.Comments(ctx, l.principal(u), id)
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	return publicComments(cs), nil
+}
+
+// ListTriage 列出 u 可见项目中的待确认工单（仅 reviewer / admin），按进入待确认的先后。
+func (l *Lingo) ListTriage(ctx context.Context, u User, f TriageFilter) ([]Ticket, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return nil, err
+	}
+	ts, err := l.tickets.ListTriage(ctx, l.principal(u), f.ProjectKey, ticket.TriageQuery{Type: string(f.Type),
+		PendingBefore: f.PendingBefore, AfterID: f.AfterID, Limit: f.Limit})
+	return l.ticketList(ts, err)
+}
+
+// TriageSummary 返回 u 可见项目的待确认数与超时数（仅 reviewer / admin）；超时按 Config.TriageRemindAfter
+// 计算（关闭提醒时按 24 小时）。
+func (l *Lingo) TriageSummary(ctx context.Context, u User) ([]TriageCount, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return nil, err
+	}
+	cs, err := l.tickets.TriageSummary(ctx, l.principal(u), l.overdueAfter())
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]TriageCount, 0, len(cs))
+	for _, c := range cs {
+		if !l.declared(c.ProjectKey, "") {
+			continue
+		}
+		out = append(out, TriageCount{ProjectKey: c.ProjectKey, Pending: c.Pending, Overdue: c.Overdue})
+	}
+	return out, nil
+}
+
+// ListEvents 返回 ID 大于 afterID 的事件（按 ID 升序，最多 limit 条，0 表示默认 100，最多 200），
+// 与 Notifier 推送的事件同源；按 u 的角色与项目过滤：external 只看本人工单的非 triage 事件，agent 看项目内
+// 已转出工单的非 triage 事件，reviewer / admin 看项目内全部。用最后一条的 ID 作下次的 afterID。
+func (l *Lingo) ListEvents(ctx context.Context, u User, afterID int64, limit int) ([]Event, error) {
+	es, err := l.tickets.ListEvents(ctx, l.principal(u), afterID, limit)
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]Event, 0, len(es))
+	for _, e := range es {
+		out = append(out, publicEvent(e))
+	}
+	return out, nil
+}
+
+// TicketTypes 返回项目（为空取默认项目）下可提交的工单类型与各自的表单字段，取自仓库 repo（为空取项目默认仓库）
+// 的 Issue 表单模板，供接入方弹窗渲染；读取模板失败时只返回类型、不带字段。
+func (l *Lingo) TicketTypes(ctx context.Context, u User, projectKey, repo string) ([]TicketTypeInfo, error) {
+	if projectKey == "" {
+		projectKey = l.cfg.Projects[0].Key
+	}
+	p := l.principal(u)
+	proj := l.project(projectKey)
+	if proj == nil || !p.Known() || !p.InProject(projectKey) {
+		return nil, ErrNotFound
+	}
+	if repo == "" {
+		repo = proj.DefaultRepo
+		if repo == "" && len(proj.Repos) > 0 {
+			repo = proj.Repos[0].Owner + "/" + proj.Repos[0].Name
+		}
+	}
+	if repo != "" && !l.declared(projectKey, repo) {
+		return nil, fmt.Errorf("%w: repo %q is not in project %q", ErrInvalidInput, repo, projectKey)
+	}
+	var tmpls []*gitea.IssueTemplate
+	if owner, name, ok := strings.Cut(repo, "/"); ok {
+		var err error
+		if tmpls, err = l.tmpls.Get(ctx, l.gitea, owner, name); err != nil {
+			l.log.Warn("lingo: list issue templates failed", "repo", repo, "err", err)
+		}
+	}
+	cfg := l.repoConfig(repo)
+	var out []TicketTypeInfo
+	for _, typ := range []TicketType{TicketConsult, TicketBug, TicketFeature} {
+		info := TicketTypeInfo{Type: typ}
+		if t := gitea.MatchTemplate(tmpls, cfg.Templates[string(typ)], string(typ), l.labelPrefix()); t != nil && t.IsForm() {
+			info.Template = t.Name
+			for _, f := range t.Fields {
+				if !f.IsInput() || f.ID == "" {
+					continue
+				}
+				info.Fields = append(info.Fields, FormField{ID: f.ID, Kind: f.Type, Label: f.Label(), Description: f.Description(),
+					Placeholder: f.Placeholder(), Required: f.Required(), Options: f.Options(), Multiple: f.Multiple()})
+			}
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+// AutoForwardSettings 返回 u 可见项目各工单类型当前生效的自动转出开关（reviewer / admin）。
+func (l *Lingo) AutoForwardSettings(ctx context.Context, u User) ([]AutoForwardSetting, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return nil, err
+	}
+	ss, err := l.tickets.AutoForwardSettings(ctx, l.principal(u), l.projectKeys())
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]AutoForwardSetting, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, AutoForwardSetting{ProjectKey: s.ProjectKey, Type: TicketType(s.Type), On: s.On, Overridden: s.Overridden})
+	}
+	return out, nil
+}
+
+func (l *Lingo) ticketList(ts []*ticket.Ticket, err error) ([]Ticket, error) {
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]Ticket, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, l.publicTicket(t))
+	}
+	return out, nil
 }
 
 // ensureProjects 把 Config.Projects 同步入库，成功一次后不再重复；Handler 与 Run 分进程部署时都能触发。
@@ -147,19 +300,37 @@ func (l *Lingo) defaultAutoForward(projectKey, typ string) bool {
 	return false
 }
 
+// projectKeys 返回 Config 中声明的全部项目 key。
+func (l *Lingo) projectKeys() []string {
+	keys := make([]string, 0, len(l.cfg.Projects))
+	for _, p := range l.cfg.Projects {
+		keys = append(keys, p.Key)
+	}
+	return keys
+}
+
+// project 返回声明的项目；不存在时为 nil。
+func (l *Lingo) project(key string) *Project {
+	for i := range l.cfg.Projects {
+		if l.cfg.Projects[i].Key == key {
+			return &l.cfg.Projects[i]
+		}
+	}
+	return nil
+}
+
 // declared 报告项目（repo 为空时）或项目下的仓库是否在 Config.Projects 中声明。
 func (l *Lingo) declared(projectKey, repo string) bool {
-	for _, p := range l.cfg.Projects {
-		if p.Key != projectKey {
-			continue
-		}
-		if repo == "" {
+	p := l.project(projectKey)
+	if p == nil {
+		return false
+	}
+	if repo == "" {
+		return true
+	}
+	for _, r := range p.Repos {
+		if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
 			return true
-		}
-		for _, r := range p.Repos {
-			if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
-				return true
-			}
 		}
 	}
 	return false
@@ -176,8 +347,14 @@ func (l *Lingo) repoConfig(repo string) worker.RepoConfig {
 	return worker.RepoConfig{}
 }
 
-func principal(u User) auth.Principal {
-	return auth.Principal{ID: u.ID, Name: u.Name, Email: u.Email, Role: string(u.Role), Projects: u.Projects}
+// principal 转换调用者身份；User.Projects 为空时限定为 Config 中声明的全部项目，
+// 使所有查询都只覆盖当前声明的项目（数据库中的项目不会因配置删除而停用）。
+func (l *Lingo) principal(u User) auth.Principal {
+	ps := u.Projects
+	if len(ps) == 0 {
+		ps = l.projectKeys()
+	}
+	return auth.Principal{ID: u.ID, Name: u.Name, Email: u.Email, Role: string(u.Role), Projects: ps}
 }
 
 func (l *Lingo) ticketResult(t *ticket.Ticket, err error) (Ticket, error) {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -211,7 +210,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		// 不让这类配置变化挡住建单
 		w.log.Warn("create issue rejected, retrying with fresh labels and no assignees", "repo", t.Repo, "err", err)
 		w.labels.forget(owner, name)
-		w.templates.forget(owner, name)
+		w.templates.Forget(owner, name)
 		if opt.Labels, err = w.labels.ensure(ctx, w.o.Issues, owner, name, wantLabels); err != nil {
 			return err
 		}
@@ -231,7 +230,7 @@ var typeColors = map[string]string{ticket.TypeConsult: "#1d76db", ticket.TypeBug
 
 // template 按 Repo.Templates 的文件名、再按模板标签匹配工单类型的 Issue 模板；没有时返回 nil（用内置结构）。
 func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg RepoConfig) (*gitea.IssueTemplate, error) {
-	ts, err := w.templates.get(ctx, w.o.Issues, owner, name, w.o.Now())
+	ts, err := w.templates.Get(ctx, w.o.Issues, owner, name)
 	if err != nil {
 		if gitea.IsRetryable(err) {
 			return nil, fmt.Errorf("list issue templates: %w", err)
@@ -239,23 +238,11 @@ func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg Repo
 		w.log.Warn("list issue templates failed, using built-in body", "repo", owner+"/"+name, "err", err)
 		return nil, nil
 	}
-	if file := cfg.Templates[typ]; file != "" {
-		for _, t := range ts {
-			if t.FileName == file || strings.HasSuffix(t.FileName, "/"+file) {
-				return t, nil
-			}
-		}
-		w.log.Warn("configured issue template not found", "repo", owner+"/"+name, "template", file)
+	t := gitea.MatchTemplate(ts, cfg.Templates[typ], typ, w.o.LabelPrefix)
+	if t == nil && cfg.Templates[typ] != "" {
+		w.log.Warn("configured issue template not found", "repo", owner+"/"+name, "template", cfg.Templates[typ])
 	}
-	want := []string{"type/" + typ, w.o.LabelPrefix + "/type/" + typ, typ}
-	for _, t := range ts {
-		for _, l := range t.Labels {
-			if slices.ContainsFunc(want, func(s string) bool { return strings.EqualFold(s, l) }) {
-				return t, nil
-			}
-		}
-	}
-	return nil, nil
+	return t, nil
 }
 
 // IssueBody 生成 Issue 正文：有表单模板且提交了字段时按 Gitea 表单格式渲染，否则用内置结构；
@@ -340,46 +327,6 @@ func clipRunes(s string, n int) string {
 		return string(r[:n])
 	}
 	return s
-}
-
-// templateCache 按仓库缓存 Issue 模板 5 分钟，避免每建一个 Issue 都重新解析全部模板。
-type templateCache struct {
-	mu     sync.Mutex
-	byRepo map[string]cachedTemplates
-}
-
-type cachedTemplates struct {
-	at time.Time
-	ts []*gitea.IssueTemplate
-}
-
-const templateTTL = 5 * time.Minute
-
-func (c *templateCache) get(ctx context.Context, g IssueWriter, owner, name string, now time.Time) ([]*gitea.IssueTemplate, error) {
-	key := strings.ToLower(owner + "/" + name)
-	c.mu.Lock()
-	if e, ok := c.byRepo[key]; ok && now.Sub(e.at) < templateTTL {
-		c.mu.Unlock()
-		return e.ts, nil
-	}
-	c.mu.Unlock()
-	ts, err := g.ListIssueTemplates(ctx, owner, name)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.byRepo == nil {
-		c.byRepo = map[string]cachedTemplates{}
-	}
-	c.byRepo[key] = cachedTemplates{at: now, ts: ts}
-	return ts, nil
-}
-
-func (c *templateCache) forget(owner, name string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.byRepo, strings.ToLower(owner+"/"+name))
 }
 
 type labelSpec struct {

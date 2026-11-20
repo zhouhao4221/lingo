@@ -258,11 +258,15 @@ CREATE TABLE events (
     prev_status text        NOT NULL DEFAULT '',
     action      text        NOT NULL DEFAULT '',
     payload     jsonb       NOT NULL DEFAULT '{}',
+    -- 写入事务的 ID：变更流只返回早于所有进行中事务的事件，ID 先分配后提交的事件不会被游标跳过
+    txid        xid8        NOT NULL DEFAULT pg_current_xact_id(),
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX events_ticket_idx ON events (ticket_id, id);
 CREATE INDEX events_user_idx ON events (user_id, id);
 CREATE INDEX events_project_idx ON events (project_id, id);
+-- 评论被删除、改为内部或编辑时按评论 ID 更新对应事件
+CREATE INDEX events_comment_idx ON events ((payload->>'comment_id')) WHERE kind = 'ticket.comment';
 
 -- 异步任务：Gitea 写操作与 Notifier 投递；worker 用 FOR UPDATE SKIP LOCKED + 租约领取
 CREATE TABLE outbox (

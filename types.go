@@ -170,39 +170,77 @@ const (
 // Event 是回传给接入方的工单进展；Notifier 推送与 ListEvents 变更流共用。
 // 投递为至少一次，接入方按 ID 去重。
 type Event struct {
-	ID         int64 // 全局递增，去重与增量拉取的游标
-	Kind       EventKind
-	At         time.Time
-	ProjectKey string
-	TicketID   int64
-	TicketType TicketType
-	Title      string
-	Status     string
-	PrevStatus string       // 状态变化前的状态，非状态类事件为空
-	Action     TriageAction // 仅 triage.resolved
-	UserID     string       // 提交人（接入方用户 ID）
-	ActorID    string       // 触发人（接入方用户 ID）；系统或 Gitea 触发为空
-	Body       string
-	URL        string // Gitea Issue 或 Release 链接
+	ID         int64        `json:"id"` // 全局递增，去重与增量拉取的游标
+	Kind       EventKind    `json:"kind"`
+	At         time.Time    `json:"at"`
+	ProjectKey string       `json:"project"`
+	TicketID   int64        `json:"ticket_id,omitempty"`
+	TicketType TicketType   `json:"ticket_type,omitempty"`
+	Title      string       `json:"title,omitempty"`
+	Status     string       `json:"status,omitempty"`
+	PrevStatus string       `json:"prev_status,omitempty"` // 状态变化前的状态，非状态类事件为空
+	Action     TriageAction `json:"action,omitempty"`      // 仅 triage.resolved
+	UserID     string       `json:"user_id,omitempty"`     // 提交人（接入方用户 ID）
+	ActorID    string       `json:"actor_id,omitempty"`    // 触发人（接入方用户 ID）；系统或 Gitea 触发为空
+	Body       string       `json:"body,omitempty"`
+	URL        string       `json:"url,omitempty"` // Gitea Issue 或 Release 链接
 }
 
 // Ticket 是对接入方可见的工单视图（不含 Gitea 内部讨论）。
 type Ticket struct {
-	ID          int64
-	ProjectKey  string
-	Repo        string // "owner/name"，未转出时为空
-	Type        TicketType
-	Title       string
-	Body        string
-	Status      string
-	UserID      string
-	UserName    string
-	IssueURL    string
-	FixedTag    string // 修复版本
-	DeployedAt  *time.Time
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	TriageSince *time.Time // 进入待确认的时间，非待确认为空
+	ID          int64      `json:"id"`
+	ProjectKey  string     `json:"project"`
+	Repo        string     `json:"repo,omitempty"` // "owner/name"，未选定仓库时为空
+	Type        TicketType `json:"type"`
+	Title       string     `json:"title"`
+	Body        string     `json:"body"`
+	Status      string     `json:"status"`
+	UserID      string     `json:"user_id"`
+	UserName    string     `json:"user_name,omitempty"`
+	IssueURL    string     `json:"issue_url,omitempty"`
+	FixedTag    string     `json:"fixed_tag,omitempty"` // 修复版本
+	DeployedAt  *time.Time `json:"deployed_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	TriageSince *time.Time `json:"triage_since,omitempty"` // 进入待确认的时间，非待确认为空
+}
+
+// Comment 是工单评论：提交人补充、后台答复、研发在 Gitea 的回复。external 只能看到对外评论。
+type Comment struct {
+	ID         int64     `json:"id"`
+	Source     string    `json:"source"` // user | staff | gitea
+	AuthorID   string    `json:"author_id,omitempty"`
+	AuthorName string    `json:"author_name,omitempty"` // 来自 Gitea 时为研发账号 login
+	Body       string    `json:"body"`
+	Public     bool      `json:"public"`
+	At         time.Time `json:"at"`
+}
+
+// TicketTypeInfo 是某类工单可填写的表单，取自仓库 Issue 表单模板；没有模板时 Fields 为空（只填正文）。
+type TicketTypeInfo struct {
+	Type     TicketType  `json:"type"`
+	Template string      `json:"template,omitempty"` // 模板名称
+	Fields   []FormField `json:"fields,omitempty"`
+}
+
+// FormField 是表单模板中的一个输入字段，提交时按 ID 放入 TicketInput.Fields。
+type FormField struct {
+	ID          string   `json:"id"`
+	Kind        string   `json:"kind"` // input | textarea | dropdown | checkboxes
+	Label       string   `json:"label"`
+	Description string   `json:"description,omitempty"`
+	Placeholder string   `json:"placeholder,omitempty"`
+	Required    bool     `json:"required"`
+	Options     []string `json:"options,omitempty"`
+	Multiple    bool     `json:"multiple,omitempty"`
+}
+
+// AutoForwardSetting 是项目 + 工单类型当前生效的自动转出开关。
+type AutoForwardSetting struct {
+	ProjectKey string     `json:"project"`
+	Type       TicketType `json:"type"`
+	On         bool       `json:"on"`
+	Overridden bool       `json:"overridden"` // 为真表示是运行时覆盖值，否则为 Project.AutoForward 默认值
 }
 
 // TriageFilter 是待确认列表的过滤条件。
@@ -216,9 +254,9 @@ type TriageFilter struct {
 
 // TriageCount 是单个项目的待确认统计。
 type TriageCount struct {
-	ProjectKey string
-	Pending    int
-	Overdue    int // 超过 Config.TriageRemindAfter 的数量
+	ProjectKey string `json:"project"`
+	Pending    int    `json:"pending"`
+	Overdue    int    `json:"overdue"` // 超过 Config.TriageRemindAfter 的数量
 }
 
 // Notifier 接收工单进展事件，经 outbox 投递，返回错误会重试；由接入方决定发邮件、站内信等。

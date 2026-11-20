@@ -64,6 +64,12 @@ type Options struct {
 	Drafts      Drafts
 	Repos       func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
 	LabelPrefix string                       // 默认 "lingo"
+	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
+
+	// Reminder 与 RemindEvery > 0 时，每分钟检查一次待确认超时（triage.overdue）。
+	Reminder       Reminder
+	RemindEvery    time.Duration
+	RemindProjects []string // 只提醒这些项目（当前声明的项目）
 
 	Logger       *slog.Logger
 	PollInterval time.Duration // 队列为空时的轮询间隔，默认 1 秒
@@ -76,12 +82,20 @@ type Options struct {
 	Now         func() time.Time
 }
 
+// Reminder 发出待确认超时提醒，由 ticket.Service 实现。
+type Reminder interface {
+	RemindOverdue(ctx context.Context, projects []string, every time.Duration, limit int) (int, error)
+}
+
+// remindInterval 是检查待确认超时的间隔。
+const remindInterval = time.Minute
+
 // Worker 消费 Webhook 投递与通知 outbox；多实例运行安全（领取用 SKIP LOCKED + 租约）。
 type Worker struct {
 	o         Options
 	log       *slog.Logger
 	labels    labelCache
-	templates templateCache
+	templates *gitea.TemplateCache
 }
 
 // New 校验配置并创建 Worker。
@@ -128,7 +142,11 @@ func New(o Options) (*Worker, error) {
 	if o.Tasks != nil && (o.Issues == nil || o.Drafts == nil) {
 		return nil, errors.New("worker: Issues and Drafts are required with Tasks")
 	}
-	return &Worker{o: o, log: o.Logger.With("component", "lingo.worker")}, nil
+	tc := o.Templates
+	if tc == nil {
+		tc = &gitea.TemplateCache{}
+	}
+	return &Worker{o: o, log: o.Logger.With("component", "lingo.worker"), templates: tc}, nil
 }
 
 // Run 运行各处理循环直到 ctx 取消；取消后处理完在途的一条再返回，已领取未开始的条目立即释放。
@@ -160,6 +178,31 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.o.Tasks != nil {
 		wg.Add(1)
 		go loop("gitea", w.ProcessTasks)
+	}
+	if w.o.Reminder != nil && w.o.RemindEvery > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t := time.NewTicker(remindInterval)
+			defer t.Stop()
+			limit := min(w.o.BatchSize, ticket.MaxLimit)
+			for {
+				for {
+					n, err := w.o.Reminder.RemindOverdue(ctx, w.o.RemindProjects, w.o.RemindEvery, limit)
+					if err != nil && ctx.Err() == nil {
+						w.log.Error("worker loop failed", "loop", "remind", "err", err)
+					}
+					if err != nil || n < limit {
+						break
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
 	}
 	wg.Wait()
 	return nil

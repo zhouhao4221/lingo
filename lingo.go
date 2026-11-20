@@ -44,8 +44,10 @@ type Lingo struct {
 	gitea   *gitea.Client
 	store   *store.Store
 	webhook http.Handler
+	rest    http.Handler
 	worker  *worker.Worker
 	tickets *ticket.Service
+	tmpls   *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
 	projectsSynced bool // Config.Projects 已同步入库
@@ -77,7 +79,7 @@ func New(cfg Config) (*Lingo, error) {
 	if err := project.Validate(projectSpecs(cfg.Projects)); err != nil {
 		return nil, fmt.Errorf("lingo: Config.Projects: %w", err)
 	}
-	l := &Lingo{cfg: cfg, log: cfg.Logger}
+	l := &Lingo{cfg: cfg, log: cfg.Logger, tmpls: &gitea.TemplateCache{}}
 	if l.log == nil {
 		l.log = slog.Default()
 	}
@@ -106,6 +108,7 @@ func New(cfg Config) (*Lingo, error) {
 	if l.worker, err = l.newWorker(); err != nil {
 		return nil, err
 	}
+	l.rest = l.newRESTHandler()
 	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
 	return l, nil
 }
@@ -122,6 +125,29 @@ func (l *Lingo) labelPrefix() string {
 		return l.cfg.Gitea.LabelPrefix
 	}
 	return "lingo"
+}
+
+// defaultRemindAfter 是 Config.TriageRemindAfter 为 0 时的提醒间隔。
+const defaultRemindAfter = 24 * time.Hour
+
+// remindEvery 是待确认提醒间隔：0 取默认 24 小时，负数关闭（返回 0）。
+func (l *Lingo) remindEvery() time.Duration {
+	switch d := l.cfg.TriageRemindAfter; {
+	case d == 0:
+		return defaultRemindAfter
+	case d < 0:
+		return 0
+	default:
+		return d
+	}
+}
+
+// overdueAfter 是 TriageSummary 判定超时的阈值：与提醒间隔一致，关闭提醒时仍按默认 24 小时统计。
+func (l *Lingo) overdueAfter() time.Duration {
+	if d := l.remindEvery(); d > 0 {
+		return d
+	}
+	return defaultRemindAfter
 }
 
 func (l *Lingo) issueURL(repo string, n int64) string {
@@ -151,6 +177,11 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Drafts:      l.tickets,
 		Repos:       l.repoConfig,
 		LabelPrefix: l.labelPrefix(),
+		Templates:   l.tmpls,
+
+		Reminder:       l.tickets,
+		RemindEvery:    l.remindEvery(),
+		RemindProjects: l.projectKeys(),
 	}
 	if n := l.cfg.Notifier; n != nil {
 		o.Notifications = l.store
@@ -217,32 +248,12 @@ func (l *Lingo) fetchBotLogin() {
 	l.bot = u.Login
 }
 
-// Handler 返回 REST JSON 接口（提问、工单、评审、知识库、版本），路径为相对路径，
-// 由接入方挂载到任意前缀（配合 http.StripPrefix）。
-func (l *Lingo) Handler() http.Handler { return notImplemented() }
-
 // MCPHandler 返回 MCP Server（Streamable HTTP），工具与 Handler 能力对齐。
 func (l *Lingo) MCPHandler() http.Handler { return notImplemented() }
 
 // WebhookHandler 接收 Gitea Webhook（Issue、评论、PR、Release、提交状态、Actions 运行）：验签、去重后落库
 // 并立即返回，由 Run 中的 worker 处理。未配置 Config.Gitea.WebhookSecret 时拒绝所有投递（503）。
 func (l *Lingo) WebhookHandler() http.Handler { return l.webhook }
-
-// ListTriage 列出 u 可见项目中的待确认工单（仅 reviewer / admin）。
-func (l *Lingo) ListTriage(ctx context.Context, u User, f TriageFilter) ([]Ticket, error) {
-	return nil, errNotImplemented
-}
-
-// TriageSummary 返回 u 可见项目的待确认数与超时数（仅 reviewer / admin）。
-func (l *Lingo) TriageSummary(ctx context.Context, u User) ([]TriageCount, error) {
-	return nil, errNotImplemented
-}
-
-// ListEvents 返回 ID 大于 afterID 的事件（按 ID 升序，最多 limit 条，0 表示默认 100），
-// 与 Notifier 推送的事件同源；按 u 的角色与项目过滤。
-func (l *Lingo) ListEvents(ctx context.Context, u User, afterID int64, limit int) ([]Event, error) {
-	return nil, errNotImplemented
-}
 
 // MarkDeployed 告知灵问仓库 repo（"owner/name"）的版本 tag 已在环境 env 上线，
 // 关联工单变为已上线并通知提交人；用于部署流水线不经 Gitea Actions / 提交状态上报的场景。
