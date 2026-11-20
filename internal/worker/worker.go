@@ -71,6 +71,9 @@ type Options struct {
 	Releases Releases
 	Git      GitReader // Releases 非空时必填
 
+	// Reconcile 配置定时对账（Interval > 0 时运行）。
+	Reconcile ReconcileOptions
+
 	// Reminder 非空时每分钟清理孤儿附件；RemindEvery > 0 时同时检查待确认超时（triage.overdue）。
 	Reminder       Reminder
 	RemindEvery    time.Duration
@@ -95,6 +98,9 @@ type Reminder interface {
 
 // orphanAge 是未关联工单的附件的保留时长。
 const orphanAge = 24 * time.Hour
+
+// reconcileStartDelay 是 Run 启动后首次对账前的等待。
+const reconcileStartDelay = 30 * time.Second
 
 // remindInterval 是检查待确认超时的间隔。
 const remindInterval = time.Minute
@@ -190,6 +196,30 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w.o.Tasks != nil {
 		wg.Add(1)
 		go loop("gitea", w.ProcessTasks)
+	}
+	if ro := w.o.Reconcile; ro.Interval > 0 && ro.Gitea != nil && ro.Cursors != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// 启动后稍等再对账：机器人账号获取、积压的 Webhook 投递先处理
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(min(ro.Interval, reconcileStartDelay)):
+			}
+			t := time.NewTicker(ro.Interval)
+			defer t.Stop()
+			for {
+				if err := w.Reconcile(ctx); err != nil && ctx.Err() == nil {
+					w.log.Warn("reconcile run incomplete", "err", err)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
 	}
 	if w.o.Reminder != nil {
 		wg.Add(1)

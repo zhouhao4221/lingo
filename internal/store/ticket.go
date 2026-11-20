@@ -301,6 +301,16 @@ func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {
 	return nil
 }
 
+func (x *ticketTx) SeenPull(ctx context.Context, ticketID int64, kind, pull string) (bool, error) {
+	var ok bool
+	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM ticket_events WHERE ticket_id = $1 AND kind = $2
+		AND lower(payload->>'pull') = lower($3))`, ticketID, kind, pull).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("store: seen pull: %w", err)
+	}
+	return ok, nil
+}
+
 func (x *ticketTx) AddHistory(ctx context.Context, h ticket.History) error {
 	payload, err := jsonObject(h.Payload)
 	if err != nil {

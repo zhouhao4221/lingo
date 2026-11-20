@@ -27,6 +27,8 @@ const (
 	IssueLabeled      IssueChange = "issue.labeled"
 	IssueMilestoned   IssueChange = "issue.milestoned"
 	IssueDemilestoned IssueChange = "issue.demilestoned"
+	// IssueSynced 是对账时按 Issue 当前快照对齐（不知道具体发生了什么变化）：只在快照新于已采纳的状态时生效。
+	IssueSynced IssueChange = "issue.synced"
 )
 
 // IssueState 是 Issue 的状态快照。Webhook 只是触发器：调用方应尽量传入从 Gitea 重新读取的当前状态，
@@ -103,6 +105,8 @@ type PullUpdate struct {
 	MergeCommit string
 	Sender      string
 	DeliveryID  string
+	// Replay 为真表示来自对账：同一 PR 的同类变化此前已应用过时跳过（避免重放已被重开撤销的合并）。
+	Replay bool
 }
 
 // SyncOptions 是 Sync 的配置。
@@ -150,7 +154,7 @@ func (s *Sync) Tracks(ctx context.Context, repo string, number int64) (bool, err
 func (s *Sync) ApplyIssue(ctx context.Context, u IssueUpdate) error {
 	// 队列检查放在事务外：事务持有连接与行锁时再从连接池取连接，连接池耗尽时会互相等待
 	mergePending := false
-	if u.Change == IssueClosed && s.o.PendingMerges != nil && s.o.CloseGrace >= 0 {
+	if (u.Change == IssueClosed || (u.Change == IssueSynced && u.Current.State == "closed")) && s.o.PendingMerges != nil && s.o.CloseGrace >= 0 {
 		var err error
 		if mergePending, err = s.o.PendingMerges(ctx, u.Repo, u.ReceivedAt.Add(s.o.CloseGrace)); err != nil {
 			return err
@@ -191,9 +195,13 @@ func (s *Sync) applyIssue(ctx context.Context, tx Tx, t *Ticket, u IssueUpdate, 
 	cur := u.Current
 	// 删除是终态，不受乱序判断影响（Issue 已无法读取，快照只能来自旧载荷）
 	stale := u.Change != IssueDeleted && !cur.UpdatedAt.IsZero() && !t.GiteaUpdatedAt.IsZero() && cur.UpdatedAt.Before(t.GiteaUpdatedAt)
+	if u.Change == IssueSynced && !t.GiteaUpdatedAt.IsZero() && !cur.UpdatedAt.After(t.GiteaUpdatedAt) {
+		return nil // 对账：这个状态 Webhook 已处理过，不重复留痕
+	}
 	prev, prevMilestone := t.Status, t.Milestone
 	if !stale {
-		if u.Change == IssueClosed && cur.State != "open" && t.FixedPR == 0 && t.Status.active() {
+		closing := u.Change == IssueClosed || (u.Change == IssueSynced && cur.State == "closed")
+		if closing && cur.State != "open" && t.FixedPR == 0 && t.Status.active() {
 			if err := s.awaitFix(u, mergePending); err != nil {
 				return err
 			}
@@ -256,41 +264,32 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 			t.Status = StatusOpen
 		}
 	case IssueClosed:
-		if cur.State == "open" { // 事件之后又被重开
-			return
-		}
-		switch {
-		case t.Status.fixed():
-		case t.FixedPR != 0 && (t.Status.active() || t.Status == StatusClosed):
-			t.Status = StatusFixed
-		case t.Status.active() || t.Status == StatusSubmitted:
-			t.Status = StatusClosed
+		if cur.State != "open" { // 事件之后又被重开时不处理
+			closeTicket(t)
 		}
 	case IssueReopened:
-		if cur.State == "closed" {
-			return
-		}
-		if t.Status == StatusClosed || t.Status.fixed() {
-			// 修复被否定：清掉修复记录，之后的合并重新记录
-			t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", "", 0, nil
+		if cur.State != "closed" && (t.Status == StatusClosed || t.Status.fixed()) {
+			reopenTicket(t)
 		}
 	case IssueDeleted:
 		t.Status = StatusAbnormal
 		return
 	case IssueAssigned:
-		if t.Status == StatusOpen && len(cur.Assignees) > 0 {
-			t.Status = StatusInProgress
-		}
+		assignTicket(t, cur)
 	case IssueLabeled:
-		needInfo := s.o.NeedInfoLabel != "" && slices.ContainsFunc(cur.Labels, func(l string) bool {
-			return strings.EqualFold(l, s.o.NeedInfoLabel)
-		})
-		switch {
-		case needInfo && (t.Status == StatusOpen || t.Status == StatusInProgress):
-			t.Status = StatusNeedInfo
-		case !needInfo && t.Status == StatusNeedInfo:
-			t.Status = StatusInProgress
+		s.labelTicket(t, cur)
+	case IssueSynced:
+		// 对账：按快照补上漏掉的关闭 / 重开 / 领取 / 标签变化。Issue 仍打开而工单已修复（PR 合并但未自动关闭）
+		// 是正常情况，只有“关闭未修复”的工单才按打开的 Issue 重开
+		if cur.State == "closed" {
+			closeTicket(t)
+			break
 		}
+		if t.Status == StatusClosed {
+			reopenTicket(t)
+		}
+		assignTicket(t, cur)
+		s.labelTicket(t, cur)
 	case IssueMilestoned, IssueDemilestoned:
 		t.Milestone, t.DueDate = cur.Milestone, cur.DueDate
 	}
@@ -311,6 +310,39 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate) {
 	}
 }
 
+func closeTicket(t *Ticket) {
+	switch {
+	case t.Status.fixed():
+	case t.FixedPR != 0 && (t.Status.active() || t.Status == StatusClosed):
+		t.Status = StatusFixed
+	case t.Status.active() || t.Status == StatusSubmitted:
+		t.Status = StatusClosed
+	}
+}
+
+// reopenTicket 回到开发中；修复被否定，清掉修复记录，之后的合并重新记录。
+func reopenTicket(t *Ticket) {
+	t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo, t.FixedReleaseID, t.DeployedAt = StatusInProgress, 0, "", "", 0, nil
+}
+
+func assignTicket(t *Ticket, cur IssueState) {
+	if t.Status == StatusOpen && len(cur.Assignees) > 0 {
+		t.Status = StatusInProgress
+	}
+}
+
+func (s *Sync) labelTicket(t *Ticket, cur IssueState) {
+	needInfo := s.o.NeedInfoLabel != "" && slices.ContainsFunc(cur.Labels, func(l string) bool {
+		return strings.EqualFold(l, s.o.NeedInfoLabel)
+	})
+	switch {
+	case needInfo && (t.Status == StatusOpen || t.Status == StatusInProgress):
+		t.Status = StatusNeedInfo
+	case !needInfo && t.Status == StatusNeedInfo:
+		t.Status = StatusInProgress
+	}
+}
+
 // ApplyComment 处理评论变化：保存到工单评论；对外评论首次出现时通知提交人。
 func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
 	if u.FromBot {
@@ -324,17 +356,26 @@ func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
 		if err != nil {
 			return err
 		}
-		if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
-			"delivery": u.DeliveryID, "sender": u.Author, "comment": u.CommentID, "public": u.Public,
-		}}); err != nil {
-			return err
+		history := func() error {
+			return tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
+				"delivery": u.DeliveryID, "sender": u.Author, "comment": u.CommentID, "public": u.Public,
+			}})
 		}
 		if u.Change == CommentDeleted {
+			if err := history(); err != nil {
+				return err
+			}
 			return tx.DeleteGiteaComment(ctx, u.CommentID, u.At)
 		}
 		prev, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
 			Body: u.Body, Public: u.Public, At: u.At})
 		if err != nil {
+			return err
+		}
+		if prev != nil && prev.Body == u.Body && prev.Public == u.Public {
+			return nil // 内容未变（重投或对账重放）：不重复留痕
+		}
+		if err := history(); err != nil {
 			return err
 		}
 		if u.Public && (prev == nil || !prev.Public) {
@@ -371,6 +412,13 @@ func (s *Sync) ApplyPull(ctx context.Context, u PullUpdate) error {
 }
 
 func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r IssueRef) error {
+	pull := u.Repo + "#" + strconv.FormatInt(u.Number, 10)
+	if u.Replay {
+		seen, err := tx.SeenPull(ctx, t.ID, string(u.Change), pull)
+		if err != nil || seen {
+			return err
+		}
+	}
 	prev, prevPR, prevCommit, prevRepo := t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo
 	switch u.Change {
 	case PullOpened, PullReopened:
@@ -383,7 +431,7 @@ func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r 
 		}
 	}
 	if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
-		"delivery": u.DeliveryID, "sender": u.Sender, "pull": u.Repo + "#" + strconv.FormatInt(u.Number, 10),
+		"delivery": u.DeliveryID, "sender": u.Sender, "pull": pull,
 		"closes": r.Closes, "merge_commit": u.MergeCommit, "status": string(t.Status), "prev_status": string(prev),
 	}}); err != nil {
 		return err
