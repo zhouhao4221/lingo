@@ -11,55 +11,31 @@ import (
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/notify"
+	"github.com/zhouhao4221/lingo/internal/perspective"
 )
 
-// 视角，取值与 lingo.Perspective 一致：只给需求补充归类，不授予权限（PRD 3.2.2.1）。
+// 视角，取值与 lingo.Perspective 一致：只给需求补充归类，不授予权限（PRD 3.2.2.1）。定义见 internal/perspective。
 const (
-	PerspectiveUser     = "user"     // 使用者
-	PerspectiveBusiness = "business" // 业务方
-	PerspectiveExpert   = "expert"   // 专家
-	PerspectiveLeader   = "leader"   // 决策者
+	PerspectiveUser     = perspective.User
+	PerspectiveBusiness = perspective.Business
+	PerspectiveExpert   = perspective.Expert
+	PerspectiveLeader   = perspective.Leader
 )
 
 // PerspectiveOrder 是视角在 Issue 区块与查询结果中的固定顺序。
-var PerspectiveOrder = []string{PerspectiveUser, PerspectiveBusiness, PerspectiveExpert, PerspectiveLeader}
+var PerspectiveOrder = perspective.Order
 
 // MaxPerspectiveRunes 是单段视角补充的长度上限（Unicode 字符）。
 const MaxPerspectiveRunes = 10000
 
 // NormalizePerspective 把视角规范为固定取值：为空视为 user，非法值 ok 为 false。
-func NormalizePerspective(p string) (string, bool) {
-	if p == "" {
-		return PerspectiveUser, true
-	}
-	return p, slices.Contains(PerspectiveOrder, p)
-}
+func NormalizePerspective(p string) (string, bool) { return perspective.Normalize(p) }
 
-// PerspectiveName 是视角的中文名，用于标签与提示（使用者 / 业务方 / 专家 / 决策者）。
-func PerspectiveName(p string) string {
-	switch p {
-	case PerspectiveBusiness:
-		return "业务方"
-	case PerspectiveExpert:
-		return "专家"
-	case PerspectiveLeader:
-		return "决策者"
-	}
-	return "使用者"
-}
+// PerspectiveName 是视角的中文名（使用者 / 业务方 / 专家 / 决策者）。
+func PerspectiveName(p string) string { return perspective.Name(p) }
 
 // PerspectiveSection 是视角在 Issue 区块中的段落标题（使用者反馈 / 业务补充 / 专家意见 / 决策意见）。
-func PerspectiveSection(p string) string {
-	switch p {
-	case PerspectiveBusiness:
-		return "业务补充"
-	case PerspectiveExpert:
-		return "专家意见"
-	case PerspectiveLeader:
-		return "决策意见"
-	}
-	return "使用者反馈"
-}
+func PerspectiveSection(p string) string { return perspective.Section(p) }
 
 // Perspective 是一段需求视角补充（lingo_ticket_perspectives）；Original 为真的是工单原始提交派生的首段（ID 为 0）。
 type Perspective struct {
@@ -84,16 +60,38 @@ type PerspectiveSet struct {
 // Present 返回出现过的视角（固定顺序）。
 func (s *PerspectiveSet) Present() []string {
 	var out []string
+	for _, g := range s.Groups() {
+		out = append(out, g.Perspective)
+	}
+	return out
+}
+
+// PerspectiveGroup 是同一视角的补充（时间升序）。
+type PerspectiveGroup struct {
+	Perspective string
+	Items       []Perspective
+}
+
+// Groups 按固定视角顺序分组，只含有内容的视角；Issue 区块与查询接口共用。
+func (s *PerspectiveSet) Groups() []PerspectiveGroup {
+	var out []PerspectiveGroup
 	for _, p := range PerspectiveOrder {
-		if slices.ContainsFunc(s.Items, func(it Perspective) bool { return it.Perspective == p }) {
-			out = append(out, p)
+		g := PerspectiveGroup{Perspective: p}
+		for _, it := range s.Items {
+			if it.Perspective == p {
+				g.Items = append(g.Items, it)
+			}
+		}
+		if len(g.Items) > 0 {
+			out = append(out, g)
 		}
 	}
 	return out
 }
 
-// AddPerspective 以调用者的视角给需求类工单追加一段补充（只追加，不能修改、撤回）。谁能补充哪条需求由接入方判断：
-// 这里只校验项目范围与工单类型，不受 external 仅本人可见的限制（PRD 3.2.0.6 的例外）。工单已转出时入队同步到 Issue。
+// AddPerspective 以调用者的视角给需求类工单追加一段补充（只追加，不能修改、撤回）。校验项目范围与工单类型后，
+// 由 ServiceOptions.AuthorizePerspective 判断调用者能否补充这条需求（接入方未配置时同工单可见范围，见 Visible）。
+// 工单已转出时入队同步到 Issue。
 func (s *Service) AddPerspective(ctx context.Context, p auth.Principal, id int64, body string) (*Perspective, error) {
 	if !p.Known() || p.ID == "" {
 		return nil, fmt.Errorf("%w: caller has no user id or role", ErrForbidden)
@@ -109,8 +107,16 @@ func (s *Service) AddPerspective(ctx context.Context, p auth.Principal, id int64
 	case utf8.RuneCountInString(body) > MaxPerspectiveRunes:
 		return nil, fmt.Errorf("%w: content exceeds %d characters", ErrInvalid, MaxPerspectiveRunes)
 	}
+	// 先在事务外鉴权：AuthorizePerspective 是接入方代码，不放在持有行锁的事务里执行
+	t0, err := s.o.Store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizePerspective(ctx, p, t0, true); err != nil {
+		return nil, err
+	}
 	var out *Perspective
-	err := s.o.Store.InTx(ctx, func(tx Tx) error {
+	err = s.o.Store.InTx(ctx, func(tx Tx) error {
 		t, err := tx.LockByID(ctx, id)
 		if err != nil {
 			return err
@@ -129,7 +135,8 @@ func (s *Service) AddPerspective(ctx context.Context, p auth.Principal, id int64
 			Payload: map[string]any{"perspective_id": out.ID, "perspective": persp}}); err != nil {
 			return err
 		}
-		if t.Status.forwarded() && t.Status != StatusAbnormal {
+		// 有 Issue 的 abnormal 工单也入队：对账恢复到同一 Issue 后补充仍能同步（Issue 不存在时任务直接完成）
+		if t.Status.forwarded() && (t.Status != StatusAbnormal || t.IssueNumber != 0) {
 			if err := tx.Enqueue(ctx, Task{Key: fmt.Sprintf("%s:perspective:%d", OpSyncPerspectives, out.ID), TicketID: t.ID,
 				Op: OpSyncPerspectives, Payload: map[string]any{"perspective_id": out.ID}}); err != nil {
 				return err
@@ -145,7 +152,7 @@ func (s *Service) AddPerspective(ctx context.Context, p auth.Principal, id int64
 	return out, nil
 }
 
-// ListPerspectives 返回需求类工单的视角补充与缺失的必填视角；可见范围同 AddPerspective（由接入方判断）。
+// ListPerspectives 返回需求类工单的视角补充与缺失的必填视角；由 AuthorizePerspective 判断能否查看（write 为假）。
 // 只含视角补充，不含工单的其他评论、附件与提交人联系方式。
 func (s *Service) ListPerspectives(ctx context.Context, p auth.Principal, id int64) (*PerspectiveSet, error) {
 	if !p.Known() || p.ID == "" {
@@ -155,7 +162,7 @@ func (s *Service) ListPerspectives(ctx context.Context, p auth.Principal, id int
 	if err != nil {
 		return nil, err
 	}
-	if err := s.perspectiveTarget(p, t); err != nil {
+	if err := s.authorizePerspective(ctx, p, t, false); err != nil {
 		return nil, err
 	}
 	rows, err := s.queries().Perspectives(ctx, id)
@@ -163,6 +170,21 @@ func (s *Service) ListPerspectives(ctx context.Context, p auth.Principal, id int
 		return nil, err
 	}
 	return s.perspectiveSet(t, rows), nil
+}
+
+// authorizePerspective 校验目标（项目范围、需求类型）后交给 AuthorizePerspective；未配置时按 Visible 的可见范围
+// （external 只能是本人的需求，agent 只能是已转出的，reviewer / admin 为项目内全部），不可见返回 ErrNotFound。
+func (s *Service) authorizePerspective(ctx context.Context, p auth.Principal, t *Ticket, write bool) error {
+	if err := s.perspectiveTarget(p, t); err != nil {
+		return err
+	}
+	if s.o.AuthorizePerspective != nil {
+		return s.o.AuthorizePerspective(ctx, p, t, write)
+	}
+	if !Visible(p, t) {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // Perspectives 返回工单的视角补充（不做访问控制，供 worker 渲染 Issue 区块）。

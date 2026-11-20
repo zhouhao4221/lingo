@@ -11,10 +11,13 @@ import (
 	"github.com/zhouhao4221/lingo/internal/notify"
 )
 
+// allowAll 模拟接入方放行所有视角补充（AuthorizePerspective）。
+func allowAll(context.Context, auth.Principal, *Ticket, bool) error { return nil }
+
 func newPerspectiveService(t *testing.T, m *memStore, required map[string][]string) *Service {
 	t.Helper()
 	s, err := NewService(ServiceOptions{Store: m, Now: func() time.Time { return t0 },
-		RequiredPerspectives: func(key string) []string { return required[key] }})
+		RequiredPerspectives: func(key string) []string { return required[key] }, AuthorizePerspective: allowAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,4 +172,73 @@ func kindsOf(es []notify.Event, k notify.Kind) []notify.Event {
 		}
 	}
 	return out
+}
+
+func TestPerspectiveAuthorization(t *testing.T) {
+	ctx := context.Background()
+	m := newMem(
+		Ticket{ID: 1, ProjectKey: "demo", Type: TypeFeature, Status: StatusPendingTriage, UserID: "u1"},
+		Ticket{ID: 2, ProjectKey: "demo", Type: TypeFeature, Status: StatusOpen, UserID: "u1"},
+	)
+	// 未配置 AuthorizePerspective：按工单可见范围
+	s, _ := NewService(ServiceOptions{Store: m, Now: func() time.Time { return t0 }})
+	for _, c := range []struct {
+		name string
+		p    auth.Principal
+		id   int64
+		want error
+	}{
+		{"owner", alice, 1, nil},
+		{"other external", bob, 1, ErrNotFound},
+		{"agent pending", agent, 1, ErrNotFound},
+		{"agent forwarded", agent, 2, nil},
+		{"reviewer", reviewer, 1, nil},
+	} {
+		if _, err := s.AddPerspective(ctx, c.p, c.id, "x"); !errors.Is(err, c.want) && !(c.want == nil && err == nil) {
+			t.Errorf("add %s: %v", c.name, err)
+		}
+		if _, err := s.ListPerspectives(ctx, c.p, c.id); !errors.Is(err, c.want) && !(c.want == nil && err == nil) {
+			t.Errorf("list %s: %v", c.name, err)
+		}
+	}
+	// 配置后由接入方决定，write 区分补充与查看；拒绝时不写入
+	var writes []bool
+	s2, _ := NewService(ServiceOptions{Store: m, Now: func() time.Time { return t0 },
+		AuthorizePerspective: func(_ context.Context, p auth.Principal, tk *Ticket, write bool) error {
+			writes = append(writes, write)
+			if write && p.Perspective != PerspectiveLeader {
+				return ErrForbidden
+			}
+			return nil
+		}})
+	n := len(m.perspectives)
+	if _, err := s2.AddPerspective(ctx, bob, 1, "x"); !errors.Is(err, ErrForbidden) || len(m.perspectives) != n {
+		t.Errorf("denied add: %v", err)
+	}
+	if _, err := s2.ListPerspectives(ctx, bob, 1); err != nil {
+		t.Errorf("allowed list: %v", err)
+	}
+	lead := auth.Principal{ID: "l1", Role: auth.RoleExternal, Perspective: PerspectiveLeader}
+	if _, err := s2.AddPerspective(ctx, lead, 1, "x"); err != nil {
+		t.Errorf("allowed add: %v", err)
+	}
+	if len(writes) != 3 || !writes[0] || writes[1] || !writes[2] {
+		t.Errorf("writes = %v", writes)
+	}
+}
+
+func TestAbnormalWithIssueEnqueues(t *testing.T) {
+	m := newMem(
+		Ticket{ID: 1, ProjectKey: "demo", Type: TypeFeature, Status: StatusAbnormal, UserID: "u1", Repo: "demo/api", IssueNumber: 5},
+		Ticket{ID: 2, ProjectKey: "demo", Type: TypeFeature, Status: StatusAbnormal, UserID: "u1"},
+	)
+	s := newPerspectiveService(t, m, nil)
+	for _, id := range []int64{1, 2} {
+		if _, err := s.AddPerspective(context.Background(), alice, id, "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(m.tasks) != 1 {
+		t.Errorf("tasks = %+v", m.tasks)
+	}
 }

@@ -47,6 +47,11 @@ type Config struct {
 	// RequiredPerspectives 是需求工单默认的必填视角（可被 Project.RequiredPerspectives 覆盖）；为空不检查。
 	// 转出时缺少必填视角发出 ticket.perspective_missing，Issue 的视角区块中标注“缺少：…”。
 	RequiredPerspectives []Perspective
+	// AuthorizePerspective 判断 u 能否补充（write）或查看需求工单 t 的视角补充，Go 方法、REST 与 MCP 都经过它；
+	// 返回 nil 允许，返回 ErrNotFound（不暴露工单存在）或 ErrForbidden 拒绝。调用前 lingo 已校验 t 为需求工单且在
+	// u.Projects 内。为空时按工单可见范围：external 只能是本人的需求，agent 只能是已转出的，reviewer / admin 为项目内全部。
+	// 要让业务方、专家、决策者参与他人的需求，在这里按接入方自己的规则放行。
+	AuthorizePerspective func(ctx context.Context, u User, t Ticket, write bool) error
 	// TriageRemindAfter 是待确认工单的提醒间隔：超过该时长未处理发出 triage.overdue，之后按同样间隔重复；
 	// 0 表示默认 24 小时，负数关闭提醒（接入方可用 ListTriage 的 PendingBefore 自行实现）。
 	TriageRemindAfter time.Duration
@@ -132,6 +137,7 @@ func New(cfg Config) (*Lingo, error) {
 		Declared:             l.declared,
 		NeedInfoLabel:        l.labelPrefix() + "/review/need-info",
 		RequiredPerspectives: l.requiredPerspectives,
+		AuthorizePerspective: l.authorizePerspective,
 	}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}

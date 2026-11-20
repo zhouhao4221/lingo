@@ -2,9 +2,11 @@ package lingo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
@@ -36,21 +38,21 @@ type TicketPerspectives struct {
 // AddPerspective 以 u.Perspective 的视角给需求工单追加一段补充（只追加，不能修改或撤回），content 为纯文本 / Markdown，
 // 不超过 10000 字。工单已转出时由机器人重写 Issue 正文中的视角区块、补打视角标签并发提示评论；发出 ticket.perspective_added。
 //
-// 谁能补充哪条需求由接入方判断，调用前须自行校验：lingo 只校验工单属于 u 可访问的项目（User.Projects）且为需求类型，
-// 不受 external 只能访问本人工单的限制。补充人姓名（User.Name）会写入 Gitea Issue，邮箱与用户 ID 不会。
+// 能否补充由 Config.AuthorizePerspective 判断（未配置时同工单可见范围）。补充人姓名（User.Name）会写入 Gitea Issue，
+// 邮箱与用户 ID 不会。
 // 非需求工单、视角或内容不合法返回 ErrInvalidInput；工单已答复 / 合并 / 驳回 / 关闭返回 ErrConflict。
 func (l *Lingo) AddPerspective(ctx context.Context, u User, ticketID int64, content string) (PerspectiveEntry, error) {
-	p, err := l.tickets.AddPerspective(ctx, l.principal(u), ticketID, content)
+	p, err := l.tickets.AddPerspective(withCaller(ctx, u), l.principal(u), ticketID, content)
 	if err != nil {
 		return PerspectiveEntry{}, publicErr(err)
 	}
 	return publicPerspective(*p), nil
 }
 
-// ListPerspectives 返回需求工单按视角分组的补充与缺失的必填视角；访问范围同 AddPerspective（由接入方判断）。
+// ListPerspectives 返回需求工单按视角分组的补充与缺失的必填视角；能否查看由 Config.AuthorizePerspective 判断（write 为假）。
 // 只含视角补充（视角、姓名、时间、内容），不含工单的其他评论、附件与提交人联系方式。
 func (l *Lingo) ListPerspectives(ctx context.Context, u User, ticketID int64) (TicketPerspectives, error) {
-	set, err := l.tickets.ListPerspectives(ctx, l.principal(u), ticketID)
+	set, err := l.tickets.ListPerspectives(withCaller(ctx, u), l.principal(u), ticketID)
 	if err != nil {
 		return TicketPerspectives{}, publicErr(err)
 	}
@@ -58,18 +60,45 @@ func (l *Lingo) ListPerspectives(ctx context.Context, u User, ticketID int64) (T
 	if out.Missing == nil {
 		out.Missing = []Perspective{}
 	}
-	for _, p := range ticket.PerspectiveOrder {
-		g := PerspectiveGroup{Perspective: Perspective(p), Title: ticket.PerspectiveSection(p)}
-		for _, it := range set.Items {
-			if it.Perspective == p {
-				g.Entries = append(g.Entries, publicPerspective(it))
-			}
+	for _, g := range set.Groups() {
+		pg := PerspectiveGroup{Perspective: Perspective(g.Perspective), Title: ticket.PerspectiveSection(g.Perspective)}
+		for _, it := range g.Items {
+			pg.Entries = append(pg.Entries, publicPerspective(it))
 		}
-		if len(g.Entries) > 0 {
-			out.Groups = append(out.Groups, g)
-		}
+		out.Groups = append(out.Groups, pg)
 	}
 	return out, nil
+}
+
+type callerKey struct{}
+
+// withCaller 在 context 中带上调用者原始身份，供 authorizePerspective 把完整的 User（含 Scopes）交给接入方。
+func withCaller(ctx context.Context, u User) context.Context {
+	return context.WithValue(ctx, callerKey{}, u)
+}
+
+// authorizePerspective 把领域层的视角补充鉴权交给 Config.AuthorizePerspective；未配置时按工单可见范围。
+func (l *Lingo) authorizePerspective(ctx context.Context, p auth.Principal, t *ticket.Ticket, write bool) error {
+	if l.cfg.AuthorizePerspective == nil {
+		if !ticket.Visible(p, t) {
+			return ticket.ErrNotFound
+		}
+		return nil
+	}
+	u, ok := ctx.Value(callerKey{}).(User)
+	if !ok {
+		return ticket.ErrForbidden
+	}
+	err := l.cfg.AuthorizePerspective(ctx, u, l.publicTicket(t), write)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrNotFound):
+		return ticket.ErrNotFound
+	case errors.Is(err, ErrForbidden):
+		return fmt.Errorf("%w: %v", ticket.ErrForbidden, err)
+	}
+	return err
 }
 
 func publicPerspective(p ticket.Perspective) PerspectiveEntry {

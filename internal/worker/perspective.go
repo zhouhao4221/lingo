@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/gitea"
@@ -24,16 +25,9 @@ func perspectiveSection(set *ticket.PerspectiveSet) string {
 	}
 	var b strings.Builder
 	b.WriteString(perspectivesStart + "\n### 需求视角补充\n\n")
-	for _, p := range ticket.PerspectiveOrder {
-		first := true
-		for _, it := range set.Items {
-			if it.Perspective != p {
-				continue
-			}
-			if first {
-				b.WriteString("#### " + ticket.PerspectiveSection(p) + "\n\n")
-				first = false
-			}
+	for _, g := range set.Groups() {
+		b.WriteString("#### " + ticket.PerspectiveSection(g.Perspective) + "\n\n")
+		for _, it := range g.Items {
 			at := it.At.UTC().Format("2006-01-02 15:04 UTC")
 			if name := strings.TrimSpace(it.AuthorName); name != "" {
 				at = escapeMarkdown(name) + " · " + at
@@ -42,7 +36,7 @@ func perspectiveSection(set *ticket.PerspectiveSet) string {
 			if it.Original {
 				b.WriteString("原始提交见正文\n\n")
 			} else {
-				b.WriteString(strings.TrimSpace(stripMarkers(it.Body)) + "\n\n")
+				b.WriteString(quoteContent(it.Body) + "\n\n")
 			}
 		}
 	}
@@ -57,7 +51,25 @@ func perspectiveSection(set *ticket.PerspectiveSet) string {
 	return b.String()
 }
 
-// withPerspectives 把视角区块写进 Issue 正文：替换已有区块；没有时（含被人删掉）插在工单标记之前。
+// quoteContent 把补充内容渲染为引用块，并转义行首的 #：补充人写的标题、署名或"缺少"行都留在引用里，
+// 不能伪装成区块本身的视角标题与署名（区块结构只由灵问生成）。
+func quoteContent(body string) string {
+	lines := strings.Split(strings.TrimSpace(stripMarkers(body)), "\n")
+	for i, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		if t := strings.TrimLeft(l, " \t"); strings.HasPrefix(t, "#") {
+			l = l[:len(l)-len(t)] + "\\" + t
+		}
+		if l == "" {
+			lines[i] = ">"
+		} else {
+			lines[i] = "> " + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// withPerspectives 把视角区块写进 Issue 正文：替换已有区块；没有时（含被人删掉）插在工单标记之前（工单标记须是正文最后一个）。
 // 只剩起始标记（结束标记被删）时去掉残留的起始标记再插入，避免每次重写都多出一段。
 func withPerspectives(body, section string) string {
 	if section == "" {
@@ -89,6 +101,17 @@ func perspectiveLabels(prefix string, set *ticket.PerspectiveSet) []gitea.Create
 	var out []gitea.CreateLabelOption
 	for _, p := range set.Present() {
 		out = append(out, gitea.PerspectiveLabel(prefix, p))
+	}
+	return out
+}
+
+// missingLabels 返回 want 中 Issue 上还没有的标签（按名称，不区分大小写）；都有时不必再调用加标签接口。
+func missingLabels(is *gitea.Issue, want []gitea.CreateLabelOption) []gitea.CreateLabelOption {
+	var out []gitea.CreateLabelOption
+	for _, l := range want {
+		if !slices.ContainsFunc(is.Labels, func(have *gitea.Label) bool { return have != nil && strings.EqualFold(have.Name, l.Name) }) {
+			out = append(out, l)
+		}
 	}
 	return out
 }
@@ -131,7 +154,7 @@ func (w *Worker) syncPerspectives(ctx context.Context, ticketID, perspectiveID i
 			return giteaErr("edit issue body", err)
 		}
 	}
-	if err := w.addLabels(ctx, owner, name, t.IssueNumber, perspectiveLabels(w.o.LabelPrefix, set)); err != nil {
+	if err := w.addLabels(ctx, owner, name, t.IssueNumber, missingLabels(is, perspectiveLabels(w.o.LabelPrefix, set))); err != nil {
 		return err
 	}
 	for _, it := range set.Items {

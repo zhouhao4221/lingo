@@ -60,7 +60,7 @@ light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
 
 ### 角色
 
-`Authenticate` 把用户映射为四个固定角色之一：`external`（终端用户，只看本人工单）、`agent`（研发 Agent，看所属项目已转出的工单）、`reviewer`（后台确认，看所属项目全部工单）、`admin`。`User.Projects` 可选，用于限制可访问的项目。`User.Perspective` 可选，是与权限无关的需求视角（`user` 使用者 / `business` 业务方 / `expert` 专家 / `leader` 决策者）：需求工单可由各视角用 `AddPerspective` 追加补充，Issue 正文按视角分层展示并打 `<前缀>/视角/<视角名>` 标签；`Config.RequiredPerspectives` 可设必填视角。谁能补充、查看哪条需求由你在调用前判断，补充人姓名会写入 Issue。
+`Authenticate` 把用户映射为四个固定角色之一：`external`（终端用户，只看本人工单）、`agent`（研发 Agent，看所属项目已转出的工单）、`reviewer`（后台确认，看所属项目全部工单）、`admin`。`User.Projects` 可选，用于限制可访问的项目。`User.Perspective` 可选，是与权限无关的需求视角（`user` 使用者 / `business` 业务方 / `expert` 专家 / `leader` 决策者）：需求工单可由各视角用 `AddPerspective` 追加补充，Issue 正文按视角分层展示并打 `<前缀>/视角/<视角名>` 标签；`Config.RequiredPerspectives` 可设必填视角。谁能补充、查看哪条需求由 `Config.AuthorizePerspective` 决定（未配置时同工单可见范围：external 只能是本人的需求），补充人与提交人姓名会写入 Issue。
 
 ### REST 接口
 

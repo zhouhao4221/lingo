@@ -43,6 +43,9 @@ type ServiceOptions struct {
 	NeedInfoLabel string
 	// RequiredPerspectives 返回项目的必填视角（lingo.Config / Project.RequiredPerspectives）；为空时不检查缺失。
 	RequiredPerspectives func(projectKey string) []string
+	// AuthorizePerspective 判断调用者能否补充（write）或查看需求工单 t 的视角补充（lingo.Config.AuthorizePerspective）；
+	// 返回 ErrNotFound / ErrForbidden 等拒绝。为空时按 Visible 的可见范围。
+	AuthorizePerspective func(ctx context.Context, p auth.Principal, t *Ticket, write bool) error
 	Now                  func() time.Time
 }
 

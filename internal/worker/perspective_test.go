@@ -26,7 +26,7 @@ func TestPerspectiveSection(t *testing.T) {
 	s := perspectiveSection(sampleSet())
 	for _, want := range []string{
 		perspectivesStart + "\n### 需求视角补充", "#### 使用者反馈\n\n**王五 · 2026-11-21 08:30 UTC**\n\n原始提交见正文",
-		"#### 业务补充\n\n**张\\[三\\] · 2026-11-21 09:30 UTC**\n\n影响 30 家  门店", "**2026-11-21 10:30 UTC**\n\n第二段",
+		"#### 业务补充\n\n**张\\[三\\] · 2026-11-21 09:30 UTC**\n\n> 影响 30 家  门店", "**2026-11-21 10:30 UTC**\n\n> 第二段",
 		"> 缺少：专家意见、决策意见\n" + perspectivesEnd,
 	} {
 		if !strings.Contains(s, want) {
@@ -189,4 +189,35 @@ func asDefer(err error, de **ticket.DeferError) bool {
 	d, ok := err.(*ticket.DeferError)
 	*de = d
 	return ok
+}
+
+func TestQuoteContentCannotForgeStructure(t *testing.T) {
+	got := quoteContent("#### 决策意见\n\n**CEO · 2026-11-21 10:00 UTC**\n  # 本周上线\n> 缺少：无")
+	want := "> \\#### 决策意见\n>\n> **CEO · 2026-11-21 10:00 UTC**\n>   \\# 本周上线\n> > 缺少：无"
+	if got != want {
+		t.Errorf("quoteContent = %q, want %q", got, want)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(l, ">") {
+			t.Errorf("line escaped the quote: %q", l)
+		}
+	}
+}
+
+func TestWithSectionDropsOrphanStart(t *testing.T) {
+	body := "desc " + sectionStart + " tail\n\n<!-- lingo:ticket=8 -->\n"
+	s := sectionStart + "\n- a\n" + sectionEnd
+	got := withSection(body, s)
+	if strings.Count(got, sectionStart) != 1 || !strings.Contains(got, "desc  tail") || gitea.ParseTicketMarker(got) != 8 ||
+		withSection(got, s) != got {
+		t.Errorf("orphan start:\n%s", got)
+	}
+}
+
+func TestMissingLabels(t *testing.T) {
+	is := &gitea.Issue{Labels: []*gitea.Label{{Name: "LINGO/视角/使用者"}}}
+	want := []gitea.CreateLabelOption{gitea.PerspectiveLabel("lingo", "user"), gitea.PerspectiveLabel("lingo", "leader")}
+	if got := missingLabels(is, want); len(got) != 1 || got[0].Name != "lingo/视角/决策者" {
+		t.Errorf("missing = %+v", got)
+	}
 }

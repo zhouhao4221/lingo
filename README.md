@@ -60,7 +60,7 @@ See [examples/server](examples/server/main.go) for a complete example.
 
 ### Roles
 
-Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions (`user`, `business`, `expert`, `leader`): feature tickets can be supplemented per perspective via `AddPerspective`, the issue body shows them in layered sections and gets `<prefix>/视角/<name>` labels, and `Config.RequiredPerspectives` flags missing ones. You decide who may add to or read which requirement before calling; the contributor's name is written to the issue.
+Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions (`user`, `business`, `expert`, `leader`): feature tickets can be supplemented per perspective via `AddPerspective`, the issue body shows them in layered sections and gets `<prefix>/视角/<name>` labels, and `Config.RequiredPerspectives` flags missing ones. `Config.AuthorizePerspective` decides who may add to or read which requirement (by default the normal ticket visibility applies: external users only their own); contributor and submitter names are written to the issue.
 
 ### REST API
 

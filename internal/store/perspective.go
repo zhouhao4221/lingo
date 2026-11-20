@@ -9,12 +9,10 @@ import (
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
-// perspectiveOrUser 把空视角写为 user（列有 CHECK 约束）。
+// perspectiveOrUser 把空视角写为 user（列有 CHECK 约束，非法值由数据库拒绝）。
 func perspectiveOrUser(p string) string {
-	if p == "" {
-		return ticket.PerspectiveUser
-	}
-	return p
+	n, _ := ticket.NormalizePerspective(p)
+	return n
 }
 
 func (x *ticketTx) AddPerspective(ctx context.Context, p ticket.Perspective) (int64, error) {
