@@ -156,6 +156,9 @@ func (l *Lingo) drafter() worker.Drafter {
 	if isNil(m) {
 		return nil
 	}
+	if om, ok := m.(openAIModel); ok {
+		return &llm.Drafter{Chat: om.c.Chat} // 内置适配器：直接调用，免去消息类型来回转换
+	}
 	return &llm.Drafter{Chat: func(ctx context.Context, ms []llm.Message) (string, error) {
 		in := make([]Message, 0, len(ms))
 		for _, x := range ms {

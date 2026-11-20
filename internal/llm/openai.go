@@ -3,15 +3,19 @@ package llm
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/zhouhao4221/lingo/internal/textutil"
 )
 
 // OpenAIOptions 配置 OpenAI Chat Completions / Embeddings 兼容接口（OpenAI、DeepSeek、各类兼容网关与本地推理服务）。
@@ -23,7 +27,7 @@ type OpenAIOptions struct {
 	Temperature    *float64
 	Headers        map[string]string // 额外请求头（如网关要求的租户头）
 	HTTPClient     *http.Client      // 为空时用 90 秒超时的默认客户端
-	MaxRetries     int               // 429 / 5xx / 网络错误的重试次数，默认 2
+	MaxRetries     int               // 429 / 5xx / 网络错误的重试次数：0 取默认 2，负数不重试
 }
 
 // ErrNoEmbedding 表示未配置向量模型。
@@ -31,8 +35,18 @@ var ErrNoEmbedding = errors.New("llm: embedding model not configured")
 
 // OpenAI 是 OpenAI 兼容接口的客户端，可并发使用。
 type OpenAI struct {
-	o OpenAIOptions
+	o       OpenAIOptions
+	retries int
 }
+
+// maxRetryWait 是愿意等待的 Retry-After 上限，服务端要求更久时不再重试。
+const maxRetryWait = 30 * time.Second
+
+// ErrTruncated 表示模型因长度上限截断了回答；ErrEmptyContent 表示回答没有文本（如被内容过滤或返回工具调用）。
+var (
+	ErrTruncated    = errors.New("llm: response truncated (finish_reason=length)")
+	ErrEmptyContent = errors.New("llm: response has no text content")
+)
 
 // NewOpenAI 校验配置并创建客户端。
 func NewOpenAI(o OpenAIOptions) (*OpenAI, error) {
@@ -48,10 +62,14 @@ func NewOpenAI(o OpenAIOptions) (*OpenAI, error) {
 	if o.HTTPClient == nil {
 		o.HTTPClient = &http.Client{Timeout: 90 * time.Second}
 	}
-	if o.MaxRetries == 0 {
-		o.MaxRetries = 2
+	retries := o.MaxRetries
+	switch {
+	case retries == 0:
+		retries = 2
+	case retries < 0:
+		retries = 0
 	}
-	return &OpenAI{o: o}, nil
+	return &OpenAI{o: o, retries: retries}, nil
 }
 
 // APIError 是接口返回的非 2xx 响应。
@@ -91,7 +109,14 @@ func (c *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
 	if len(resp.Choices) == 0 {
 		return "", errors.New("llm: empty choices")
 	}
-	return resp.Choices[0].Message.Content, nil
+	ch := resp.Choices[0]
+	switch {
+	case ch.FinishReason == "length":
+		return "", ErrTruncated
+	case strings.TrimSpace(ch.Message.Content) == "":
+		return "", ErrEmptyContent
+	}
+	return ch.Message.Content, nil
 }
 
 // Embed 调用 /embeddings，按输入顺序返回向量。
@@ -118,10 +143,13 @@ func (c *OpenAI) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	if len(resp.Data) != len(texts) {
 		return nil, fmt.Errorf("llm: got %d embeddings for %d inputs", len(resp.Data), len(texts))
 	}
-	sort.Slice(resp.Data, func(i, j int) bool { return resp.Data[i].Index < resp.Data[j].Index })
-	out := make([][]float32, len(resp.Data))
-	for i, d := range resp.Data {
-		out[i] = d.Embedding
+	// index 须恰好是 0..n-1：缺失或重复时无法确定向量对应哪段输入
+	out := make([][]float32, len(texts))
+	for _, d := range resp.Data {
+		if d.Index < 0 || d.Index >= len(out) || out[d.Index] != nil || len(d.Embedding) == 0 {
+			return nil, fmt.Errorf("llm: invalid embedding index %d", d.Index)
+		}
+		out[d.Index] = d.Embedding
 	}
 	return out, nil
 }
@@ -131,27 +159,25 @@ func (c *OpenAI) post(ctx context.Context, path string, in, out any) error {
 	if err != nil {
 		return err
 	}
-	var last error
-	for attempt := 0; attempt <= c.o.MaxRetries; attempt++ {
-		if attempt > 0 {
-			wait := time.Duration(attempt) * time.Second
-			if ra, ok := last.(*retryAfter); ok && ra.d > 0 {
-				wait = min(ra.d, 30*time.Second)
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(wait):
-			}
-		}
+	for attempt := 0; ; attempt++ {
 		err := c.do(ctx, path, body, out)
 		var ra *retryAfter
 		if !errors.As(err, &ra) {
 			return err
 		}
-		last = ra
+		wait := time.Duration(attempt+1) * time.Second
+		if ra.d > 0 {
+			wait = ra.d
+		}
+		if attempt >= c.retries || wait > maxRetryWait {
+			return ra.err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
 	}
-	return last.(*retryAfter).err
 }
 
 // retryAfter 包装可重试的错误（429 / 5xx / 网络错误）。
@@ -181,18 +207,23 @@ func (c *OpenAI) do(ctx context.Context, path string, body []byte, out any) erro
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if !transient(err) {
+			return fmt.Errorf("llm: %w", err) // 证书、域名不存在等配置问题，重试无用
+		}
 		return &retryAfter{err: fmt.Errorf("llm: %w", err)}
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return &retryAfter{err: fmt.Errorf("llm: read response: %w", err)}
 	}
 	if resp.StatusCode/100 != 2 {
 		ae := &APIError{StatusCode: resp.StatusCode, Message: errorMessage(data)}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			secs, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-			return &retryAfter{err: ae, d: time.Duration(secs) * time.Second}
+			return &retryAfter{err: ae, d: retryAfterHeader(resp.Header.Get("Retry-After"))}
 		}
 		return ae
 	}
@@ -212,9 +243,37 @@ func errorMessage(data []byte) string {
 	if json.Unmarshal(data, &e) == nil && e.Error.Message != "" {
 		return e.Error.Message
 	}
-	s := strings.TrimSpace(string(data))
-	if len(s) > 300 {
-		s = s[:300]
+	return textutil.Clip(strings.TrimSpace(string(data)), 300)
+}
+
+// retryAfterHeader 解析 Retry-After：秒数或 HTTP 日期。
+func retryAfterHeader(v string) time.Duration {
+	if v == "" {
+		return 0
 	}
-	return s
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return max(time.Until(t), 0)
+	}
+	return 0
+}
+
+// transient 报告传输错误是否值得重试：证书错误、域名不存在属于配置问题，不重试。
+func transient(err error) bool {
+	var (
+		unknownCA x509.UnknownAuthorityError
+		hostErr   x509.HostnameError
+		certErr   x509.CertificateInvalidError
+		verifyErr *tls.CertificateVerificationError
+		dnsErr    *net.DNSError
+	)
+	switch {
+	case errors.As(err, &unknownCA), errors.As(err, &hostErr), errors.As(err, &certErr), errors.As(err, &verifyErr):
+		return false
+	case errors.As(err, &dnsErr):
+		return !dnsErr.IsNotFound
+	}
+	return true
 }

@@ -6,8 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func TestOpenAIChatAndEmbed(t *testing.T) {
@@ -55,6 +58,45 @@ func TestOpenAIChatAndEmbed(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponseChecks(t *testing.T) {
+	body := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.Header().Set("Retry-After", "120")
+			http.Error(w, strings.Repeat("服务繁忙", 200), 429)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m", EmbeddingModel: "e"})
+	for b, want := range map[string]error{
+		`{"choices":[{"message":{"content":"半截"},"finish_reason":"length"}]}`:     ErrTruncated,
+		`{"choices":[{"message":{"content":null},"finish_reason":"tool_calls"}]}`: ErrEmptyContent,
+	} {
+		body = b
+		if _, err := c.Chat(context.Background(), nil); !errors.Is(err, want) {
+			t.Errorf("%s: %v", b, err)
+		}
+	}
+	body = `{"data":[{"index":0,"embedding":[1]},{"index":0,"embedding":[2]}]}`
+	if _, err := c.Embed(context.Background(), []string{"a", "b"}); err == nil {
+		t.Error("duplicate embedding index accepted")
+	}
+	// Retry-After 超过上限：不重试；非 JSON 错误按字符截断，不产生无效 UTF-8
+	cf, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL + "/fail", Model: "m"})
+	cf.o.BaseURL = srv.URL
+	var ae *APIError
+	start := time.Now()
+	err := cf.do(context.Background(), "/fail", []byte("{}"), &struct{}{})
+	if !errors.As(err, &ae) || !utf8.ValidString(ae.Message) {
+		t.Errorf("err = %v", err)
+	}
+	if err := cf.post(context.Background(), "/fail", struct{}{}, &struct{}{}); err == nil || time.Since(start) > 5*time.Second {
+		t.Errorf("long Retry-After retried: %v", err)
+	}
+}
+
 func TestOpenAIRetries(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +110,11 @@ func TestOpenAIRetries(t *testing.T) {
 	c, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m"})
 	if out, err := c.Chat(context.Background(), nil); err != nil || out != "ok" || calls.Load() != 2 {
 		t.Errorf("retry = %q %v calls=%d", out, err, calls.Load())
+	}
+	calls.Store(0)
+	c0, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m", MaxRetries: -1})
+	if _, err := c0.Chat(context.Background(), nil); err == nil || calls.Load() != 1 {
+		t.Errorf("no-retry = %v calls=%d", err, calls.Load())
 	}
 	for _, o := range []OpenAIOptions{{Model: "m"}, {BaseURL: "ftp://x", Model: "m"}, {BaseURL: "https://x"}} {
 		if _, err := NewOpenAI(o); err == nil {
