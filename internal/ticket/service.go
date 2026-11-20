@@ -430,7 +430,7 @@ func (s *Service) Get(ctx context.Context, p auth.Principal, id int64) (*Ticket,
 func Visible(p auth.Principal, t *Ticket) bool {
 	switch p.Role {
 	case auth.RoleExternal:
-		return p.ID != "" && t.UserID == p.ID
+		return p.ID != "" && t.UserID == p.ID && p.InProject(t.ProjectKey)
 	case auth.RoleAgent:
 		return p.InProject(t.ProjectKey) && t.Status.forwarded()
 	case auth.RoleReviewer, auth.RoleAdmin:

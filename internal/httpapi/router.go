@@ -62,15 +62,16 @@ var ErrBadRequest = errors.New("bad request")
 // Handle 注册路由，pattern 同 http.ServeMux（如 "GET /tickets/{id}"）。
 func (rt *Router) Handle(pattern string, h HandlerFunc) {
 	rt.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && !isJSON(r.Header.Get("Content-Type")) {
-			// 要求 JSON：跨站表单（text/plain、form-urlencoded）只能发“简单请求”，借 cookie 伪造写操作；
-			// application/json 会触发 CORS 预检，由接入方的 CORS 策略把关
-			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
-			return
-		}
 		u, err := rt.o.Authenticate(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !isJSON(r.Header.Get("Content-Type")) {
+			// 写操作一律要求 Content-Type: application/json，没有请求体的 POST 也一样：跨站表单与无请求体的
+			// no-cors fetch 都属于“简单请求”，可借 cookie 伪造写操作；application/json 会触发 CORS 预检，
+			// 由接入方的 CORS 策略把关
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 			return
 		}
 		res, err := h(&Request{Request: r, User: u, w: w, max: rt.o.MaxBody})

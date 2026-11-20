@@ -241,6 +241,13 @@ func TestCommentEventRedactedWhenDeleted(t *testing.T) {
 	if es, _ := svc.ListEvents(ctx, ext, 0, 0); len(es) != 1 || es[0].Body != "密钥是 abc" {
 		t.Fatalf("events = %+v", es)
 	}
+	u.Change, u.Body = ticket.CommentEdited, "密钥已删除"
+	if err := sync.ApplyComment(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if es, _ := svc.ListEvents(ctx, ext, 0, 0); len(es) != 1 || es[0].Body != "密钥已删除" {
+		t.Errorf("edited comment not reflected: %+v", es)
+	}
 	u.Change = ticket.CommentDeleted
 	if err := sync.ApplyComment(ctx, u); err != nil {
 		t.Fatal(err)
@@ -260,7 +267,7 @@ func TestRemindOverdueStore(t *testing.T) {
 	svc, _ := ticket.NewService(ticket.ServiceOptions{Store: s})
 	ctx := context.Background()
 	for i, want := range []int{1, 0} {
-		n, err := svc.RemindOverdue(ctx, 24*time.Hour, 10)
+		n, err := svc.RemindOverdue(ctx, []string{"demo"}, 24*time.Hour, 10)
 		if err != nil || n != want {
 			t.Errorf("round %d: %d %v", i, n, err)
 		}

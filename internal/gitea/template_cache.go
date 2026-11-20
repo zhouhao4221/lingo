@@ -23,11 +23,15 @@ type TemplateCache struct {
 }
 
 type cachedTemplates struct {
-	at time.Time
-	ts []*IssueTemplate
+	at  time.Time
+	ts  []*IssueTemplate
+	err error // 读取失败也短暂缓存，避免仓库无权限等情况下每次请求都打到 Gitea
 }
 
-// Get 返回缓存中的模板，过期或没有时经 g 读取；读取失败不缓存。
+// failureTTL 是读取失败的缓存时长。
+const failureTTL = 30 * time.Second
+
+// Get 返回缓存中的模板，过期或没有时经 g 读取；读取失败缓存 30 秒。并发未命中时可能各自读取一次。
 func (c *TemplateCache) Get(ctx context.Context, g TemplateLister, owner, name string) ([]*IssueTemplate, error) {
 	key := strings.ToLower(owner + "/" + name)
 	now := time.Now
@@ -39,22 +43,24 @@ func (c *TemplateCache) Get(ctx context.Context, g TemplateLister, owner, name s
 		ttl = 5 * time.Minute
 	}
 	c.mu.Lock()
-	if e, ok := c.byRepo[key]; ok && now().Sub(e.at) < ttl {
-		c.mu.Unlock()
-		return e.ts, nil
+	if e, ok := c.byRepo[key]; ok {
+		if age := now().Sub(e.at); (e.err == nil && age < ttl) || (e.err != nil && age < failureTTL) {
+			c.mu.Unlock()
+			return e.ts, e.err
+		}
 	}
 	c.mu.Unlock()
 	ts, err := g.ListIssueTemplates(ctx, owner, name)
-	if err != nil {
-		return nil, err
+	if err != nil && ctx.Err() != nil {
+		return nil, err // 调用方取消，不是仓库的问题，不缓存
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.byRepo == nil {
 		c.byRepo = map[string]cachedTemplates{}
 	}
-	c.byRepo[key] = cachedTemplates{at: now(), ts: ts}
-	return ts, nil
+	c.byRepo[key] = cachedTemplates{at: now(), ts: ts, err: err}
+	return ts, err
 }
 
 // Forget 丢弃仓库的缓存。

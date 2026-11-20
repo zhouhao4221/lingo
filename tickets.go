@@ -56,7 +56,7 @@ func (l *Lingo) CreateTicket(ctx context.Context, u User, in TicketInput) (Ticke
 	}
 	t, err := l.tickets.Create(ctx, l.principal(u), ticket.NewTicket{Project: in.Project, Repo: in.Repo, Type: string(in.Type),
 		Title: in.Title, Body: in.Content, Fields: in.Fields, Context: in.Context, Version: in.Version,
-		Conversation: in.ConversationID, Source: "go"})
+		Conversation: in.ConversationID})
 	return l.ticketResult(t, err)
 }
 
@@ -196,12 +196,7 @@ func (l *Lingo) TicketTypes(ctx context.Context, u User, projectKey, repo string
 		projectKey = l.cfg.Projects[0].Key
 	}
 	p := l.principal(u)
-	var proj *Project
-	for i := range l.cfg.Projects {
-		if l.cfg.Projects[i].Key == projectKey {
-			proj = &l.cfg.Projects[i]
-		}
-	}
+	proj := l.project(projectKey)
 	if proj == nil || !p.Known() || !p.InProject(projectKey) {
 		return nil, ErrNotFound
 	}
@@ -245,11 +240,7 @@ func (l *Lingo) AutoForwardSettings(ctx context.Context, u User) ([]AutoForwardS
 	if err := l.ensureProjects(ctx); err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(l.cfg.Projects))
-	for _, p := range l.cfg.Projects {
-		keys = append(keys, p.Key)
-	}
-	ss, err := l.tickets.AutoForwardSettings(ctx, l.principal(u), keys)
+	ss, err := l.tickets.AutoForwardSettings(ctx, l.principal(u), l.projectKeys())
 	if err != nil {
 		return nil, publicErr(err)
 	}
@@ -309,19 +300,37 @@ func (l *Lingo) defaultAutoForward(projectKey, typ string) bool {
 	return false
 }
 
+// projectKeys 返回 Config 中声明的全部项目 key。
+func (l *Lingo) projectKeys() []string {
+	keys := make([]string, 0, len(l.cfg.Projects))
+	for _, p := range l.cfg.Projects {
+		keys = append(keys, p.Key)
+	}
+	return keys
+}
+
+// project 返回声明的项目；不存在时为 nil。
+func (l *Lingo) project(key string) *Project {
+	for i := range l.cfg.Projects {
+		if l.cfg.Projects[i].Key == key {
+			return &l.cfg.Projects[i]
+		}
+	}
+	return nil
+}
+
 // declared 报告项目（repo 为空时）或项目下的仓库是否在 Config.Projects 中声明。
 func (l *Lingo) declared(projectKey, repo string) bool {
-	for _, p := range l.cfg.Projects {
-		if p.Key != projectKey {
-			continue
-		}
-		if repo == "" {
+	p := l.project(projectKey)
+	if p == nil {
+		return false
+	}
+	if repo == "" {
+		return true
+	}
+	for _, r := range p.Repos {
+		if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
 			return true
-		}
-		for _, r := range p.Repos {
-			if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
-				return true
-			}
 		}
 	}
 	return false
@@ -343,10 +352,7 @@ func (l *Lingo) repoConfig(repo string) worker.RepoConfig {
 func (l *Lingo) principal(u User) auth.Principal {
 	ps := u.Projects
 	if len(ps) == 0 {
-		ps = make([]string, 0, len(l.cfg.Projects))
-		for _, p := range l.cfg.Projects {
-			ps = append(ps, p.Key)
-		}
+		ps = l.projectKeys()
 	}
 	return auth.Principal{ID: u.ID, Name: u.Name, Email: u.Email, Role: string(u.Role), Projects: ps}
 }

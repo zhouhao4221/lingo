@@ -297,7 +297,7 @@ func TestRemindOverdue(t *testing.T) {
 		want  int
 	}{{time.Hour, 0}, {25 * time.Hour, 1}, {26 * time.Hour, 1}, {50 * time.Hour, 2}} {
 		now = t0.Add(step.after)
-		if _, err := s.RemindOverdue(ctx, 24*time.Hour, 10); err != nil {
+		if _, err := s.RemindOverdue(ctx, []string{"demo"}, 24*time.Hour, 10); err != nil {
 			t.Fatal(err)
 		}
 		if got := count(); got != step.want {
@@ -314,7 +314,7 @@ func TestListEventsScopesByRole(t *testing.T) {
 		p    auth.Principal
 		want EventQuery
 	}{
-		{alice, EventQuery{Scope: Scope{All: true}, UserID: "u1", ExcludeTriage: true}},
+		{alice, EventQuery{Scope: Scope{All: true}, UserID: "u1", ExcludeTriage: true}}, // alice 未限定项目
 		{agent, EventQuery{Scope: Scope{All: true}, ExcludeTriage: true, ForwardedOnly: true}},
 		{reviewer, EventQuery{Scope: Scope{Projects: []string{"demo"}}}},
 	} {

@@ -330,9 +330,16 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 		c.GiteaID, c.Body, c.Public, c.AuthorName, at); err != nil {
 		return nil, fmt.Errorf("store: update comment %d: %w", c.GiteaID, err)
 	}
-	if prev.Public && !c.Public {
+	switch {
+	case prev.Public && !c.Public:
 		if err := x.redactCommentEvents(ctx, c.GiteaID); err != nil {
 			return nil, err
+		}
+	case prev.Public && c.Public && prev.Body != c.Body:
+		// 对外评论被编辑（如删掉误贴的密钥）：变更流随之返回新正文
+		if _, err := x.tx.ExecContext(ctx, `UPDATE events SET payload = jsonb_set(payload, '{body}', to_jsonb($2::text))
+			WHERE kind = 'ticket.comment' AND payload->>'comment_id' = $1`, strconv.FormatInt(c.GiteaID, 10), c.Body); err != nil {
+			return nil, fmt.Errorf("store: update comment events %d: %w", c.GiteaID, err)
 		}
 	}
 	return &prev, nil

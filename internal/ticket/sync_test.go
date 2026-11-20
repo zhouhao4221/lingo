@@ -105,7 +105,7 @@ func (m *memStore) SetAutoForward(_ context.Context, pid int64, typ string, on *
 	return nil
 }
 
-func (m *memStore) LockOverdue(_ context.Context, before time.Time, limit int) ([]*Ticket, error) {
+func (m *memStore) LockOverdue(_ context.Context, _ Scope, before time.Time, limit int) ([]*Ticket, error) {
 	var out []*Ticket
 	for id := int64(1); id <= int64(len(m.tickets)); id++ {
 		t, ok := m.tickets[id]

@@ -265,6 +265,8 @@ CREATE TABLE events (
 CREATE INDEX events_ticket_idx ON events (ticket_id, id);
 CREATE INDEX events_user_idx ON events (user_id, id);
 CREATE INDEX events_project_idx ON events (project_id, id);
+-- 评论被删除、改为内部或编辑时按评论 ID 更新对应事件
+CREATE INDEX events_comment_idx ON events ((payload->>'comment_id')) WHERE kind = 'ticket.comment';
 
 -- 异步任务：Gitea 写操作与 Notifier 投递；worker 用 FOR UPDATE SKIP LOCKED + 租约领取
 CREATE TABLE outbox (

@@ -67,8 +67,9 @@ type Options struct {
 	Templates   *gitea.TemplateCache         // 可与其他组件共用；为空时自建
 
 	// Reminder 与 RemindEvery > 0 时，每分钟检查一次待确认超时（triage.overdue）。
-	Reminder    Reminder
-	RemindEvery time.Duration
+	Reminder       Reminder
+	RemindEvery    time.Duration
+	RemindProjects []string // 只提醒这些项目（当前声明的项目）
 
 	Logger       *slog.Logger
 	PollInterval time.Duration // 队列为空时的轮询间隔，默认 1 秒
@@ -83,7 +84,7 @@ type Options struct {
 
 // Reminder 发出待确认超时提醒，由 ticket.Service 实现。
 type Reminder interface {
-	RemindOverdue(ctx context.Context, every time.Duration, limit int) (int, error)
+	RemindOverdue(ctx context.Context, projects []string, every time.Duration, limit int) (int, error)
 }
 
 // remindInterval 是检查待确认超时的间隔。
@@ -184,13 +185,14 @@ func (w *Worker) Run(ctx context.Context) error {
 			defer wg.Done()
 			t := time.NewTicker(remindInterval)
 			defer t.Stop()
+			limit := min(w.o.BatchSize, ticket.MaxLimit)
 			for {
 				for {
-					n, err := w.o.Reminder.RemindOverdue(ctx, w.o.RemindEvery, w.o.BatchSize)
+					n, err := w.o.Reminder.RemindOverdue(ctx, w.o.RemindProjects, w.o.RemindEvery, limit)
 					if err != nil && ctx.Err() == nil {
 						w.log.Error("worker loop failed", "loop", "remind", "err", err)
 					}
-					if err != nil || n < w.o.BatchSize {
+					if err != nil || n < limit {
 						break
 					}
 				}

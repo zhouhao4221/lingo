@@ -138,7 +138,7 @@ func (s *Service) ListEvents(ctx context.Context, p auth.Principal, afterID int6
 		if p.ID == "" {
 			return nil, fmt.Errorf("%w: caller has no user id", ErrForbidden)
 		}
-		q.Scope, q.UserID, q.ExcludeTriage = Scope{All: true}, p.ID, true
+		q.UserID, q.ExcludeTriage = p.ID, true
 	case auth.RoleAgent:
 		q.ExcludeTriage, q.ForwardedOnly = true, true
 	case auth.RoleReviewer, auth.RoleAdmin:
@@ -167,13 +167,13 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Tick
 	return t, cs, nil
 }
 
-// RemindOverdue 对待确认超过 every（自进入待确认或上次提醒起）的工单发出 triage.overdue，最多 limit 条；
-// 多实例并发执行时各自领取不同的工单（SKIP LOCKED）。返回提醒的条数。
-func (s *Service) RemindOverdue(ctx context.Context, every time.Duration, limit int) (int, error) {
+// RemindOverdue 对项目 projects 中待确认超过 every（自进入待确认或上次提醒起）的工单发出 triage.overdue，
+// 最多 limit 条（上限 MaxLimit）；多实例并发执行时各自领取不同的工单（SKIP LOCKED）。返回提醒的条数。
+func (s *Service) RemindOverdue(ctx context.Context, projects []string, every time.Duration, limit int) (int, error) {
 	n := 0
 	err := s.o.Store.InTx(ctx, func(tx Tx) error {
 		now := s.o.Now()
-		ts, err := tx.LockOverdue(ctx, now.Add(-every), limitOf(limit, DefaultLimit))
+		ts, err := tx.LockOverdue(ctx, Scope{Projects: projects}, now.Add(-every), limitOf(limit, DefaultLimit))
 		if err != nil {
 			return err
 		}

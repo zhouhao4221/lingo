@@ -77,7 +77,7 @@ func (s *Store) TriageCounts(ctx context.Context, sc ticket.Scope, overdueBefore
 // ListMine 实现 ticket.QueryStore。
 func (s *Store) ListMine(ctx context.Context, q ticket.MineQuery) ([]*ticket.Ticket, error) {
 	return s.tickets(ctx, "SELECT "+ticketColumns+`
-		WHERE t.user_id = $1 AND ($2 = '' OR t.status = $2) AND ($3 = 0 OR t.id < $3)
+		WHERE t.user_id = $1 AND ($2 = '' OR t.status = $2) AND ($3::bigint = 0 OR t.id < $3::bigint)
 		ORDER BY t.id DESC LIMIT $4`, q.UserID, q.Status, q.BeforeID, q.Limit)
 }
 
@@ -165,10 +165,11 @@ func (s *Store) AutoForwardOverrides(ctx context.Context, keys []string) (map[st
 	return out, rows.Err()
 }
 
-func (x *ticketTx) LockOverdue(ctx context.Context, before time.Time, limit int) ([]*ticket.Ticket, error) {
+func (x *ticketTx) LockOverdue(ctx context.Context, s ticket.Scope, before time.Time, limit int) ([]*ticket.Ticket, error) {
 	rows, err := x.tx.QueryContext(ctx, "SELECT "+ticketColumns+`
 		WHERE t.status = 'pending_triage' AND COALESCE(t.triage_reminded_at, t.triage_since) < $1
-		ORDER BY t.id LIMIT $2 FOR UPDATE OF t SKIP LOCKED`, before, limit)
+		  AND p.enabled AND `+scopeSQL(3)+`
+		ORDER BY t.id LIMIT $2 FOR UPDATE OF t SKIP LOCKED`, append([]any{before, limit}, scopeArgs(s)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: lock overdue: %w", err)
 	}

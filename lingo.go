@@ -179,8 +179,9 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		LabelPrefix: l.labelPrefix(),
 		Templates:   l.tmpls,
 
-		Reminder:    l.tickets,
-		RemindEvery: l.remindEvery(),
+		Reminder:       l.tickets,
+		RemindEvery:    l.remindEvery(),
+		RemindProjects: l.projectKeys(),
 	}
 	if n := l.cfg.Notifier; n != nil {
 		o.Notifications = l.store
