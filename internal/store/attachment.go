@@ -75,11 +75,12 @@ func (s *Store) DeleteOrphanAttachments(ctx context.Context, before time.Time) (
 }
 
 // TicketAttachments 实现 ticket.QueryStore。
-func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnly bool) ([]*ticket.Attachment, error) {
+func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]*ticket.Attachment, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM attachments a
 		LEFT JOIN ticket_comments c ON c.id = a.comment_id
 		WHERE a.ticket_id = $1 AND (NOT $2 OR a.comment_id IS NULL OR (c.public AND c.deleted_at IS NULL))
-		ORDER BY a.id`, ticketID, publicOnly)
+		  AND (NOT $3 OR a.forwarded)
+		ORDER BY a.id`, ticketID, publicOnly, forwardedOnly)
 	if err != nil {
 		return nil, fmt.Errorf("store: ticket attachments: %w", err)
 	}
@@ -99,17 +100,20 @@ func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnl
 const attachmentColumnsA = `a.id, a.user_id, COALESCE(a.ticket_id, 0), COALESCE(a.comment_id, 0), a.filename, a.content_type, a.size,
 	a.sha256, a.forwarded, a.gitea_attachment_uuid, a.created_at`
 
-// ForwardableAttachments 返回工单（commentID 为 0）或评论上待上传到 Gitea 的附件（含内容）：未上传过、未被 Gitea 拒绝；
+// ForwardableAttachments 返回待上传到 Gitea 的附件（含内容）：未上传过、未被 Gitea 拒绝。commentID 为 0 时取
+// 随 Issue 转出的附件：工单本身的附件，以及已写进 Issue 正文的补充评论的附件；否则取该评论的附件。
 // ids 非 nil 时只取其中的（后台人员勾选的）。
 func (s *Store) ForwardableAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64) ([]*ticket.Attachment, error) {
 	all, filter := true, "{}"
 	if ids != nil {
 		all, filter = false, textArrayInt(*ids)
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumns+`, data FROM attachments
-		WHERE ticket_id = $1 AND COALESCE(comment_id, 0) = $2 AND NOT forwarded AND forward_error = ''
-		  AND ($3 OR id = ANY(($4::text)::bigint[]))
-		ORDER BY id`, ticketID, commentID, all, filter)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+`, a.data FROM attachments a
+		LEFT JOIN ticket_comments c ON c.id = a.comment_id
+		WHERE a.ticket_id = $1 AND NOT a.forwarded AND a.forward_error = ''
+		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
+		  AND ($3 OR a.id = ANY(($4::text)::bigint[]))
+		ORDER BY a.id`, ticketID, commentID, all, filter)
 	if err != nil {
 		return nil, fmt.Errorf("store: forwardable attachments: %w", err)
 	}
@@ -125,10 +129,40 @@ func (s *Store) ForwardableAttachments(ctx context.Context, ticketID, commentID 
 	return out, rows.Err()
 }
 
-// MarkAttachmentForwarded 记录附件已上传到 Gitea（uuid），或被 Gitea 拒绝的原因（reason 非空，不再重试）。
-func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, reason string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE attachments SET forwarded = ($3 = ''), gitea_attachment_uuid = $2, forward_error = $3
-		WHERE id = $1`, id, uuid, reason)
+// AttachmentLink 是已处理（上传成功或被拒）的附件，用于在正文中引用。
+type AttachmentLink struct {
+	Filename    string
+	ContentType string
+	URL         string // 被 Gitea 拒绝时为空
+}
+
+// AttachmentLinks 返回已处理的附件（范围同 ForwardableAttachments，不按勾选过滤），按 ID 顺序；
+// 正文中的附件段落每次都按它整体重写，重试与部分失败后引用也不会丢。
+func (s *Store) AttachmentLinks(ctx context.Context, ticketID, commentID int64) ([]AttachmentLink, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT a.filename, a.content_type, a.gitea_url FROM attachments a
+		LEFT JOIN ticket_comments c ON c.id = a.comment_id
+		WHERE a.ticket_id = $1 AND (a.forwarded OR a.forward_error <> '')
+		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
+		ORDER BY a.id`, ticketID, commentID)
+	if err != nil {
+		return nil, fmt.Errorf("store: attachment links: %w", err)
+	}
+	defer rows.Close()
+	var out []AttachmentLink
+	for rows.Next() {
+		var l AttachmentLink
+		if err := rows.Scan(&l.Filename, &l.ContentType, &l.URL); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// MarkAttachmentForwarded 记录附件已上传到 Gitea（uuid、下载地址），或被 Gitea 拒绝的原因（reason 非空，不再重试）。
+func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url, reason string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE attachments SET forwarded = ($4 = ''), gitea_attachment_uuid = $2, gitea_url = $3,
+		forward_error = $4 WHERE id = $1`, id, uuid, url, reason)
 	if err != nil {
 		return fmt.Errorf("store: mark attachment %d: %w", id, err)
 	}

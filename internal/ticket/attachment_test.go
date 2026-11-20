@@ -64,6 +64,32 @@ func TestUploadValidation(t *testing.T) {
 	}
 }
 
+func TestCleanFilenameLongExtension(t *testing.T) {
+	name := cleanFilename("a." + strings.Repeat("x", 250))
+	if len([]rune(name)) != 200 {
+		t.Errorf("len = %d", len([]rune(name)))
+	}
+	if got := cleanFilename(strings.Repeat("长", 300) + ".png"); len([]rune(got)) != 200 || !strings.HasSuffix(got, ".png") {
+		t.Errorf("long name = %q", got)
+	}
+}
+
+func TestForwardEmptySelection(t *testing.T) {
+	m := newMem()
+	s := newService(t, m, nil)
+	ctx := context.Background()
+	tk, _ := s.Create(ctx, alice, NewTicket{Project: "demo", Type: TypeBug, Body: "x"})
+	var none []int64
+	if _, err := s.Forward(ctx, reviewer, tk.ID, ForwardInput{Attachments: &none}); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range m.tasks {
+		if ids, ok := task.Payload["attachment_ids"].([]int64); !ok || ids == nil {
+			t.Errorf("empty selection encoded as %#v", task.Payload["attachment_ids"])
+		}
+	}
+}
+
 func TestAddComment(t *testing.T) {
 	m := newMem()
 	s := newService(t, m, map[string]bool{TypeBug: true})

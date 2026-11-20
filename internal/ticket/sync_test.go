@@ -144,7 +144,7 @@ func (m *memStore) AutoForwardOverrides(context.Context, []string) (map[string]m
 	return nil, nil
 }
 
-func (m *memStore) TicketAttachments(context.Context, int64, bool) ([]*Attachment, error) {
+func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]*Attachment, error) {
 	return nil, nil
 }
 

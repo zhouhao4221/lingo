@@ -238,7 +238,11 @@ func enqueueCreate(ctx context.Context, tx Tx, t *Ticket, forwardedBy, note stri
 	}
 	payload := map[string]any{"forwarded_by": forwardedBy, "note": note}
 	if attachments != nil {
-		payload["attachment_ids"] = dedupIDs(*attachments)
+		ids := dedupIDs(*attachments)
+		if ids == nil {
+			ids = []int64{} // 指向空切片表示一个都不转出，不能编码成 null（null 表示全部）
+		}
+		payload["attachment_ids"] = ids
 	}
 	return tx.Enqueue(ctx, Task{Key: key, TicketID: t.ID, Op: OpCreateIssue, Payload: payload})
 }
@@ -487,6 +491,10 @@ func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via 
 		t, err := tx.LockByID(ctx, id)
 		if err != nil {
 			return err
+		}
+		if t.IssueNumber == number {
+			// Webhook 已按标记补记了同一个 Issue：正文里的补充评论仍要标记已转出，避免再单独发一遍
+			return tx.MarkCommentsForwarded(ctx, t.ID, commentIDs)
 		}
 		if t.IssueNumber != 0 || t.Status != StatusSubmitted {
 			return nil

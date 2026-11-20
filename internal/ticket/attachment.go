@@ -92,36 +92,55 @@ func cleanFilename(name string) string {
 	if name == "." || name == "/" {
 		return ""
 	}
-	if utf8.RuneCountInString(name) > 200 {
+	const max = 200
+	if utf8.RuneCountInString(name) > max {
 		ext := filepath.Ext(name)
-		name = string([]rune(strings.TrimSuffix(name, ext))[:200-utf8.RuneCountInString(ext)]) + ext
+		if n := utf8.RuneCountInString(ext); n < max/2 {
+			name = string([]rune(strings.TrimSuffix(name, ext))[:max-n]) + ext
+		} else {
+			name = string([]rune(name)[:max]) // 扩展名异常长：直接截断，之后的白名单校验会拒绝
+		}
 	}
 	return name
 }
 
-// Download 返回附件（含内容）：上传人本人，或能看到所属工单的人（随内部评论上传的附件 external 看不到）。
-// 无权访问与不存在一样返回 ErrNotFound。
+// Download 返回附件（含内容）：上传人本人，或能看到所属工单的人（随内部评论上传的附件 external 看不到；
+// agent 只能看到已转出到 Gitea 的）。无权访问与不存在一样返回 ErrNotFound。先按元数据鉴权，再读内容。
 func (s *Service) Download(ctx context.Context, p auth.Principal, id int64) (*Attachment, error) {
-	a, err := s.attachments().GetAttachment(ctx, id, true)
+	a, err := s.attachments().GetAttachment(ctx, id, false)
 	if err != nil {
 		return nil, err
 	}
-	if p.ID != "" && a.UserID == p.ID && p.Known() {
-		return a, nil
-	}
-	if a.TicketID == 0 {
-		return nil, ErrNotFound
-	}
-	if _, err := s.Get(ctx, p, a.TicketID); err != nil {
+	if err := s.canDownload(ctx, p, a); err != nil {
 		return nil, err
 	}
-	if a.CommentID != 0 && p.Role == auth.RoleExternal {
-		pub, err := s.attachments().CommentPublic(ctx, a.CommentID)
-		if err != nil || !pub {
-			return nil, ErrNotFound
+	return s.attachments().GetAttachment(ctx, id, true)
+}
+
+func (s *Service) canDownload(ctx context.Context, p auth.Principal, a *Attachment) error {
+	if p.ID != "" && a.UserID == p.ID && p.Known() {
+		return nil
+	}
+	if a.TicketID == 0 {
+		return ErrNotFound
+	}
+	if _, err := s.Get(ctx, p, a.TicketID); err != nil {
+		return err
+	}
+	switch p.Role {
+	case auth.RoleAgent:
+		if !a.Forwarded {
+			return ErrNotFound
+		}
+	case auth.RoleExternal:
+		if a.CommentID != 0 {
+			pub, err := s.attachments().CommentPublic(ctx, a.CommentID)
+			if err != nil || !pub {
+				return ErrNotFound
+			}
 		}
 	}
-	return a, nil
+	return nil
 }
 
 // linkAttachments 把调用者上传、尚未关联的附件关联到工单（与评论），并检查单工单上限。

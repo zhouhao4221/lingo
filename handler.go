@@ -1,7 +1,6 @@
 package lingo
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -108,7 +107,7 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		if err != nil {
 			return nil, err
 		}
-		a, err := l.UploadAttachment(ctx(r), user(r), name, bytes.NewReader(data))
+		a, err := l.uploadBytes(ctx(r), user(r), name, data)
 		if err != nil {
 			return nil, err
 		}

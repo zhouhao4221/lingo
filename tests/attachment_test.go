@@ -89,8 +89,10 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 		t.Fatalf("create: %d %v", code, created)
 	}
 	id := int64(created["id"].(float64))
-	// 建单前补充：写进 Issue 正文，不单独发评论
-	if code, _, _ := c.do("u1", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "只在 Safari 出现"}); code != 201 {
+	// 建单前补充（带附件）：写进 Issue 正文，附件随 Issue 上传，不单独发评论
+	_, early := upload(t, h, "u1", "external", "trace.txt", []byte("stack"))
+	earlyID := int64(early["id"].(float64))
+	if code, _, _ := c.do("u1", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "只在 Safari 出现", "attachment_ids": []int64{earlyID}}); code != 201 {
 		t.Fatalf("comment before issue: %d", code)
 	}
 	if code, _, _ := c.do("u2", "external", "POST", "/tickets/"+jsonNum(id)+"/comments", map[string]any{"body": "x"}); code != 404 {
@@ -126,10 +128,12 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 	edited := g.edits[0]
 	assets := append([]string(nil), g.assets...)
 	g.mu.Unlock()
-	if !strings.Contains(body, "只在 Safari 出现") || len(assets) != 1 || !strings.HasPrefix(assets[0], "/repos/demo/api/issues/40/assets:截图.png") {
+	if !strings.Contains(body, "只在 Safari 出现") || len(assets) != 2 || !strings.HasPrefix(assets[0], "/repos/demo/api/issues/40/assets:截图.png") ||
+		!strings.HasPrefix(assets[1], "/repos/demo/api/issues/40/assets:trace.txt") {
 		t.Errorf("issue body / assets: %s %v", body, assets)
 	}
-	if !strings.Contains(edited, "![截图.png](http://g/attachments/1)") || !strings.HasSuffix(strings.TrimSpace(edited), "-->") {
+	if !strings.Contains(edited, "![截图.png](http://g/attachments/1)") || !strings.Contains(edited, "[trace.txt](http://g/attachments/2)") ||
+		!strings.HasSuffix(strings.TrimSpace(edited), "<!-- lingo:ticket="+jsonNum(id)+" -->") {
 		t.Errorf("edited body:\n%s", edited)
 	}
 
@@ -147,11 +151,11 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 	if len(g.comments) != 1 || !strings.Contains(g.comments[0], "来自提交人的补充") || !strings.Contains(g.comments[0], "补充日志") {
 		t.Errorf("comments = %v", g.comments)
 	}
-	if len(g.assets) != 2 || !strings.HasPrefix(g.assets[1], "/repos/demo/api/issues/comments/501/assets:app.log") {
+	if len(g.assets) != 3 || !strings.HasPrefix(g.assets[2], "/repos/demo/api/issues/comments/501/assets:app.log") {
 		t.Errorf("comment assets = %v", g.assets)
 	}
 	var forwarded int
-	if err := db.QueryRow("SELECT count(*) FROM attachments WHERE forwarded").Scan(&forwarded); err != nil || forwarded != 2 {
+	if err := db.QueryRow("SELECT count(*) FROM attachments WHERE forwarded").Scan(&forwarded); err != nil || forwarded != 3 {
 		t.Errorf("forwarded = %d %v", forwarded, err)
 	}
 }

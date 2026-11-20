@@ -91,8 +91,8 @@ type QueryStore interface {
 	Events(ctx context.Context, q EventQuery) ([]notify.Event, error)
 	Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]Comment, error)
 	AutoForwardOverrides(ctx context.Context, keys []string) (map[string]map[string]bool, error)
-	// TicketAttachments 返回工单的附件（不含内容）；publicOnly 时排除随内部评论上传的。
-	TicketAttachments(ctx context.Context, ticketID int64, publicOnly bool) ([]*Attachment, error)
+	// TicketAttachments 返回工单的附件（不含内容）；publicOnly 时排除随内部评论上传的，forwardedOnly 时只含已上传到 Gitea 的。
+	TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]*Attachment, error)
 }
 
 // ListTriage 列出调用者项目范围内的待确认工单（reviewer / admin），按进入待确认的先后（ID 升序）。
@@ -169,7 +169,8 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Tick
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	as, err := s.queries().TicketAttachments(ctx, id, ext)
+	// agent 只看已转出到 Gitea 的附件：后台人员没勾选的截图可能含敏感信息
+	as, err := s.queries().TicketAttachments(ctx, id, ext, p.Role == auth.RoleAgent)
 	if err != nil {
 		return nil, nil, nil, err
 	}

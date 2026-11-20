@@ -145,12 +145,16 @@ func publicAttachment(a *ticket.Attachment) Attachment {
 // 24 小时内未关联工单的附件会被清理。类型限 png / jpg / gif / webp / pdf / txt / log / zip（图片按内容校验），
 // 大小上限 Config.MaxAttachmentBytes（默认 10 MB）。
 func (l *Lingo) UploadAttachment(ctx context.Context, u User, filename string, r io.Reader) (Attachment, error) {
-	max := l.maxAttachmentBytes()
-	data, err := io.ReadAll(io.LimitReader(r, max+1))
+	data, err := io.ReadAll(io.LimitReader(r, l.maxAttachmentBytes()+1))
 	if err != nil {
 		return Attachment{}, fmt.Errorf("lingo: read attachment: %w", err)
 	}
-	a, err := l.tickets.Upload(ctx, l.principal(u), filename, data, max)
+	return l.uploadBytes(ctx, u, filename, data)
+}
+
+// uploadBytes 保存已读入内存的附件（REST 上传已读出内容，避免再复制一次）。
+func (l *Lingo) uploadBytes(ctx context.Context, u User, filename string, data []byte) (Attachment, error) {
+	a, err := l.tickets.Upload(ctx, l.principal(u), filename, data, l.maxAttachmentBytes())
 	if err != nil {
 		return Attachment{}, publicErr(err)
 	}

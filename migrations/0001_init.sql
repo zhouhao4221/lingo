@@ -168,6 +168,7 @@ CREATE TABLE attachments (
     data                  bytea       NOT NULL,
     forwarded             boolean     NOT NULL DEFAULT false, -- 已上传到 Gitea
     gitea_attachment_uuid text        NOT NULL DEFAULT '',
+    gitea_url             text        NOT NULL DEFAULT '', -- Gitea 中的下载地址，用于在 Issue / 评论正文引用
     forward_error         text        NOT NULL DEFAULT '', -- 上传被 Gitea 拒绝（类型、大小限制）的原因，不再重试
     created_at            timestamptz NOT NULL DEFAULT now()
 );
