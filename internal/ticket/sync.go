@@ -105,6 +105,8 @@ type PullUpdate struct {
 	MergeCommit string
 	Sender      string
 	DeliveryID  string
+	// Replay 为真表示来自对账：同一 PR 的同类变化此前已应用过时跳过（避免重放已被重开撤销的合并）。
+	Replay bool
 }
 
 // SyncOptions 是 Sync 的配置。
@@ -152,7 +154,7 @@ func (s *Sync) Tracks(ctx context.Context, repo string, number int64) (bool, err
 func (s *Sync) ApplyIssue(ctx context.Context, u IssueUpdate) error {
 	// 队列检查放在事务外：事务持有连接与行锁时再从连接池取连接，连接池耗尽时会互相等待
 	mergePending := false
-	if u.Change == IssueClosed && s.o.PendingMerges != nil && s.o.CloseGrace >= 0 {
+	if (u.Change == IssueClosed || (u.Change == IssueSynced && u.Current.State == "closed")) && s.o.PendingMerges != nil && s.o.CloseGrace >= 0 {
 		var err error
 		if mergePending, err = s.o.PendingMerges(ctx, u.Repo, u.ReceivedAt.Add(s.o.CloseGrace)); err != nil {
 			return err
@@ -354,17 +356,26 @@ func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
 		if err != nil {
 			return err
 		}
-		if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
-			"delivery": u.DeliveryID, "sender": u.Author, "comment": u.CommentID, "public": u.Public,
-		}}); err != nil {
-			return err
+		history := func() error {
+			return tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
+				"delivery": u.DeliveryID, "sender": u.Author, "comment": u.CommentID, "public": u.Public,
+			}})
 		}
 		if u.Change == CommentDeleted {
+			if err := history(); err != nil {
+				return err
+			}
 			return tx.DeleteGiteaComment(ctx, u.CommentID, u.At)
 		}
 		prev, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
 			Body: u.Body, Public: u.Public, At: u.At})
 		if err != nil {
+			return err
+		}
+		if prev != nil && prev.Body == u.Body && prev.Public == u.Public {
+			return nil // 内容未变（重投或对账重放）：不重复留痕
+		}
+		if err := history(); err != nil {
 			return err
 		}
 		if u.Public && (prev == nil || !prev.Public) {
@@ -401,6 +412,13 @@ func (s *Sync) ApplyPull(ctx context.Context, u PullUpdate) error {
 }
 
 func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r IssueRef) error {
+	pull := u.Repo + "#" + strconv.FormatInt(u.Number, 10)
+	if u.Replay {
+		seen, err := tx.SeenPull(ctx, t.ID, string(u.Change), pull)
+		if err != nil || seen {
+			return err
+		}
+	}
 	prev, prevPR, prevCommit, prevRepo := t.Status, t.FixedPR, t.FixedCommit, t.FixedRepo
 	switch u.Change {
 	case PullOpened, PullReopened:
@@ -413,7 +431,7 @@ func (s *Sync) applyPull(ctx context.Context, tx Tx, t *Ticket, u PullUpdate, r 
 		}
 	}
 	if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
-		"delivery": u.DeliveryID, "sender": u.Sender, "pull": u.Repo + "#" + strconv.FormatInt(u.Number, 10),
+		"delivery": u.DeliveryID, "sender": u.Sender, "pull": pull,
 		"closes": r.Closes, "merge_commit": u.MergeCommit, "status": string(t.Status), "prev_status": string(prev),
 	}}); err != nil {
 		return err

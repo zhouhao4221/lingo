@@ -10,7 +10,6 @@ import (
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/release"
 	"github.com/zhouhao4221/lingo/internal/ticket"
-	"github.com/zhouhao4221/lingo/internal/webhook"
 )
 
 // Cursors 保存各仓库的对账游标，由 store.Store 实现。
@@ -44,8 +43,12 @@ const (
 	reconcileFirst = 24 * time.Hour
 )
 
-// Reconcile 对每个仓库按 PR → Issue → 评论 → 版本的顺序增量对账一次（先处理 PR，Issue 关闭时修复已记录）。
-// 某类失败时记日志、不前移该类游标，下次重试；各处理幂等，与 Webhook 重叠不会重复通知。
+// errSkip 表示本类这次跳过（如机器人账号尚未获取），不前移游标、不算失败。
+var errSkip = errors.New("skipped")
+
+// Reconcile 按 PR → Issue → 评论 → 版本的顺序增量对账一次，每一类先处理完全部仓库再进入下一类：跨仓库修复
+// （前端 PR 关闭后端 Issue）的合并也先于 Issue 关闭记录。某类失败时记日志、不前移该类游标，下次重试；
+// 各处理幂等，与 Webhook 重叠不会重复通知或重复留痕。
 func (w *Worker) Reconcile(ctx context.Context) error {
 	ro := w.o.Reconcile
 	if ro.Gitea == nil || ro.Cursors == nil {
@@ -59,15 +62,19 @@ func (w *Worker) Reconcile(ctx context.Context) error {
 		defer release()
 	}
 	var errs []error
-	for _, repo := range ro.Repos {
-		for _, k := range []struct {
-			kind string
-			fn   func(ctx context.Context, repo, owner, name string, since time.Time) error
-		}{{"pulls", w.reconcilePulls}, {"issues", w.reconcileIssues}, {"comments", w.reconcileComments}, {"releases", w.reconcileReleases}} {
+	for _, k := range []struct {
+		kind string
+		fn   func(ctx context.Context, repo, owner, name string, since time.Time) error
+	}{{"pulls", w.reconcilePulls}, {"issues", w.reconcileIssues}, {"comments", w.reconcileComments}, {"releases", w.reconcileReleases}} {
+		for _, repo := range ro.Repos {
 			if ctx.Err() != nil {
 				return errors.Join(errs...)
 			}
-			if err := w.reconcileKind(ctx, repo, k.kind, k.fn); err != nil {
+			err := w.reconcileKind(ctx, repo, k.kind, k.fn)
+			switch {
+			case errors.Is(err, errSkip):
+				w.log.Debug("reconcile skipped", "repo", repo, "kind", k.kind, "err", err)
+			case err != nil:
 				w.log.Warn("reconcile failed, will retry next run", "repo", repo, "kind", k.kind, "err", err)
 				errs = append(errs, err)
 			}
@@ -101,23 +108,23 @@ func (w *Worker) reconcilePulls(ctx context.Context, repo, owner, name string, s
 		return err
 	}
 	for _, is := range prs {
-		u := ticket.PullUpdate{Repo: repo, Number: is.Number, DeliveryID: "reconcile", Change: ticket.PullOpened}
-		text := is.Title + "\n" + is.Body
-		switch {
-		case is.PullRequest != nil && is.PullRequest.Merged:
+		merged := is.PullRequest != nil && is.PullRequest.Merged
+		if !merged && is.State != gitea.StateOpen {
+			continue // 未合并就关闭的 PR 不影响工单
+		}
+		u := ticket.PullUpdate{Repo: repo, Number: is.Number, DeliveryID: "reconcile", Change: ticket.PullOpened, Replay: true}
+		for _, r := range resolveRefs(repo, gitea.ParseIssueRefs(is.Title+"\n"+is.Body)) {
+			u.Refs = append(u.Refs, ticket.IssueRef{Repo: r.Repo, Number: r.Number, Closes: r.Closes})
+		}
+		if len(u.Refs) == 0 {
+			continue // 列表里已有标题与正文：不引用 Issue 的 PR 不再读详情
+		}
+		if merged {
 			pr, err := w.o.Reconcile.Gitea.GetPullRequest(ctx, owner, name, is.Number)
 			if err != nil {
 				return err
 			}
-			u.Change, u.MergeCommit, text = ticket.PullMerged, pr.MergeCommitSHA, pr.Title+"\n"+pr.Body
-		case is.State != gitea.StateOpen:
-			continue // 未合并就关闭的 PR 不影响工单
-		}
-		for _, r := range resolveRefs(repo, gitea.ParseIssueRefs(text)) {
-			u.Refs = append(u.Refs, ticket.IssueRef{Repo: r.Repo, Number: r.Number, Closes: r.Closes})
-		}
-		if len(u.Refs) == 0 {
-			continue
+			u.Change, u.MergeCommit = ticket.PullMerged, pr.MergeCommitSHA
 		}
 		if err := w.o.Tickets.ApplyPull(ctx, u); err != nil {
 			return err
@@ -143,6 +150,7 @@ func (w *Worker) reconcileIssues(ctx context.Context, repo, owner, name string, 
 		if !ok {
 			continue
 		}
+		// ReceivedAt 取零值：快照已是事后状态，不再等 PR 事件；队列中仍有合并投递时照常推迟
 		err = w.o.Tickets.ApplyIssue(ctx, ticket.IssueUpdate{Change: ticket.IssueSynced, Repo: repo, Number: is.Number,
 			DeliveryID: "reconcile", Current: snapshot(is)})
 		var de *ticket.DeferError
@@ -157,9 +165,8 @@ func (w *Worker) reconcileIssues(ctx context.Context, repo, owner, name string, 
 }
 
 func (w *Worker) reconcileComments(ctx context.Context, repo, owner, name string, since time.Time) error {
-	bot := w.o.BotLogin()
-	if bot == "" {
-		return errors.New("bot login not yet known")
+	if w.o.BotLogin() == "" {
+		return fmt.Errorf("%w: bot login not yet known", errSkip) // 无法识别机器人自己的评论，下次再对
 	}
 	cs, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Comment, *gitea.Response, error) {
 		return w.o.Reconcile.Gitea.ListRepoComments(ctx, owner, name, since, o)
@@ -169,7 +176,7 @@ func (w *Worker) reconcileComments(ctx context.Context, repo, owner, name string
 	}
 	for _, c := range cs {
 		number := gitea.IssueIndexFromURL(c.IssueURL)
-		if number == 0 || c.User == nil || strings.EqualFold(c.User.Login, bot) {
+		if number == 0 {
 			continue
 		}
 		ok, err := w.o.Tickets.Tracks(ctx, repo, number)
@@ -179,11 +186,8 @@ func (w *Worker) reconcileComments(ctx context.Context, repo, owner, name string
 		if !ok {
 			continue
 		}
-		u := ticket.CommentUpdate{Change: ticket.CommentEdited, Repo: repo, Number: number, CommentID: c.ID, Author: c.User.Login,
-			Body: c.Body, Public: w.o.ReplyMode == webhook.ReplyAll || gitea.IsPublicReply(c.Body), DeliveryID: "reconcile", At: c.UpdatedAt}
-		if u.Public {
-			u.Body = gitea.PublicReplyText(c.Body)
-		}
+		u := w.commentUpdate(ticket.CommentEdited, repo, number, c, "")
+		u.DeliveryID = "reconcile"
 		if err := w.o.Tickets.ApplyComment(ctx, u); err != nil {
 			return err
 		}
@@ -195,12 +199,26 @@ func (w *Worker) reconcileReleases(ctx context.Context, repo, owner, name string
 	if w.o.Releases == nil {
 		return nil
 	}
-	// Release 没有 updated_at：取最近一页，按发布时间筛选（处理幂等）
-	rs, _, err := w.o.Reconcile.Gitea.ListReleases(ctx, owner, name, gitea.ListReleasesOptions{ListOptions: gitea.ListOptions{Limit: 50}})
-	if err != nil {
-		return err
+	// Release 没有 updated_at：按创建时间倒序翻页，翻到整页都早于 since 为止，再按发布时间筛选（处理幂等）
+	var rs []*gitea.Release
+	for page := 1; ; page++ {
+		batch, resp, err := w.o.Reconcile.Gitea.ListReleases(ctx, owner, name, gitea.ListReleasesOptions{ListOptions: gitea.ListOptions{Page: page, Limit: 50}})
+		if err != nil {
+			return err
+		}
+		recent := false
+		for _, r := range batch {
+			if r.PublishedAt == nil || !r.PublishedAt.Before(since) || !r.CreatedAt.Before(since) {
+				recent = true
+			}
+		}
+		rs = append(rs, batch...)
+		if !recent || len(batch) == 0 || resp == nil || resp.NextPage == 0 {
+			break
+		}
 	}
-	for _, r := range rs {
+	for i := len(rs) - 1; i >= 0; i-- { // 先旧后新
+		r := rs[i]
 		if r.Draft || r.PublishedAt == nil || r.PublishedAt.Before(since) {
 			continue
 		}

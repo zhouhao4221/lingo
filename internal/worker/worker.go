@@ -99,6 +99,9 @@ type Reminder interface {
 // orphanAge 是未关联工单的附件的保留时长。
 const orphanAge = 24 * time.Hour
 
+// reconcileStartDelay 是 Run 启动后首次对账前的等待。
+const reconcileStartDelay = 30 * time.Second
+
 // remindInterval 是检查待确认超时的间隔。
 const remindInterval = time.Minute
 
@@ -198,6 +201,12 @@ func (w *Worker) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// 启动后稍等再对账：机器人账号获取、积压的 Webhook 投递先处理
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(min(ro.Interval, reconcileStartDelay)):
+			}
 			t := time.NewTicker(ro.Interval)
 			defer t.Stop()
 			for {

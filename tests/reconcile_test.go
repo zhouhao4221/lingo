@@ -48,7 +48,7 @@ func TestReconcileRecoversMissedWebhooks(t *testing.T) {
 	t.Cleanup(g.Close)
 	rec := &recorder{}
 	l, err := lingo.New(lingo.Config{
-		DB: db, Model: nopModel{}, Notifier: rec, SkipSelfCheck: true, ReconcileInterval: time.Hour,
+		DB: db, Model: nopModel{}, Notifier: rec, SkipSelfCheck: true, ReconcileInterval: time.Second, // 每秒对账一次：重复对账必须幂等
 		Gitea:        lingo.GiteaConfig{BaseURL: g.URL, Token: "t", WebhookSecret: "s"},
 		Projects:     []lingo.Project{{Key: "demo", Repos: []lingo.Repo{{Owner: "demo", Name: "api"}}}},
 		Authenticate: func(*http.Request) (lingo.User, error) { return lingo.User{}, nil },
@@ -72,6 +72,21 @@ func TestReconcileRecoversMissedWebhooks(t *testing.T) {
 		_ = db.QueryRow("SELECT count(*) FROM sync_cursors").Scan(&n)
 		return n == 4
 	})
+	time.Sleep(2500 * time.Millisecond) // 再对账几轮
+	if got := rec.waitFor(t, 3); len(got) != 3 {
+		t.Errorf("repeated reconcile produced extra events: %d", len(got))
+	}
+	rows, _ := db.Query("SELECT kind FROM ticket_events WHERE ticket_id = $1 ORDER BY id", id)
+	var hk []string
+	for rows.Next() {
+		var k string
+		_ = rows.Scan(&k)
+		hk = append(hk, k)
+	}
+	rows.Close()
+	if strings.Join(hk, ",") != "pull.merged,issue.synced,comment.edited,comment.edited,ticket.released" {
+		t.Errorf("ticket_events = %v (want no duplicates from repeated runs)", hk)
+	}
 	var comments int
 	if err := db.QueryRow("SELECT count(*) FROM ticket_comments WHERE ticket_id = $1", id).Scan(&comments); err != nil || comments != 2 {
 		t.Errorf("comments = %d %v (bot comment skipped)", comments, err)

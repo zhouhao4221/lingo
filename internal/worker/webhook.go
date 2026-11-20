@@ -202,12 +202,22 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 	if ev.IsPull {
 		return nil // PR 上的评论不属于工单 Issue
 	}
-	c := ev.Comment
-	u := ticket.CommentUpdate{Change: ticket.CommentChange(ev.Kind), Repo: ev.Repo, Number: ev.IssueNumber, CommentID: c.ID,
-		Author: ev.Sender, Body: c.Body, Public: ev.Public, FromBot: ev.FromBot, DeliveryID: ev.DeliveryID, At: c.UpdatedAt}
+	u := w.commentUpdate(ticket.CommentChange(ev.Kind), ev.Repo, ev.IssueNumber, ev.Comment, ev.Sender)
+	u.DeliveryID = ev.DeliveryID
+	u.FromBot = u.FromBot || ev.FromBot
+	if u.Change == ticket.CommentDeleted {
+		u.At = received // 载荷中只有评论最后编辑的时间
+	}
+	return w.o.Tickets.ApplyComment(ctx, u)
+}
+
+// commentUpdate 把 Gitea 评论映射为工单评论变化（Webhook 与对账共用）：按 ReplyMode 判定是否对外、去掉 /reply 前缀；
+// 评论人是机器人（灵问转发的补充，研发编辑也算）时标记 FromBot。
+func (w *Worker) commentUpdate(change ticket.CommentChange, repo string, number int64, c *gitea.Comment, sender string) ticket.CommentUpdate {
+	u := ticket.CommentUpdate{Change: change, Repo: repo, Number: number, CommentID: c.ID, Author: sender, Body: c.Body,
+		Public: w.o.ReplyMode == webhook.ReplyAll || gitea.IsPublicReply(c.Body), At: c.UpdatedAt}
 	if c.User != nil {
 		u.Author = c.User.Login
-		// 研发编辑或删除机器人发的评论（灵问转发的补充）：评论属于机器人，不当作研发回复
 		if bot := w.o.BotLogin(); bot != "" && strings.EqualFold(c.User.Login, bot) {
 			u.FromBot = true
 		}
@@ -215,10 +225,7 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 	if u.Public {
 		u.Body = gitea.PublicReplyText(c.Body)
 	}
-	if u.Change == ticket.CommentDeleted {
-		u.At = received // 载荷中只有评论最后编辑的时间
-	}
-	return w.o.Tickets.ApplyComment(ctx, u)
+	return u
 }
 
 func (w *Worker) applyPull(ctx context.Context, ev *webhook.Event) error {
