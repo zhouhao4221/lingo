@@ -49,6 +49,13 @@ mux.Handle("/webhooks/gitea", l.WebhookHandler())              // Gitea Webhook
 go l.Run(ctx)                                                  // 后台任务
 ```
 
+内置模型（标准库 HTTP，不引入 SDK）：`lingo.NewOpenAIModel(lingo.OpenAIConfig{...})` 对接 OpenAI 或任意 OpenAI 兼容接口（网关、vLLM、Ollama 的 `/v1` 等），`lingo.NewDeepSeekModel(apiKey, "")` 对接 DeepSeek；也可以自己实现 `lingo.Model`。
+
+```go
+light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
+// 或：lingo.NewOpenAIModel(lingo.OpenAIConfig{BaseURL: "https://gateway.example.com/v1", APIKey: key, Model: "your-model"})
+```
+
 完整示例见 [examples/server](examples/server/main.go)。
 
 ### 角色

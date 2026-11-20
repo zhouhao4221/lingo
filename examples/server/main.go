@@ -36,7 +36,7 @@ func main() {
 		DB: db,
 		// LightModel：建 Issue 前用轻量模型整理工单（标题、模板字段、描述）；不配置时按原内容建单。
 		// Model：主模型，供知识问答使用（尚未实现），可不配置。
-		LightModel: nil, // 替换为自己的 lingo.Model 实现，如接入便宜、快速的对话模型
+		LightModel: lightModel(),
 		Gitea: lingo.GiteaConfig{
 			BaseURL:       os.Getenv("LINGO_GITEA_URL"),
 			Token:         os.Getenv("LINGO_GITEA_TOKEN"), // 机器人账号：write:issue、read:repository、read:user
@@ -82,6 +82,26 @@ func main() {
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// lightModel 按环境变量选择建单整理用的轻量模型：DeepSeek、OpenAI 或任意 OpenAI 兼容接口；都没配置时不整理。
+func lightModel() lingo.Model {
+	var (
+		m   lingo.Model
+		err error
+	)
+	switch {
+	case os.Getenv("DEEPSEEK_API_KEY") != "":
+		m, err = lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
+	case os.Getenv("LINGO_LLM_MODEL") != "":
+		// OpenAI 或兼容接口：LINGO_LLM_BASE_URL 为空时使用 OpenAI 官方地址
+		m, err = lingo.NewOpenAIModel(lingo.OpenAIConfig{BaseURL: os.Getenv("LINGO_LLM_BASE_URL"),
+			APIKey: os.Getenv("LINGO_LLM_API_KEY"), Model: os.Getenv("LINGO_LLM_MODEL")})
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	return m
 }
 
 // authenticate 替换为业务项目自己的登录态解析（如校验会话 cookie 或令牌），并按服务端记录的用户身份映射固定角色。

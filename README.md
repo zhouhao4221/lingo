@@ -49,6 +49,13 @@ mux.Handle("/webhooks/gitea", l.WebhookHandler())              // Gitea webhook
 go l.Run(ctx)                                                  // background workers
 ```
 
+Built-in models (standard library HTTP, no SDK): `lingo.NewOpenAIModel(lingo.OpenAIConfig{...})` for OpenAI or any OpenAI-compatible API (gateways, vLLM, Ollama `/v1`), and `lingo.NewDeepSeekModel(apiKey, "")` for DeepSeek. You can also implement `lingo.Model` yourself.
+
+```go
+light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
+// or: lingo.NewOpenAIModel(lingo.OpenAIConfig{BaseURL: "https://gateway.example.com/v1", APIKey: key, Model: "your-model"})
+```
+
 See [examples/server](examples/server/main.go) for a complete example.
 
 ### Roles
