@@ -44,7 +44,7 @@ func (s *Store) HasIssue(ctx context.Context, repo string, number int64) (bool, 
 		return false, nil
 	}
 	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tickets t JOIN repos r ON r.id = t.repo_id
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM lingo_tickets t JOIN lingo_repos r ON r.id = t.repo_id
 		WHERE lower(r.owner) = lower($1) AND lower(r.name) = lower($2) AND t.gitea_issue_number = $3)`, owner, name, number).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("store: has issue %s#%d: %w", repo, number, err)
@@ -62,8 +62,8 @@ const ticketColumns = `t.id, t.project_id, p.key, COALESCE(t.repo_id, 0), COALES
 	COALESCE(t.gitea_issue_number, 0), COALESCE(t.merged_into_ticket_id, 0), t.triage_since, t.created_at, t.updated_at,
 	t.gitea_updated_at, COALESCE(t.fixed_pr, 0), t.fixed_commit, t.milestone, t.due_date, t.deployed_at, COALESCE(rel.tag, ''),
 	COALESCE(t.fixed_release_id, 0), t.fixed_repo
-	FROM tickets t JOIN projects p ON p.id = t.project_id LEFT JOIN repos r ON r.id = t.repo_id
-	LEFT JOIN releases rel ON rel.id = t.fixed_release_id`
+	FROM lingo_tickets t JOIN lingo_projects p ON p.id = t.project_id LEFT JOIN lingo_repos r ON r.id = t.repo_id
+	LEFT JOIN lingo_releases rel ON rel.id = t.fixed_release_id`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -144,7 +144,7 @@ func (x *ticketTx) Update(ctx context.Context, t *ticket.Ticket) error {
 		updated = sql.NullTime{Time: t.GiteaUpdatedAt, Valid: true}
 	}
 	err := x.tx.QueryRowContext(ctx, `
-		UPDATE tickets SET status = $2, gitea_issue_number = $3, gitea_updated_at = $4, fixed_pr = $5, fixed_commit = $6,
+		UPDATE lingo_tickets SET status = $2, gitea_issue_number = $3, gitea_updated_at = $4, fixed_pr = $5, fixed_commit = $6,
 		    milestone = $7, due_date = $8, repo_id = $9, type = $10, title = $11, title_auto = $17, merged_into_ticket_id = $12,
 		    triage_since = $13, fixed_release_id = $14, deployed_at = $15, fixed_repo = lower($16), updated_at = now()
 		WHERE id = $1 RETURNING updated_at`,
@@ -167,7 +167,7 @@ func (x *ticketTx) Insert(ctx context.Context, t *ticket.Ticket) error {
 		return err
 	}
 	err = x.tx.QueryRowContext(ctx, `
-		INSERT INTO tickets (user_id, user_name, user_email, conversation_id, project_id, repo_id, type, title, body, status,
+		INSERT INTO lingo_tickets (user_id, user_name, user_email, conversation_id, project_id, repo_id, type, title, body, status,
 		    context, fields, reported_version, triage_since, title_auto)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id, created_at, updated_at`,
@@ -191,8 +191,8 @@ func (x *ticketTx) Project(ctx context.Context, key string) (*ticket.Project, er
 	var repoID sql.NullInt64
 	var repo sql.NullString
 	err := x.tx.QueryRowContext(ctx, `
-		SELECT p.id, p.key, r.id, r.owner || '/' || r.name FROM projects p
-		LEFT JOIN repos r ON r.id = p.default_repo_id AND r.enabled
+		SELECT p.id, p.key, r.id, r.owner || '/' || r.name FROM lingo_projects p
+		LEFT JOIN lingo_repos r ON r.id = p.default_repo_id AND r.enabled
 		WHERE p.key = $1 AND p.enabled`, key).Scan(&p.ID, &p.Key, &repoID, &repo)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: project %q", ticket.ErrNotFound, key)
@@ -212,7 +212,7 @@ func (x *ticketTx) Repo(ctx context.Context, projectID int64, name string) (*tic
 		return nil, ticket.ErrNotFound
 	}
 	var r ticket.RepoRef
-	err := x.tx.QueryRowContext(ctx, `SELECT id, owner || '/' || name FROM repos
+	err := x.tx.QueryRowContext(ctx, `SELECT id, owner || '/' || name FROM lingo_repos
 		WHERE project_id = $1 AND lower(owner) = lower($2) AND lower(name) = lower($3) AND enabled`, projectID, owner, repo).Scan(&r.ID, &r.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
@@ -224,7 +224,7 @@ func (x *ticketTx) Repo(ctx context.Context, projectID int64, name string) (*tic
 }
 
 func (x *ticketTx) AutoForward(ctx context.Context, projectID int64, typ string) (on, ok bool, err error) {
-	err = x.tx.QueryRowContext(ctx, "SELECT auto_forward FROM project_settings WHERE project_id = $1 AND ticket_type = $2",
+	err = x.tx.QueryRowContext(ctx, "SELECT auto_forward FROM lingo_project_settings WHERE project_id = $1 AND ticket_type = $2",
 		projectID, typ).Scan(&on)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
@@ -238,10 +238,10 @@ func (x *ticketTx) AutoForward(ctx context.Context, projectID int64, typ string)
 func (x *ticketTx) SetAutoForward(ctx context.Context, projectID int64, typ string, on *bool, by string) error {
 	var err error
 	if on == nil {
-		_, err = x.tx.ExecContext(ctx, "DELETE FROM project_settings WHERE project_id = $1 AND ticket_type = $2", projectID, typ)
+		_, err = x.tx.ExecContext(ctx, "DELETE FROM lingo_project_settings WHERE project_id = $1 AND ticket_type = $2", projectID, typ)
 	} else {
 		_, err = x.tx.ExecContext(ctx, `
-			INSERT INTO project_settings (project_id, ticket_type, auto_forward, updated_by) VALUES ($1, $2, $3, $4)
+			INSERT INTO lingo_project_settings (project_id, ticket_type, auto_forward, updated_by) VALUES ($1, $2, $3, $4)
 			ON CONFLICT (project_id, ticket_type) DO UPDATE SET auto_forward = EXCLUDED.auto_forward,
 			    updated_by = EXCLUDED.updated_by, updated_at = now()`, projectID, typ, *on, by)
 	}
@@ -253,7 +253,7 @@ func (x *ticketTx) SetAutoForward(ctx context.Context, projectID int64, typ stri
 
 func (x *ticketTx) ConversationOwner(ctx context.Context, id int64) (string, error) {
 	var owner string
-	err := x.tx.QueryRowContext(ctx, "SELECT user_id FROM conversations WHERE id = $1", id).Scan(&owner)
+	err := x.tx.QueryRowContext(ctx, "SELECT user_id FROM lingo_conversations WHERE id = $1", id).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ticket.ErrNotFound
 	}
@@ -270,7 +270,7 @@ func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) (int64, err
 	}
 	var id int64
 	if err := x.tx.QueryRowContext(ctx, `
-		INSERT INTO ticket_comments (ticket_id, author_id, author_name, source, body, public, created_at, updated_at)
+		INSERT INTO lingo_ticket_comments (ticket_id, author_id, author_name, source, body, public, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`, c.TicketID, c.AuthorID, c.AuthorName, c.Source, c.Body, c.Public, at).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: add comment %d: %w", c.TicketID, err)
 	}
@@ -278,7 +278,7 @@ func (x *ticketTx) AddComment(ctx context.Context, c ticket.Comment) (int64, err
 }
 
 func (x *ticketTx) AddTriage(ctx context.Context, a ticket.Triage) error {
-	if _, err := x.tx.ExecContext(ctx, `INSERT INTO triage_actions (ticket_id, actor_id, action, note, target_ticket_id)
+	if _, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_triage_actions (ticket_id, actor_id, action, note, target_ticket_id)
 		VALUES ($1, $2, $3, $4, $5)`, a.TicketID, a.ActorID, a.Action, a.Note, nullInt64(a.TargetID)); err != nil {
 		return fmt.Errorf("store: add triage %d: %w", a.TicketID, err)
 	}
@@ -294,7 +294,7 @@ func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {
 	if err != nil {
 		return err
 	}
-	if _, err := x.tx.ExecContext(ctx, `INSERT INTO outbox (kind, key, ticket_id, payload) VALUES ('gitea', $1, $2, $3)
+	if _, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_outbox (kind, key, ticket_id, payload) VALUES ('gitea', $1, $2, $3)
 		ON CONFLICT (key) DO NOTHING`, t.Key, nullInt64(t.TicketID), payload); err != nil {
 		return fmt.Errorf("store: enqueue %s: %w", t.Key, err)
 	}
@@ -303,7 +303,7 @@ func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {
 
 // RepointMerged 把合并到 from 的工单改为合并到 to（合并链只保留一层，跟随最终目标）。
 func (x *ticketTx) RepointMerged(ctx context.Context, from, to int64) error {
-	if _, err := x.tx.ExecContext(ctx, "UPDATE tickets SET merged_into_ticket_id = $2 WHERE merged_into_ticket_id = $1", from, to); err != nil {
+	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_tickets SET merged_into_ticket_id = $2 WHERE merged_into_ticket_id = $1", from, to); err != nil {
 		return fmt.Errorf("store: repoint merged %d: %w", from, err)
 	}
 	return nil
@@ -312,7 +312,7 @@ func (x *ticketTx) RepointMerged(ctx context.Context, from, to int64) error {
 // PendingTask 报告工单是否有未完成的 op 任务。
 func (x *ticketTx) PendingTask(ctx context.Context, ticketID int64, op string) (bool, error) {
 	var ok bool
-	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM outbox WHERE kind = 'gitea' AND status = 'pending'
+	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM lingo_outbox WHERE kind = 'gitea' AND status = 'pending'
 		AND ticket_id = $1 AND payload->>'op' = $2)`, ticketID, op).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("store: pending task: %w", err)
@@ -322,7 +322,7 @@ func (x *ticketTx) PendingTask(ctx context.Context, ticketID int64, op string) (
 
 func (x *ticketTx) SeenPull(ctx context.Context, ticketID int64, kind, pull string) (bool, error) {
 	var ok bool
-	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM ticket_events WHERE ticket_id = $1 AND kind = $2
+	err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM lingo_ticket_events WHERE ticket_id = $1 AND kind = $2
 		AND lower(payload->>'pull') = lower($3))`, ticketID, kind, pull).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("store: seen pull: %w", err)
@@ -335,7 +335,7 @@ func (x *ticketTx) AddHistory(ctx context.Context, h ticket.History) error {
 	if err != nil {
 		return err
 	}
-	if _, err := x.tx.ExecContext(ctx, "INSERT INTO ticket_events (ticket_id, actor_id, source, kind, payload) VALUES ($1, $2, $3, $4, $5)",
+	if _, err := x.tx.ExecContext(ctx, "INSERT INTO lingo_ticket_events (ticket_id, actor_id, source, kind, payload) VALUES ($1, $2, $3, $4, $5)",
 		h.TicketID, h.ActorID, h.Source, h.Kind, payload); err != nil {
 		return fmt.Errorf("store: add ticket event %d: %w", h.TicketID, err)
 	}
@@ -350,12 +350,12 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 	// 先读旧值再写；调用方已在事务内锁定工单，同一评论不会被并发写入
 	var prev ticket.Comment
 	var deleted sql.NullTime
-	err := x.tx.QueryRowContext(ctx, "SELECT ticket_id, gitea_comment_id, author_name, body, public, updated_at, deleted_at FROM ticket_comments WHERE gitea_comment_id = $1",
+	err := x.tx.QueryRowContext(ctx, "SELECT ticket_id, gitea_comment_id, author_name, body, public, updated_at, deleted_at FROM lingo_ticket_comments WHERE gitea_comment_id = $1",
 		c.GiteaID).Scan(&prev.TicketID, &prev.GiteaID, &prev.AuthorName, &prev.Body, &prev.Public, &prev.At, &deleted)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = x.tx.ExecContext(ctx, `
-			INSERT INTO ticket_comments (ticket_id, author_name, source, body, public, gitea_comment_id, created_at, updated_at)
+			INSERT INTO lingo_ticket_comments (ticket_id, author_name, source, body, public, gitea_comment_id, created_at, updated_at)
 			VALUES ($1, $2, 'gitea', $3, $4, $5, $6, $6)`,
 			c.TicketID, c.AuthorName, c.Body, c.Public, c.GiteaID, at)
 		if err != nil {
@@ -371,7 +371,7 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 		p.Public = p.Public || c.Public
 		return &p, nil
 	}
-	if _, err := x.tx.ExecContext(ctx, "UPDATE ticket_comments SET body = $2, public = $3, author_name = $4, updated_at = $5 WHERE gitea_comment_id = $1",
+	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_ticket_comments SET body = $2, public = $3, author_name = $4, updated_at = $5 WHERE gitea_comment_id = $1",
 		c.GiteaID, c.Body, c.Public, c.AuthorName, at); err != nil {
 		return nil, fmt.Errorf("store: update comment %d: %w", c.GiteaID, err)
 	}
@@ -382,7 +382,7 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 		}
 	case prev.Public && c.Public && prev.Body != c.Body:
 		// 对外评论被编辑（如删掉误贴的密钥）：变更流随之返回新正文
-		if _, err := x.tx.ExecContext(ctx, `UPDATE events SET payload = jsonb_set(payload, '{body}', to_jsonb($2::text))
+		if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_events SET payload = jsonb_set(payload, '{body}', to_jsonb($2::text))
 			WHERE kind = 'ticket.comment' AND payload->>'comment_id' = $1`, strconv.FormatInt(c.GiteaID, 10), c.Body); err != nil {
 			return nil, fmt.Errorf("store: update comment events %d: %w", c.GiteaID, err)
 		}
@@ -394,7 +394,7 @@ func (x *ticketTx) DeleteGiteaComment(ctx context.Context, giteaID int64, at tim
 	if at.IsZero() {
 		at = time.Now()
 	}
-	if _, err := x.tx.ExecContext(ctx, "UPDATE ticket_comments SET deleted_at = $2 WHERE gitea_comment_id = $1 AND deleted_at IS NULL",
+	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_ticket_comments SET deleted_at = $2 WHERE gitea_comment_id = $1 AND deleted_at IS NULL",
 		giteaID, at); err != nil {
 		return fmt.Errorf("store: delete comment %d: %w", giteaID, err)
 	}
@@ -404,14 +404,14 @@ func (x *ticketTx) DeleteGiteaComment(ctx context.Context, giteaID int64, at tim
 // redactCommentEvents 清除该评论对应事件的正文：评论被删除或改为内部后，变更流不再返回原文
 // （已推送给 Notifier 的无法撤回）。
 func (x *ticketTx) redactCommentEvents(ctx context.Context, giteaID int64) error {
-	if _, err := x.tx.ExecContext(ctx, `UPDATE events SET payload = payload - 'body'
+	if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_events SET payload = payload - 'body'
 		WHERE kind = 'ticket.comment' AND payload->>'comment_id' = $1`, strconv.FormatInt(giteaID, 10)); err != nil {
 		return fmt.Errorf("store: redact comment events %d: %w", giteaID, err)
 	}
 	return nil
 }
 
-// eventPayload 是 events.payload 中不单独成列的字段。
+// eventPayload 是 lingo_events.payload 中不单独成列的字段。
 type eventPayload struct {
 	TicketType string `json:"ticket_type,omitempty"`
 	Title      string `json:"title,omitempty"`
@@ -436,7 +436,7 @@ func (x *ticketTx) Emit(ctx context.Context, e notify.Event) error {
 	}
 	// 被合并到该工单的其他工单：其提交人一并收到目标工单的进展（PRD 3.2.1.2），事件挂在各自的工单上，
 	// 按提交人隔离；正文注明来自合并到的工单
-	rows, err := x.tx.QueryContext(ctx, "SELECT id, user_id FROM tickets WHERE merged_into_ticket_id = $1 AND status = 'merged' ORDER BY id", e.TicketID)
+	rows, err := x.tx.QueryContext(ctx, "SELECT id, user_id FROM lingo_tickets WHERE merged_into_ticket_id = $1 AND status = 'merged' ORDER BY id", e.TicketID)
 	if err != nil {
 		return fmt.Errorf("store: merged tickets: %w", err)
 	}
@@ -485,7 +485,7 @@ func (x *ticketTx) emit(ctx context.Context, e notify.Event) error {
 	}
 	var id int64
 	if err := x.tx.QueryRowContext(ctx, `
-		INSERT INTO events (kind, project_id, ticket_id, user_id, actor_id, status, prev_status, action, payload)
+		INSERT INTO lingo_events (kind, project_id, ticket_id, user_id, actor_id, status, prev_status, action, payload)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
 		string(e.Kind), nullInt64(e.ProjectID), nullInt64(e.TicketID), e.UserID, e.ActorID, e.Status, e.PrevStatus, e.Action, payload,
 	).Scan(&id); err != nil {
@@ -494,7 +494,7 @@ func (x *ticketTx) emit(ctx context.Context, e notify.Event) error {
 	if !x.notify {
 		return nil
 	}
-	if _, err := x.tx.ExecContext(ctx, "INSERT INTO outbox (kind, key, event_id) VALUES ('notify', $1, $2)",
+	if _, err := x.tx.ExecContext(ctx, "INSERT INTO lingo_outbox (kind, key, event_id) VALUES ('notify', $1, $2)",
 		fmt.Sprintf("notify:event:%d", id), id); err != nil {
 		return fmt.Errorf("store: enqueue notify %d: %w", id, err)
 	}

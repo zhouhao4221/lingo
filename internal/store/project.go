@@ -26,7 +26,7 @@ func (s *Store) SyncProjects(ctx context.Context, specs []project.Spec) error {
 	for _, p := range specs {
 		var pid int64
 		if err := tx.QueryRowContext(ctx, `
-			INSERT INTO projects (key, name, description) VALUES ($1, $2, $3)
+			INSERT INTO lingo_projects (key, name, description) VALUES ($1, $2, $3)
 			ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, enabled = true, updated_at = now()
 			RETURNING id`, p.Key, p.Name, p.Description).Scan(&pid); err != nil {
 			return fmt.Errorf("store: sync project %s: %w", p.Key, err)
@@ -39,7 +39,7 @@ func (s *Store) SyncProjects(ctx context.Context, specs []project.Spec) error {
 			}
 			var rid int64
 			if err := tx.QueryRowContext(ctx, `
-				INSERT INTO repos (project_id, owner, name, kind) VALUES ($1, $2, $3, $4)
+				INSERT INTO lingo_repos (project_id, owner, name, kind) VALUES ($1, $2, $3, $4)
 				ON CONFLICT (lower(owner), lower(name)) DO UPDATE SET project_id = EXCLUDED.project_id, owner = EXCLUDED.owner,
 				    name = EXCLUDED.name, kind = EXCLUDED.kind, enabled = true, updated_at = now()
 				RETURNING id`, pid, r.Owner, r.Name, kind).Scan(&rid); err != nil {
@@ -49,7 +49,7 @@ func (s *Store) SyncProjects(ctx context.Context, specs []project.Spec) error {
 				defaultID = rid
 			}
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE projects SET default_repo_id = $2 WHERE id = $1", pid, nullInt64(defaultID)); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE lingo_projects SET default_repo_id = $2 WHERE id = $1", pid, nullInt64(defaultID)); err != nil {
 			return fmt.Errorf("store: sync default repo %s: %w", p.Key, err)
 		}
 	}

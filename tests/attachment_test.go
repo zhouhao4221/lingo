@@ -155,7 +155,7 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 		t.Errorf("comment assets = %v", g.assets)
 	}
 	var forwarded int
-	if err := db.QueryRow("SELECT count(*) FROM attachments WHERE forwarded").Scan(&forwarded); err != nil || forwarded != 3 {
+	if err := db.QueryRow("SELECT count(*) FROM lingo_attachments WHERE forwarded").Scan(&forwarded); err != nil || forwarded != 3 {
 		t.Errorf("forwarded = %d %v", forwarded, err)
 	}
 }

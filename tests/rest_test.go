@@ -203,10 +203,10 @@ func TestEventsHideUncommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("INSERT INTO events (kind, ticket_id) VALUES ('ticket.status', $1)", id); err != nil {
+	if _, err := tx.Exec("INSERT INTO lingo_events (kind, ticket_id) VALUES ('ticket.status', $1)", id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO events (kind, ticket_id) VALUES ('ticket.comment', $1)", id); err != nil {
+	if _, err := db.Exec("INSERT INTO lingo_events (kind, ticket_id) VALUES ('ticket.comment', $1)", id); err != nil {
 		t.Fatal(err)
 	}
 	es, err := svc.ListEvents(ctx, admin, 0, 0)
@@ -260,7 +260,7 @@ func TestCommentEventRedactedWhenDeleted(t *testing.T) {
 func TestRemindOverdueStore(t *testing.T) {
 	db := testDB(t, true)
 	id := seedTicket(t, db, "pending_triage")
-	if _, err := db.Exec("UPDATE tickets SET triage_since = now() - interval '25 hours' WHERE id = $1", id); err != nil {
+	if _, err := db.Exec("UPDATE lingo_tickets SET triage_since = now() - interval '25 hours' WHERE id = $1", id); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := store.New(db, store.WithNotify())
@@ -273,7 +273,7 @@ func TestRemindOverdueStore(t *testing.T) {
 		}
 	}
 	var events, outbox int
-	if err := db.QueryRow("SELECT (SELECT count(*) FROM events WHERE kind = 'triage.overdue'), (SELECT count(*) FROM outbox WHERE kind = 'notify')").Scan(&events, &outbox); err != nil || events != 1 || outbox != 1 {
+	if err := db.QueryRow("SELECT (SELECT count(*) FROM lingo_events WHERE kind = 'triage.overdue'), (SELECT count(*) FROM lingo_outbox WHERE kind = 'notify')").Scan(&events, &outbox); err != nil || events != 1 || outbox != 1 {
 		t.Errorf("events %d outbox %d %v", events, outbox, err)
 	}
 }

@@ -239,7 +239,7 @@ func TestReleaseDoesNotCountFailure(t *testing.T) {
 func TestPendingMergesScopedToProject(t *testing.T) {
 	db := testDB(t, true)
 	seedTicket(t, db, "open") // 项目 demo 含 demo/api
-	if _, err := db.Exec(`INSERT INTO repos (project_id, owner, name) SELECT id, 'demo', 'web' FROM projects WHERE key = 'demo'`); err != nil {
+	if _, err := db.Exec(`INSERT INTO lingo_repos (project_id, owner, name) SELECT id, 'demo', 'web' FROM lingo_projects WHERE key = 'demo'`); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := store.New(db)
@@ -275,7 +275,7 @@ func TestClaimZeroLeaseUsesDefault(t *testing.T) {
 // expireLeases 让所有租约立即过期，模拟 worker 卡住超过租约时长。
 func expireLeases(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.Exec("UPDATE webhook_deliveries SET locked_until = now() - interval '1 second' WHERE locked_until IS NOT NULL"); err != nil {
+	if _, err := db.Exec("UPDATE lingo_webhook_deliveries SET locked_until = now() - interval '1 second' WHERE locked_until IS NOT NULL"); err != nil {
 		t.Fatal(err)
 	}
 }

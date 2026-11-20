@@ -15,7 +15,7 @@ var _ ticket.AttachmentStore = (*Store)(nil)
 // SaveAttachment 实现 ticket.AttachmentStore。
 func (s *Store) SaveAttachment(ctx context.Context, a *ticket.Attachment) error {
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO attachments (user_id, filename, content_type, size, sha256, data) VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO lingo_attachments (user_id, filename, content_type, size, sha256, data) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at`, a.UserID, a.Filename, a.ContentType, a.Size, a.SHA256, a.Data).Scan(&a.ID, &a.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("store: save attachment: %w", err)
@@ -48,13 +48,13 @@ func (s *Store) GetAttachment(ctx context.Context, id int64, withData bool) (*ti
 	if withData {
 		cols += ", data"
 	}
-	return scanAttachment(s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM attachments WHERE id = $1", id), withData)
+	return scanAttachment(s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM lingo_attachments WHERE id = $1", id), withData)
 }
 
 // CommentPublic 实现 ticket.AttachmentStore。
 func (s *Store) CommentPublic(ctx context.Context, commentID int64) (bool, error) {
 	var pub bool
-	err := s.db.QueryRowContext(ctx, "SELECT public AND deleted_at IS NULL FROM ticket_comments WHERE id = $1", commentID).Scan(&pub)
+	err := s.db.QueryRowContext(ctx, "SELECT public AND deleted_at IS NULL FROM lingo_ticket_comments WHERE id = $1", commentID).Scan(&pub)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -66,7 +66,7 @@ func (s *Store) CommentPublic(ctx context.Context, commentID int64) (bool, error
 
 // DeleteOrphanAttachments 实现 ticket.AttachmentStore。
 func (s *Store) DeleteOrphanAttachments(ctx context.Context, before time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < $1", before)
+	res, err := s.db.ExecContext(ctx, "DELETE FROM lingo_attachments WHERE ticket_id IS NULL AND created_at < $1", before)
 	if err != nil {
 		return 0, fmt.Errorf("store: delete orphan attachments: %w", err)
 	}
@@ -76,8 +76,8 @@ func (s *Store) DeleteOrphanAttachments(ctx context.Context, before time.Time) (
 
 // TicketAttachments 实现 ticket.QueryStore。
 func (s *Store) TicketAttachments(ctx context.Context, ticketID int64, publicOnly, forwardedOnly bool) ([]*ticket.Attachment, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM attachments a
-		LEFT JOIN ticket_comments c ON c.id = a.comment_id
+	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM lingo_attachments a
+		LEFT JOIN lingo_ticket_comments c ON c.id = a.comment_id
 		WHERE a.ticket_id = $1 AND (NOT $2 OR a.comment_id IS NULL OR (c.public AND c.deleted_at IS NULL))
 		  AND (NOT $3 OR a.forwarded)
 		ORDER BY a.id`, ticketID, publicOnly, forwardedOnly)
@@ -109,8 +109,8 @@ func (s *Store) ForwardableAttachments(ctx context.Context, ticketID, commentID 
 	if ids != nil {
 		all, filter = false, textArrayInt(*ids)
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM attachments a
-		LEFT JOIN ticket_comments c ON c.id = a.comment_id
+	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM lingo_attachments a
+		LEFT JOIN lingo_ticket_comments c ON c.id = a.comment_id
 		WHERE a.ticket_id = $1 AND NOT a.forwarded AND a.forward_error = ''
 		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
 		  AND ($3 OR a.comment_id IS NOT NULL OR a.id = ANY(($4::text)::bigint[]))
@@ -140,8 +140,8 @@ type AttachmentLink struct {
 // AttachmentLinks 返回已处理的附件（范围同 ForwardableAttachments，不按勾选过滤），按 ID 顺序；
 // 正文中的附件段落每次都按它整体重写，重试与部分失败后引用也不会丢。
 func (s *Store) AttachmentLinks(ctx context.Context, ticketID, commentID int64) ([]AttachmentLink, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.filename, a.content_type, a.gitea_url FROM attachments a
-		LEFT JOIN ticket_comments c ON c.id = a.comment_id
+	rows, err := s.db.QueryContext(ctx, `SELECT a.filename, a.content_type, a.gitea_url FROM lingo_attachments a
+		LEFT JOIN lingo_ticket_comments c ON c.id = a.comment_id
 		WHERE a.ticket_id = $1 AND (a.forwarded OR a.forward_error <> '')
 		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
 		ORDER BY a.id`, ticketID, commentID)
@@ -162,7 +162,7 @@ func (s *Store) AttachmentLinks(ctx context.Context, ticketID, commentID int64) 
 
 // MarkAttachmentForwarded 记录附件已上传到 Gitea（uuid、下载地址），或被 Gitea 拒绝的原因（reason 非空，不再重试）。
 func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url, reason string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE attachments SET forwarded = ($4 = ''), gitea_attachment_uuid = $2, gitea_url = $3,
+	_, err := s.db.ExecContext(ctx, `UPDATE lingo_attachments SET forwarded = ($4 = ''), gitea_attachment_uuid = $2, gitea_url = $3,
 		forward_error = $4 WHERE id = $1`, id, uuid, url, reason)
 	if err != nil {
 		return fmt.Errorf("store: mark attachment %d: %w", id, err)
@@ -173,7 +173,7 @@ func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url
 // PendingComments 返回工单中尚未同步到 Gitea 的对外补充评论（用户与后台），按时间顺序。
 func (s *Store) PendingComments(ctx context.Context, ticketID int64) ([]ticket.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, ticket_id, source, author_id, author_name, body, public, created_at FROM ticket_comments
+		SELECT id, ticket_id, source, author_id, author_name, body, public, created_at FROM lingo_ticket_comments
 		WHERE ticket_id = $1 AND source IN ('user', 'staff', 'agent') AND public AND gitea_posted_id IS NULL AND forwarded_at IS NULL
 		  AND deleted_at IS NULL
 		ORDER BY created_at, id`, ticketID)
@@ -197,7 +197,7 @@ func (s *Store) Comment(ctx context.Context, id int64) (*ticket.Comment, error) 
 	var c ticket.Comment
 	var fwd sql.NullTime
 	err := s.db.QueryRowContext(ctx, `SELECT id, ticket_id, COALESCE(gitea_posted_id, 0), source, author_id, author_name, body, public,
-		created_at, forwarded_at FROM ticket_comments WHERE id = $1 AND deleted_at IS NULL`, id).Scan(
+		created_at, forwarded_at FROM lingo_ticket_comments WHERE id = $1 AND deleted_at IS NULL`, id).Scan(
 		&c.ID, &c.TicketID, &c.PostedID, &c.Source, &c.AuthorID, &c.AuthorName, &c.Body, &c.Public, &c.At, &fwd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
@@ -211,7 +211,7 @@ func (s *Store) Comment(ctx context.Context, id int64) (*ticket.Comment, error) 
 
 // CommentPosted 记录评论已由机器人发到 Gitea。
 func (s *Store) CommentPosted(ctx context.Context, id, giteaID int64) error {
-	if _, err := s.db.ExecContext(ctx, "UPDATE ticket_comments SET gitea_posted_id = $2 WHERE id = $1", id, giteaID); err != nil {
+	if _, err := s.db.ExecContext(ctx, "UPDATE lingo_ticket_comments SET gitea_posted_id = $2 WHERE id = $1", id, giteaID); err != nil {
 		return fmt.Errorf("store: comment posted %d: %w", id, err)
 	}
 	return nil
@@ -221,7 +221,7 @@ func (x *ticketTx) MarkCommentsForwarded(ctx context.Context, ticketID int64, id
 	if len(ids) == 0 {
 		return nil
 	}
-	if _, err := x.tx.ExecContext(ctx, `UPDATE ticket_comments SET forwarded_at = now()
+	if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_ticket_comments SET forwarded_at = now()
 		WHERE ticket_id = $1 AND id = ANY(($2::text)::bigint[])`, ticketID, textArrayInt(ids)); err != nil {
 		return fmt.Errorf("store: mark comments forwarded: %w", err)
 	}
@@ -230,14 +230,14 @@ func (x *ticketTx) MarkCommentsForwarded(ctx context.Context, ticketID int64, id
 
 func (x *ticketTx) CountAttachments(ctx context.Context, ticketID int64) (int, error) {
 	var n int
-	if err := x.tx.QueryRowContext(ctx, "SELECT count(*) FROM attachments WHERE ticket_id = $1", ticketID).Scan(&n); err != nil {
+	if err := x.tx.QueryRowContext(ctx, "SELECT count(*) FROM lingo_attachments WHERE ticket_id = $1", ticketID).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count attachments: %w", err)
 	}
 	return n, nil
 }
 
 func (x *ticketTx) LinkAttachments(ctx context.Context, ids []int64, userID string, ticketID, commentID int64) (int, error) {
-	res, err := x.tx.ExecContext(ctx, `UPDATE attachments SET ticket_id = $3, comment_id = $4
+	res, err := x.tx.ExecContext(ctx, `UPDATE lingo_attachments SET ticket_id = $3, comment_id = $4
 		WHERE id = ANY(($1::text)::bigint[]) AND user_id = $2 AND ticket_id IS NULL`,
 		textArrayInt(ids), userID, ticketID, nullInt64(commentID))
 	if err != nil {

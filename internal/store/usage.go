@@ -20,7 +20,7 @@ type LLMUsage struct {
 
 // RecordLLMUsage 写入一次模型调用的用量。
 func (s *Store) RecordLLMUsage(ctx context.Context, u LLMUsage) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO llm_usage (kind, model, ticket_id, input, output, cached, ok, latency_ms)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO lingo_llm_usage (kind, model, ticket_id, input, output, cached, ok, latency_ms)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, u.Kind, u.Model, nullInt64(u.TicketID), u.Input, u.Output, u.Cached, u.OK,
 		u.Latency.Milliseconds())
 	if err != nil {
@@ -47,7 +47,7 @@ func (s *Store) LLMUsageSummary(ctx context.Context, from, to time.Time) ([]LLMU
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT date_trunc('day', created_at AT TIME ZONE 'UTC'), kind, model, count(*), count(*) FILTER (WHERE NOT ok),
 		       coalesce(sum(input), 0), coalesce(sum(output), 0), coalesce(sum(cached), 0), coalesce(avg(latency_ms), 0)::bigint
-		FROM llm_usage WHERE created_at >= $1 AND created_at < $2
+		FROM lingo_llm_usage WHERE created_at >= $1 AND created_at < $2
 		GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("store: llm usage summary: %w", err)

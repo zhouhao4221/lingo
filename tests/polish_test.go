@@ -18,7 +18,7 @@ func TestNeedInfoLabelRemovedAfterSupplement(t *testing.T) {
 	}
 	runLingo(t, l)
 	waitTicket(t, l, alice, tk.ID, "open")
-	if _, err := db.Exec("UPDATE tickets SET status = 'need_info' WHERE id = $1", tk.ID); err != nil {
+	if _, err := db.Exec("UPDATE lingo_tickets SET status = 'need_info' WHERE id = $1", tk.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.AddTicketComment(ctx, alice, tk.ID, "复现步骤：点击导出", nil); err != nil {

@@ -197,7 +197,7 @@ func TestCreateTicketAutoForwardCreatesIssue(t *testing.T) {
 		t.Errorf("events = %+v", evs)
 	}
 	var tasks int
-	if err := db.QueryRow("SELECT count(*) FROM outbox WHERE kind = 'gitea' AND status = 'done'").Scan(&tasks); err != nil || tasks != 1 {
+	if err := db.QueryRow("SELECT count(*) FROM lingo_outbox WHERE kind = 'gitea' AND status = 'done'").Scan(&tasks); err != nil || tasks != 1 {
 		t.Errorf("done tasks = %d %v", tasks, err)
 	}
 	// 数据隔离：他人看不到
@@ -214,7 +214,7 @@ func TestCreateIssueDedupByMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 模拟上次已建好 Issue 但没保存：任务此前被领取过，Gitea 中已有带标记的机器人 Issue
-	if _, err := db.Exec("UPDATE outbox SET attempts = 1 WHERE kind = 'gitea'"); err != nil {
+	if _, err := db.Exec("UPDATE lingo_outbox SET attempts = 1 WHERE kind = 'gitea'"); err != nil {
 		t.Fatal(err)
 	}
 	g.issues = []map[string]any{{"id": 7, "number": 77, "state": "open", "user": map[string]any{"login": "lingo-bot"},
@@ -237,7 +237,7 @@ func TestCreateIssuePermanentFailureMarksAbnormal(t *testing.T) {
 	runLingo(t, l)
 	waitTicket(t, l, alice, tk.ID, "abnormal")
 	var status string
-	if err := db.QueryRow("SELECT status FROM outbox WHERE kind = 'gitea'").Scan(&status); err != nil || status != "failed" {
+	if err := db.QueryRow("SELECT status FROM lingo_outbox WHERE kind = 'gitea'").Scan(&status); err != nil || status != "failed" {
 		t.Errorf("task status = %s %v", status, err)
 	}
 	if evs := rec.waitFor(t, 2); evs[1].Status != "abnormal" || evs[1].PrevStatus != "submitted" {
@@ -313,8 +313,8 @@ func TestSetAutoForwardAndProjectSync(t *testing.T) {
 		t.Errorf("after reset: %+v", tk)
 	}
 	var repos, def int
-	if err := db.QueryRow(`SELECT (SELECT count(*) FROM repos WHERE enabled),
-		(SELECT count(*) FROM projects p JOIN repos r ON r.id = p.default_repo_id WHERE p.key = 'demo' AND r.name = 'api')`).Scan(&repos, &def); err != nil {
+	if err := db.QueryRow(`SELECT (SELECT count(*) FROM lingo_repos WHERE enabled),
+		(SELECT count(*) FROM lingo_projects p JOIN lingo_repos r ON r.id = p.default_repo_id WHERE p.key = 'demo' AND r.name = 'api')`).Scan(&repos, &def); err != nil {
 		t.Fatal(err)
 	}
 	if repos != 2 || def != 1 {

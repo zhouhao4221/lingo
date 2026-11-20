@@ -20,9 +20,9 @@ func seedTicket(t *testing.T, db *sql.DB, status string) int64 {
 	t.Helper()
 	var id int64
 	err := db.QueryRow(`
-		WITH p AS (INSERT INTO projects (key, name) VALUES ('demo', 'Demo') RETURNING id),
-		     r AS (INSERT INTO repos (project_id, owner, name, kind) SELECT id, 'demo', 'api', 'backend' FROM p RETURNING id, project_id)
-		INSERT INTO tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number)
+		WITH p AS (INSERT INTO lingo_projects (key, name) VALUES ('demo', 'Demo') RETURNING id),
+		     r AS (INSERT INTO lingo_repos (project_id, owner, name, kind) SELECT id, 'demo', 'api', 'backend' FROM p RETURNING id, project_id)
+		INSERT INTO lingo_tickets (user_id, project_id, repo_id, type, title, status, gitea_issue_number)
 		SELECT 'u1', project_id, id, 'bug', '登录失败', $1, 12 FROM r RETURNING id`, status).Scan(&id)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestWorkerSyncsTicketFromWebhooks(t *testing.T) {
 
 	var status, commit string
 	var pr int64
-	if err := db.QueryRow("SELECT status, fixed_pr, fixed_commit FROM tickets WHERE id = $1", id).Scan(&status, &pr, &commit); err != nil {
+	if err := db.QueryRow("SELECT status, fixed_pr, fixed_commit FROM lingo_tickets WHERE id = $1", id).Scan(&status, &pr, &commit); err != nil {
 		t.Fatal(err)
 	}
 	if status != "fixed" || pr != 3 || commit != "abc123" {
@@ -171,17 +171,17 @@ func TestWorkerSyncsTicketFromWebhooks(t *testing.T) {
 		}
 		return n
 	}
-	if n := count("SELECT count(*) FROM ticket_comments WHERE source = 'gitea'"); n != 2 {
+	if n := count("SELECT count(*) FROM lingo_ticket_comments WHERE source = 'gitea'"); n != 2 {
 		t.Errorf("gitea comments = %d, want 2 (bot comment skipped)", n)
 	}
-	if n := count("SELECT count(*) FROM ticket_comments WHERE public"); n != 1 {
+	if n := count("SELECT count(*) FROM lingo_ticket_comments WHERE public"); n != 1 {
 		t.Errorf("public comments = %d", n)
 	}
 	// 审计：assigned、2 条评论、merged、closed
-	if n := count("SELECT count(*) FROM ticket_events WHERE source = 'gitea'"); n != 5 {
+	if n := count("SELECT count(*) FROM lingo_ticket_events WHERE source = 'gitea'"); n != 5 {
 		t.Errorf("ticket_events = %d", n)
 	}
-	if n := count("SELECT count(*) FROM outbox WHERE kind = 'notify' AND status = 'done'"); n != 3 {
+	if n := count("SELECT count(*) FROM lingo_outbox WHERE kind = 'notify' AND status = 'done'"); n != 3 {
 		t.Errorf("delivered outbox = %d", n)
 	}
 }
@@ -193,14 +193,14 @@ func waitProcessed(t *testing.T, db *sql.DB, n int) {
 	for {
 		var done int
 		var errs string
-		if err := db.QueryRow("SELECT count(*) FROM webhook_deliveries WHERE processed_at IS NOT NULL").Scan(&done); err != nil {
+		if err := db.QueryRow("SELECT count(*) FROM lingo_webhook_deliveries WHERE processed_at IS NOT NULL").Scan(&done); err != nil {
 			t.Fatal(err)
 		}
 		if done >= n {
 			return
 		}
 		if time.Now().After(deadline) {
-			_ = db.QueryRow("SELECT COALESCE(string_agg(delivery_id || ': ' || last_error, '; '), '') FROM webhook_deliveries WHERE processed_at IS NULL").Scan(&errs)
+			_ = db.QueryRow("SELECT COALESCE(string_agg(delivery_id || ': ' || last_error, '; '), '') FROM lingo_webhook_deliveries WHERE processed_at IS NULL").Scan(&errs)
 			t.Fatalf("processed %d/%d deliveries; pending: %s", done, n, strings.TrimSpace(errs))
 		}
 		time.Sleep(50 * time.Millisecond)

@@ -27,7 +27,7 @@ func (s *Store) SaveDelivery(ctx context.Context, r webhook.Record) (bool, error
 	}
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO webhook_deliveries
+		INSERT INTO lingo_webhook_deliveries
 		    (delivery_id, event, event_type, kind, dedup_key, repo, issue_number, from_bot, payload, parse_error, received_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT DO NOTHING
@@ -47,8 +47,8 @@ func (s *Store) SaveDelivery(ctx context.Context, r webhook.Record) (bool, error
 // RecordPing 实现 webhook.Store：记录仓库最近一次连通时间，只会向后更新。
 func (s *Store) RecordPing(ctx context.Context, repo string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO webhook_pings (repo, last_ping_at) VALUES ($1, $2)
-		ON CONFLICT (repo) DO UPDATE SET last_ping_at = GREATEST(webhook_pings.last_ping_at, EXCLUDED.last_ping_at)`,
+		INSERT INTO lingo_webhook_pings (repo, last_ping_at) VALUES ($1, $2)
+		ON CONFLICT (repo) DO UPDATE SET last_ping_at = GREATEST(lingo_webhook_pings.last_ping_at, EXCLUDED.last_ping_at)`,
 		strings.ToLower(repo), at)
 	if err != nil {
 		return fmt.Errorf("store: record ping %s: %w", repo, err)
@@ -58,7 +58,7 @@ func (s *Store) RecordPing(ctx context.Context, repo string, at time.Time) error
 
 // LastPing 返回仓库最近一次连通时间；从未收到过时 ok 为 false。
 func (s *Store) LastPing(ctx context.Context, repo string) (at time.Time, ok bool, err error) {
-	err = s.db.QueryRowContext(ctx, "SELECT last_ping_at FROM webhook_pings WHERE repo = $1", strings.ToLower(repo)).Scan(&at)
+	err = s.db.QueryRowContext(ctx, "SELECT last_ping_at FROM lingo_webhook_pings WHERE repo = $1", strings.ToLower(repo)).Scan(&at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}
@@ -96,15 +96,15 @@ func (s *Store) ClaimDeliveries(ctx context.Context, limit int, lease time.Durat
 		lease = DefaultLease
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		UPDATE webhook_deliveries d
+		UPDATE lingo_webhook_deliveries d
 		SET locked_until = now() + make_interval(secs => $2), attempts = d.attempts + 1
 		WHERE d.id IN (
-		    SELECT c.id FROM webhook_deliveries c
+		    SELECT c.id FROM lingo_webhook_deliveries c
 		    WHERE c.processed_at IS NULL
 		      AND c.next_attempt_at <= now()
 		      AND (c.locked_until IS NULL OR c.locked_until < now())
 		      AND NOT EXISTS (
-		          SELECT 1 FROM webhook_deliveries p
+		          SELECT 1 FROM lingo_webhook_deliveries p
 		          WHERE p.processed_at IS NULL AND p.repo = c.repo AND p.issue_number = c.issue_number AND p.id < c.id)
 		    ORDER BY c.id
 		    LIMIT $1
@@ -140,18 +140,18 @@ const leaseHeld = ` WHERE id = $1 AND attempts = $2 AND processed_at IS NULL`
 
 // CompleteDelivery 标记投递处理完成。
 func (s *Store) CompleteDelivery(ctx context.Context, d Delivery) error {
-	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = ''`+leaseHeld)
+	return s.finishDelivery(ctx, d, `UPDATE lingo_webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = ''`+leaseHeld)
 }
 
 // RetryDelivery 记一次失败并保存原因，在 retryAt 之后允许重新领取。
 func (s *Store) RetryDelivery(ctx context.Context, d Delivery, reason string, retryAt time.Time) error {
-	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4`+leaseHeld,
+	return s.finishDelivery(ctx, d, `UPDATE lingo_webhook_deliveries SET locked_until = NULL, failures = failures + 1, last_error = $3, next_attempt_at = $4`+leaseHeld,
 		reason, retryAt)
 }
 
 // ReleaseDelivery 释放租约，在 retryAt 之后允许重新领取，不计失败：用于推迟处理与退出时归还未开始的条目。
 func (s *Store) ReleaseDelivery(ctx context.Context, d Delivery, reason string, retryAt time.Time) error {
-	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET locked_until = NULL, last_error = $3, next_attempt_at = $4`+leaseHeld,
+	return s.finishDelivery(ctx, d, `UPDATE lingo_webhook_deliveries SET locked_until = NULL, last_error = $3, next_attempt_at = $4`+leaseHeld,
 		reason, retryAt)
 }
 
@@ -162,10 +162,10 @@ func (s *Store) HasPendingMerges(ctx context.Context, repo string, before time.T
 	// kind 用字面量而非参数，使泛化执行计划也能命中部分索引 webhook_deliveries_merge_pending_idx
 	err := s.db.QueryRowContext(ctx, `
 		WITH project_repos AS (
-		    SELECT lower(r.owner || '/' || r.name) AS name FROM repos r
-		    WHERE r.project_id = (SELECT project_id FROM repos WHERE lower(owner || '/' || name) = lower($1))
+		    SELECT lower(r.owner || '/' || r.name) AS name FROM lingo_repos r
+		    WHERE r.project_id = (SELECT project_id FROM lingo_repos WHERE lower(owner || '/' || name) = lower($1))
 		    UNION SELECT lower($1))
-		SELECT EXISTS (SELECT 1 FROM webhook_deliveries
+		SELECT EXISTS (SELECT 1 FROM lingo_webhook_deliveries
 		    WHERE processed_at IS NULL AND kind = 'pull.merged' AND failures = 0 AND received_at <= $2
 		      AND repo IN (SELECT name FROM project_repos))`, repo, before).Scan(&ok)
 	if err != nil {
@@ -177,7 +177,7 @@ func (s *Store) HasPendingMerges(ctx context.Context, repo string, before time.T
 // AbandonDelivery 放弃投递：标记为已处理并保留失败原因，不再重试，也不再阻塞同一 Issue 的后续投递
 // （由对账补齐其影响）。
 func (s *Store) AbandonDelivery(ctx context.Context, d Delivery, reason string) error {
-	return s.finishDelivery(ctx, d, `UPDATE webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = $3`+leaseHeld,
+	return s.finishDelivery(ctx, d, `UPDATE lingo_webhook_deliveries SET processed_at = now(), locked_until = NULL, last_error = $3`+leaseHeld,
 		reason)
 }
 
