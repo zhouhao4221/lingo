@@ -102,17 +102,18 @@ const attachmentColumnsA = `a.id, a.user_id, COALESCE(a.ticket_id, 0), COALESCE(
 
 // ForwardableAttachments 返回待上传到 Gitea 的附件（含内容）：未上传过、未被 Gitea 拒绝。commentID 为 0 时取
 // 随 Issue 转出的附件：工单本身的附件，以及已写进 Issue 正文的补充评论的附件；否则取该评论的附件。
-// ids 非 nil 时只取其中的（后台人员勾选的）。
+// ids 非 nil 时工单本身的附件只取其中的（后台人员转出时勾选的）；补充评论的附件是之后由提交人加的，不受勾选限制。
+// 只返回元数据，内容由调用方逐个用 GetAttachment 读取，避免一次把全部附件读进内存。
 func (s *Store) ForwardableAttachments(ctx context.Context, ticketID, commentID int64, ids *[]int64) ([]*ticket.Attachment, error) {
 	all, filter := true, "{}"
 	if ids != nil {
 		all, filter = false, textArrayInt(*ids)
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+`, a.data FROM attachments a
+	rows, err := s.db.QueryContext(ctx, "SELECT "+attachmentColumnsA+` FROM attachments a
 		LEFT JOIN ticket_comments c ON c.id = a.comment_id
 		WHERE a.ticket_id = $1 AND NOT a.forwarded AND a.forward_error = ''
 		  AND (($2 = 0 AND (a.comment_id IS NULL OR c.forwarded_at IS NOT NULL)) OR ($2 <> 0 AND a.comment_id = $2))
-		  AND ($3 OR a.id = ANY(($4::text)::bigint[]))
+		  AND ($3 OR a.comment_id IS NOT NULL OR a.id = ANY(($4::text)::bigint[]))
 		ORDER BY a.id`, ticketID, commentID, all, filter)
 	if err != nil {
 		return nil, fmt.Errorf("store: forwardable attachments: %w", err)
@@ -120,7 +121,7 @@ func (s *Store) ForwardableAttachments(ctx context.Context, ticketID, commentID 
 	defer rows.Close()
 	var out []*ticket.Attachment
 	for rows.Next() {
-		a, err := scanAttachment(rows, true)
+		a, err := scanAttachment(rows, false)
 		if err != nil {
 			return nil, err
 		}
@@ -173,7 +174,7 @@ func (s *Store) MarkAttachmentForwarded(ctx context.Context, id int64, uuid, url
 func (s *Store) PendingComments(ctx context.Context, ticketID int64) ([]ticket.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, ticket_id, source, author_id, author_name, body, public, created_at FROM ticket_comments
-		WHERE ticket_id = $1 AND source IN ('user', 'staff') AND public AND gitea_comment_id IS NULL AND forwarded_at IS NULL
+		WHERE ticket_id = $1 AND source IN ('user', 'staff') AND public AND gitea_posted_id IS NULL AND forwarded_at IS NULL
 		  AND deleted_at IS NULL
 		ORDER BY created_at, id`, ticketID)
 	if err != nil {
@@ -195,9 +196,9 @@ func (s *Store) PendingComments(ctx context.Context, ticketID int64) ([]ticket.C
 func (s *Store) Comment(ctx context.Context, id int64) (*ticket.Comment, error) {
 	var c ticket.Comment
 	var fwd sql.NullTime
-	err := s.db.QueryRowContext(ctx, `SELECT id, ticket_id, COALESCE(gitea_comment_id, 0), source, author_id, author_name, body, public,
+	err := s.db.QueryRowContext(ctx, `SELECT id, ticket_id, COALESCE(gitea_posted_id, 0), source, author_id, author_name, body, public,
 		created_at, forwarded_at FROM ticket_comments WHERE id = $1 AND deleted_at IS NULL`, id).Scan(
-		&c.ID, &c.TicketID, &c.GiteaID, &c.Source, &c.AuthorID, &c.AuthorName, &c.Body, &c.Public, &c.At, &fwd)
+		&c.ID, &c.TicketID, &c.PostedID, &c.Source, &c.AuthorID, &c.AuthorName, &c.Body, &c.Public, &c.At, &fwd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
 	}
@@ -210,7 +211,7 @@ func (s *Store) Comment(ctx context.Context, id int64) (*ticket.Comment, error) 
 
 // CommentPosted 记录评论已由机器人发到 Gitea。
 func (s *Store) CommentPosted(ctx context.Context, id, giteaID int64) error {
-	if _, err := s.db.ExecContext(ctx, "UPDATE ticket_comments SET gitea_comment_id = $2 WHERE id = $1", id, giteaID); err != nil {
+	if _, err := s.db.ExecContext(ctx, "UPDATE ticket_comments SET gitea_posted_id = $2 WHERE id = $1", id, giteaID); err != nil {
 		return fmt.Errorf("store: comment posted %d: %w", id, err)
 	}
 	return nil

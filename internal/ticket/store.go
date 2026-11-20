@@ -84,7 +84,8 @@ type Comment struct {
 	Body       string
 	Public     bool
 	At         time.Time
-	Forwarded  bool // 已随 Issue 正文转出
+	Forwarded  bool  // 已随 Issue 正文转出
+	PostedID   int64 // 已由机器人发到 Gitea 的评论 ID
 }
 
 // Project 是已同步入库的项目。

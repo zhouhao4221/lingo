@@ -148,6 +148,7 @@ CREATE TABLE ticket_comments (
     body             text        NOT NULL,
     public           boolean     NOT NULL DEFAULT true, -- 对提交人可见
     gitea_comment_id bigint      UNIQUE,                -- 已同步到 / 来自 Gitea 的评论
+    gitea_posted_id  bigint      UNIQUE, -- 灵问补充由机器人发到 Gitea 后的评论 ID（与 gitea_comment_id 分开，研发编辑机器人评论不会改写原文）
     forwarded_at     timestamptz, -- 已随 Issue 正文转出（建单前的补充），不再单独发评论
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),

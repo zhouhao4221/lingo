@@ -178,6 +178,10 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 		Author: ev.Sender, Body: c.Body, Public: ev.Public, FromBot: ev.FromBot, DeliveryID: ev.DeliveryID, At: c.UpdatedAt}
 	if c.User != nil {
 		u.Author = c.User.Login
+		// 研发编辑或删除机器人发的评论（灵问转发的补充）：评论属于机器人，不当作研发回复
+		if bot := w.o.BotLogin(); bot != "" && strings.EqualFold(c.User.Login, bot) {
+			u.FromBot = true
+		}
 	}
 	if u.Public {
 		u.Body = gitea.PublicReplyText(c.Body)
