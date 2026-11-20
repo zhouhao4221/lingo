@@ -1,6 +1,10 @@
 package worker
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/zhouhao4221/lingo/internal/gitea"
+)
 
 func TestWorkflowIs(t *testing.T) {
 	for p, want := range map[string]bool{
@@ -9,7 +13,7 @@ func TestWorkflowIs(t *testing.T) {
 		".gitea/workflows/deploy-staging.yml@refs/tags/v1": false,
 		"": false,
 	} {
-		if got := workflowIs(p, "deploy-prod.yml"); got != want {
+		if got := gitea.WorkflowMatches(p, "deploy-prod.yml"); got != want {
 			t.Errorf("workflowIs(%q) = %v", p, got)
 		}
 	}

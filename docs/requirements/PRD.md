@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.17 | 2026-11-20 | haiqing | 启动自检落地：`Run` 启动时后台执行、结果写日志，也可调用 `l.SelfCheck(ctx)` 获取；`AutoRegisterWebhook` 时查找或创建 / 修正 Webhook，并发测试投递确认能到达 `WebhookHandler`（未到达时提示 `ALLOWED_HOST_LIST`）；补齐 `type/*`、`review/*` 标签；新增 `Config.SkipSelfCheck` |
 | v1.16 | 2026-11-20 | haiqing | MCP Server 落地（14 个工具，与 REST 对齐）；研发 Agent 可经 `reply_ticket` 回复提交人；新增 Go 方法 `ListProjects`、`ListReleases`、`GetRelease` 与 REST `GET /projects`、`GET /releases`、`GET /releases/{id}` |
 | v1.15 | 2026-11-20 | haiqing | 版本与上线落地：处理 `release`（published / updated，草稿忽略，deleted 保留记录）、`create`（只打 tag，按 semver 后缀识别预发布）、`status`、`workflow_run` 事件与 `MarkDeployed`；正式版本逐个检查已修复工单的修复提交是否包含在该 tag 中（不依赖版本先后，维护分支并行发版也适用），修复提交未知的按说明中对本仓库 Issue 的引用补漏，工单 fixed → released 并发 `ticket.released`；预发布只记录关联；只认版本号形式的 tag，且 tag 已有 Release 时以 Release 为准；上线时修复提交包含在上线版本中的 released 工单 → deployed 并发 `ticket.deployed`，版本已上线后才关联的工单发布即上线；上线信号先于版本到达时等待 2 分钟，带 tag 的信号之后按 tag 补建版本 |
 | v1.14 | 2026-11-20 | haiqing | 附件与补充评论落地：`UploadAttachment` / `GetAttachment` / `AddTicketComment`，REST `POST /attachments`（multipart）、`GET /attachments/{id}`、`POST /tickets/{id}/comments`；附件随 Issue 上传并在正文引用，转出时可勾选；建单前的补充写进 Issue 正文，建单后的补充由机器人发为 Issue 评论并上传评论附件；Gitea 拒收的附件只留在灵问并在 Issue 中注明；未关联工单的附件 24 小时后清理 |

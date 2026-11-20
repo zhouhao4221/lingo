@@ -235,10 +235,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 		}
 	}
 
-	wantLabels := []labelSpec{
-		{Name: w.o.LabelPrefix, Color: "#6f42c1", Description: "由灵问创建"},
-		{Name: w.o.LabelPrefix + "/type/" + t.Type, Color: typeColors[t.Type], Exclusive: true},
-	}
+	wantLabels := issueLabels(w.o.LabelPrefix, t.Type)
 	labels, err := w.labels.ensure(ctx, w.o.Issues, owner, name, wantLabels)
 	if err != nil {
 		return err
@@ -492,7 +489,10 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 	return nil
 }
 
-var typeColors = map[string]string{ticket.TypeConsult: "#1d76db", ticket.TypeBug: "#d73a4a", ticket.TypeFeature: "#0e8a16"}
+// issueLabels 是新建 Issue 要打的标签：来源标签与类型标签（定义同 gitea.LingoLabels，与启动自检补齐的一致）。
+func issueLabels(prefix, typ string) []gitea.CreateLabelOption {
+	return []gitea.CreateLabelOption{gitea.LingoLabels(prefix)[0], gitea.TypeLabel(prefix, typ, "")}
+}
 
 // template 按 Repo.Templates 的文件名、再按模板标签匹配工单类型的 Issue 模板；没有时返回 nil（用内置结构）。
 func (w *Worker) template(ctx context.Context, owner, name, typ string, cfg RepoConfig) (*gitea.IssueTemplate, error) {
@@ -598,11 +598,6 @@ func clipRunes(s string, n int) string {
 	return s
 }
 
-type labelSpec struct {
-	Name, Color, Description string
-	Exclusive                bool
-}
-
 // labelCache 缓存各仓库标签 name → id，缺的标签创建后加入缓存。
 type labelCache struct {
 	mu     sync.Mutex
@@ -615,7 +610,7 @@ func (c *labelCache) forget(owner, name string) {
 	delete(c.byRepo, strings.ToLower(owner+"/"+name))
 }
 
-func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name string, want []labelSpec) ([]int64, error) {
+func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name string, want []gitea.CreateLabelOption) ([]int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := strings.ToLower(owner + "/" + name)
@@ -623,40 +618,24 @@ func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name stri
 		c.byRepo = map[string]map[string]int64{}
 	}
 	ids := c.byRepo[key]
-	missing := func() bool {
+	have := func() bool {
 		for _, l := range want {
 			if _, ok := ids[strings.ToLower(l.Name)]; !ok {
-				return true
+				return false
 			}
 		}
-		return false
+		return ids != nil
 	}
-	if ids == nil || missing() {
-		ls, err := gitea.ListAll(ctx, 50, func(ctx context.Context, o gitea.ListOptions) ([]*gitea.Label, *gitea.Response, error) {
-			return g.ListLabels(ctx, owner, name, o)
-		})
-		if err != nil {
-			return nil, giteaErr("list labels", err)
-		}
-		ids = map[string]int64{}
-		for _, l := range ls {
-			ids[strings.ToLower(l.Name)] = l.ID
+	if !have() {
+		var err error
+		if ids, _, err = gitea.EnsureLabels(ctx, g, owner, name, want); err != nil {
+			return nil, giteaErr("ensure labels", err)
 		}
 		c.byRepo[key] = ids
 	}
 	out := make([]int64, 0, len(want))
 	for _, l := range want {
-		id, ok := ids[strings.ToLower(l.Name)]
-		if !ok {
-			created, err := g.CreateLabel(ctx, owner, name, gitea.CreateLabelOption{Name: l.Name, Color: l.Color,
-				Description: l.Description, Exclusive: l.Exclusive})
-			if err != nil {
-				return nil, giteaErr("create label "+l.Name, err)
-			}
-			id = created.ID
-			ids[strings.ToLower(l.Name)] = id
-		}
-		out = append(out, id)
+		out = append(out, ids[strings.ToLower(l.Name)])
 	}
 	return out, nil
 }
