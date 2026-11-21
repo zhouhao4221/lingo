@@ -73,7 +73,7 @@ type CommentUpdate struct {
 	Author     string // 评论人 login
 	Body       string // 对外评论为去掉 /reply 前缀后的正文
 	Public     bool   // 按 ReplyMode 判定为面向提交人
-	FromBot    bool   // 机器人自己发的评论（灵问转发的用户补充），只作确认
+	FromBot    bool   // 机器人自己发的评论（灵工转发的用户补充），只作确认
 	DeliveryID string
 	At         time.Time
 }
@@ -351,7 +351,7 @@ func (s *Sync) labelTicket(t *Ticket, cur IssueState, ignoreNeedInfo bool) {
 // ApplyComment 处理评论变化：保存到工单评论；对外评论首次出现时通知提交人。
 func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
 	if u.FromBot {
-		return nil // 灵问自己转发的评论，已在发出时记录
+		return nil // 灵工自己转发的评论，已在发出时记录
 	}
 	return s.o.Store.InTx(ctx, func(tx Tx) error {
 		t, err := tx.LockByIssue(ctx, u.Repo, u.Number)

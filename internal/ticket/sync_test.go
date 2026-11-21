@@ -553,7 +553,7 @@ func TestApplyCommentPublicOnce(t *testing.T) {
 		{Change: CommentCreated, CommentID: 5, Body: "内部讨论"},
 		{Change: CommentEdited, CommentID: 5, Body: "已修复", Public: true},
 		{Change: CommentEdited, CommentID: 5, Body: "已修复，请重试", Public: true},
-		{Change: CommentCreated, CommentID: 6, Body: "灵问转发", FromBot: true, Public: true},
+		{Change: CommentCreated, CommentID: 6, Body: "灵工转发", FromBot: true, Public: true},
 		{Change: CommentDeleted, CommentID: 5},
 	}
 	for _, u := range steps {

@@ -187,7 +187,7 @@ func MatchTemplate(ts []*IssueTemplate, file, typ, prefix string) *IssueTemplate
 type FormValues map[string][]string
 
 // RenderForm 按 Gitea 网页提交表单时的格式（modules/issue/template.RenderToMarkdown）渲染 Issue 正文，
-// 使灵问建的 Issue 与研发在网页上按同一模板提交的一致。
+// 使灵工建的 Issue 与研发在网页上按同一模板提交的一致。
 func RenderForm(t *IssueTemplate, v FormValues) string {
 	const blank = "_No response_\n"
 	var b strings.Builder

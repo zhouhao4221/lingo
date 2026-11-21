@@ -11,7 +11,7 @@ import (
 const selfCheckLockKey = 0x6c696e676f02
 
 // SelfCheck 执行启动自检并返回结果（Run 启动时会在后台执行一次并写日志）：Gitea 版本（≥ 1.22，Actions 上线信号需
-// ≥ 1.25）与附件设置；每个仓库可访问、Issue 已启用、机器人有写权限；补齐灵问标签；Webhook 指向
+// ≥ 1.25）与附件设置；每个仓库可访问、Issue 已启用、机器人有写权限；补齐灵工标签；Webhook 指向
 // GiteaConfig.WebhookURL、已启用且事件订阅完整（AutoRegisterWebhook 时自动创建或修正），并发一次测试投递确认
 // 能到达 WebhookHandler（最多等 10 秒）；Repo.Templates 中的模板与 Repo.Deploy.Workflow 存在。
 // 会写入 Gitea 的只有标签与（开启自动注册时的）Webhook。多实例同时执行时只有一个实例真正检查，其他实例返回一条

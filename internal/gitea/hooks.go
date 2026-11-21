@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-// LingoHookEvents 是灵问需要订阅的 Webhook 事件。PR 上的评论以 pull_request_comment 投递
+// LingoHookEvents 是灵工需要订阅的 Webhook 事件。PR 上的评论以 pull_request_comment 投递
 // （载荷同 IssueCommentPayload，IsPull 为真），需要单独订阅。
 var LingoHookEvents = []string{
 	"issues", "issue_comment", "issue_assign", "issue_label", "issue_milestone",
@@ -15,7 +15,7 @@ var LingoHookEvents = []string{
 
 // CreateHookOption 是创建 Webhook 的参数。
 type CreateHookOption struct {
-	Type                string            `json:"type"` // 灵问使用 "gitea"
+	Type                string            `json:"type"` // 灵工使用 "gitea"
 	Config              map[string]string `json:"config"`
 	Events              []string          `json:"events"`
 	Active              bool              `json:"active"`

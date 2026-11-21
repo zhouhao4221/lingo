@@ -11,7 +11,7 @@ import (
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
 
-// Issue 正文中需求视角区块的起止标记：区块由灵问单向维护，每次按库中数据整体重写，区块外的内容不动。
+// Issue 正文中需求视角区块的起止标记：区块由灵工单向维护，每次按库中数据整体重写，区块外的内容不动。
 const (
 	perspectivesStart = "<!-- lingo:perspectives -->"
 	perspectivesEnd   = "<!-- /lingo:perspectives -->"
@@ -52,7 +52,7 @@ func perspectiveSection(set *ticket.PerspectiveSet) string {
 }
 
 // quoteContent 把补充内容渲染为引用块，并转义行首的 #：补充人写的标题、署名或"缺少"行都留在引用里，
-// 不能伪装成区块本身的视角标题与署名（区块结构只由灵问生成）。
+// 不能伪装成区块本身的视角标题与署名（区块结构只由灵工生成）。
 func quoteContent(body string) string {
 	lines := strings.Split(strings.TrimSpace(stripMarkers(body)), "\n")
 	for i, l := range lines {
@@ -122,7 +122,7 @@ func perspectiveNotice(it ticket.Perspective) string {
 }
 
 // syncPerspectives 把需求视角补充同步到 Issue：按库中最新数据重写正文区块（无变化不提交）、补打视角标签，
-// 并为这段补充发一条提示评论（已发过的不重发）。正文只由灵问单向写入，不回读，Webhook 的 edited 事件不会触发本任务。
+// 并为这段补充发一条提示评论（已发过的不重发）。正文只由灵工单向写入，不回读，Webhook 的 edited 事件不会触发本任务。
 func (w *Worker) syncPerspectives(ctx context.Context, ticketID, perspectiveID int64) error {
 	set, err := w.o.Drafts.Perspectives(ctx, ticketID)
 	if errors.Is(err, ticket.ErrNotFound) {
@@ -133,7 +133,7 @@ func (w *Worker) syncPerspectives(ctx context.Context, ticketID, perspectiveID i
 	}
 	t := set.Ticket
 	if t.Type != ticket.TypeFeature {
-		return nil // 转出时改成了其他类型：补充留在灵问
+		return nil // 转出时改成了其他类型：补充留在灵工
 	}
 	if t.IssueNumber == 0 {
 		if t.Status == ticket.StatusSubmitted {

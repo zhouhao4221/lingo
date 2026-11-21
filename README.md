@@ -1,5 +1,7 @@
 # Lingo
 
+<p align="center"><img src="assets/logo/lingo-icon.svg" width="96" alt="Lingo logo"></p>
+
 English | [简体中文](README.zh-CN.md)
 
 Lingo is an embeddable Go library that connects end users with an AI development team working in Gitea. Users submit questions, bug reports and feature requests from your application; Lingo turns them into structured Gitea issues, keeps both sides in sync, and reports progress back to your application until the fix is released and deployed.

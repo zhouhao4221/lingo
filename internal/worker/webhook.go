@@ -152,7 +152,7 @@ func (w *Worker) applyIssue(ctx context.Context, ev *webhook.Event, received tim
 	if ev.MarkerTicketID == 0 || change != ticket.IssueOpened {
 		ok, err := w.o.Tickets.Tracks(ctx, ev.Repo, ev.IssueNumber)
 		if err != nil || !ok {
-			return err // 不是灵问工单的 Issue
+			return err // 不是灵工工单的 Issue
 		}
 	}
 	cur := snapshot(ev.Issue)
@@ -212,7 +212,7 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 }
 
 // commentUpdate 把 Gitea 评论映射为工单评论变化（Webhook 与对账共用）：按 ReplyMode 判定是否对外、去掉 /reply 前缀；
-// 评论人是机器人（灵问转发的补充，研发编辑也算）时标记 FromBot。
+// 评论人是机器人（灵工转发的补充，研发编辑也算）时标记 FromBot。
 func (w *Worker) commentUpdate(change ticket.CommentChange, repo string, number int64, c *gitea.Comment, sender string) ticket.CommentUpdate {
 	u := ticket.CommentUpdate{Change: change, Repo: repo, Number: number, CommentID: c.ID, Author: sender, Body: c.Body,
 		Public: w.o.ReplyMode == webhook.ReplyAll || gitea.IsPublicReply(c.Body), At: c.UpdatedAt}

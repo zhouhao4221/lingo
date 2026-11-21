@@ -65,7 +65,7 @@ type Options struct {
 	Pings       Pings
 	Repos       []Repo
 	LabelPrefix string
-	// WebhookURL 为灵问 WebhookHandler 的外部地址；AutoRegister 为真时查找或创建 / 修正 Webhook 并发测试投递。
+	// WebhookURL 为灵工 WebhookHandler 的外部地址；AutoRegister 为真时查找或创建 / 修正 Webhook 并发测试投递。
 	WebhookURL    string
 	WebhookSecret string
 	AutoRegister  bool
@@ -83,7 +83,7 @@ var (
 )
 
 // Run 执行启动自检（PRD 3.2.2、gitea-integration.md 12.3），按仓库逐项返回结果，不因单项失败中止。
-// 写操作只有：补齐灵问标签；AutoRegister 时创建或修正 Webhook 并发测试投递。
+// 写操作只有：补齐灵工标签；AutoRegister 时创建或修正 Webhook 并发测试投递。
 func Run(ctx context.Context, o Options) []Result {
 	if o.PingWait <= 0 {
 		o.PingWait = 10 * time.Second

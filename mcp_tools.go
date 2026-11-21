@@ -17,7 +17,7 @@ import (
 // list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、list_releases、get_release、get_llm_usage。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
-const mcpInstructions = `灵问（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
+const mcpInstructions = `灵工（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
 进展回传给提交人。研发 Agent 可用 get_ticket 读取工单上下文（含提交人的补充与附件列表），用 reply_ticket 回复提交人
 （会同步到 Issue，并通知提交人）。需求工单可按调用者视角（使用者 / 业务方 / 专家 / 决策者）用 add_perspective 追加补充、
 list_perspectives 查看分层补充与缺失的必填视角。所有数据按调用者身份隔离。`

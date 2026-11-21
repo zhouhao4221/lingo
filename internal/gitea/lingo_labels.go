@@ -11,12 +11,12 @@ import (
 	"github.com/zhouhao4221/lingo/internal/perspective"
 )
 
-// LingoLabels 返回灵问使用的标签（前缀默认 lingo）：来源标签，type/*、review/* 两组互斥作用域标签，以及需求视角标签。
+// LingoLabels 返回灵工使用的标签（前缀默认 lingo）：来源标签，type/*、review/* 两组互斥作用域标签，以及需求视角标签。
 func LingoLabels(prefix string) []CreateLabelOption {
 	if prefix == "" {
 		prefix = "lingo"
 	}
-	out := []CreateLabelOption{{Name: prefix, Color: "#6f42c1", Description: "由灵问创建"}}
+	out := []CreateLabelOption{{Name: prefix, Color: "#6f42c1", Description: "由灵工创建"}}
 	for _, t := range []struct{ name, color string }{{"consult", "#1d76db"}, {"bug", "#d73a4a"}, {"feature", "#0e8a16"}} {
 		out = append(out, TypeLabel(prefix, t.name, t.color))
 	}

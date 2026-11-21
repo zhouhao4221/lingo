@@ -224,7 +224,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	owner, name, _ := strings.Cut(t.Repo, "/")
 
 	// 幂等：上次可能已建好 Issue 但没来得及保存（进程崩溃、超时），按隐藏标记查重
-	// 关键词搜索会命中 ticket=50 等前缀相同的标记，翻完全部结果；只认正文最后一个标记（灵问追加的那个，
+	// 关键词搜索会命中 ticket=50 等前缀相同的标记，翻完全部结果；只认正文最后一个标记（灵工追加的那个，
 	// 用户文本中的标记在建单时已去掉）。搜索索引有延迟，刚建好的 Issue 可能暂时搜不到，Webhook 的标记补记兜底。
 	// 不按来源标签过滤：研发可能已去掉标签。首次执行不可能有先前的 Issue，跳过查重。
 	if retried {
@@ -277,7 +277,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if err != nil {
 		return err
 	}
-	// 后台人员确认过的标题、提交人自己写的标题都保留，只有灵问从正文生成的标题交给模型改写
+	// 后台人员确认过的标题、提交人自己写的标题都保留，只有灵工从正文生成的标题交给模型改写
 	draft, original := w.draftIssue(ctx, t, tmpl, forwardedBy != "" || !t.TitleAuto)
 	opt := gitea.CreateIssueOption{Title: draft.Title, Body: IssueBody(draft, tmpl, comments, forwardedBy, note, original,
 		perspectiveSection(perspectives)), Labels: labels, Assignees: cfg.Assignees}
@@ -641,9 +641,9 @@ func commentAuthor(c *ticket.Comment) string {
 		return "提交人"
 	}
 	if c.AuthorName != "" {
-		return "灵问后台（" + escapeMarkdown(c.AuthorName) + "）"
+		return "灵工后台（" + escapeMarkdown(c.AuthorName) + "）"
 	}
-	return "灵问后台"
+	return "灵工后台"
 }
 
 // commentHeading 是补充评论在 Gitea 中的标题：研发 Agent 的回复标明已回复提交人，其余为“补充（署名）”。
@@ -724,7 +724,7 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 		if t.Status == ticket.StatusSubmitted {
 			return &ticket.DeferError{Until: w.o.Now().Add(commentWait), Reason: "issue not created yet"}
 		}
-		return nil // 工单未转出（或建单失败）：补充留在灵问
+		return nil // 工单未转出（或建单失败）：补充留在灵工
 	}
 	owner, name, _ := strings.Cut(t.Repo, "/")
 	body := commentText(c)
@@ -847,10 +847,10 @@ func IssueBody(t *ticket.Ticket, tmpl *gitea.IssueTemplate, comments []ticket.Co
 	return b.String()
 }
 
-// markerRe 匹配灵问的隐藏标记（lingo:ticket、lingo:public 等，含区块结束标记 /lingo:…）。
+// markerRe 匹配灵工的隐藏标记（lingo:ticket、lingo:public 等，含区块结束标记 /lingo:…）。
 var markerRe = regexp.MustCompile(`<!--\s*/?\s*lingo:[^>]*-->`)
 
-// stripMarkers 去掉用户文本中的灵问标记，防止伪造工单关联或对外标记；反复替换直到不变，
+// stripMarkers 去掉用户文本中的灵工标记，防止伪造工单关联或对外标记；反复替换直到不变，
 // 嵌套构造（去掉内层后外层拼成新标记）也会被清除。
 func stripMarkers(s string) string {
 	for {
