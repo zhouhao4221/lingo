@@ -83,7 +83,7 @@ func (s *Store) ListMine(ctx context.Context, q ticket.MineQuery) ([]*ticket.Tic
 
 // Events 实现 ticket.QueryStore。事件 ID 在事务内分配、提交顺序可能不同，直接按 ID 翻页时游标可能越过一个
 // 尚未提交的较小 ID 而永远漏掉它，所以只返回早于所有进行中事务写入的事件（txid < 快照 xmin）。xmin 是整个实例
-// 最老的进行中事务，宿主的长事务会把它拖住；因此写入超过 eventSettle 的事件无论如何都返回（灵问自己的事务
+// 最老的进行中事务，宿主的长事务会把它拖住；因此写入超过 eventSettle 的事件无论如何都返回（灵工自己的事务
 // 都是毫秒级，不会在这么久后才提交），变更流的延迟最多为 eventSettle。
 func (s *Store) Events(ctx context.Context, q ticket.EventQuery) ([]notify.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `

@@ -254,7 +254,7 @@ func TestIssueCloseStateAndRetry(t *testing.T) {
 	}
 }
 
-// 本地驳回结论不被 Gitea 回流覆盖：灵问自己关闭 Issue 的回流、研发重开、删除、改标签、对账快照、PR 合并都只留痕。
+// 本地驳回结论不被 Gitea 回流覆盖：灵工自己关闭 Issue 的回流、研发重开、删除、改标签、对账快照、PR 合并都只留痕。
 func TestSyncKeepsLocalRejection(t *testing.T) {
 	ctx := context.Background()
 	for _, u := range []IssueUpdate{
@@ -303,7 +303,7 @@ func TestLinkByMarkerOnRejected(t *testing.T) {
 }
 
 // 已有契约：reviewer / admin 在任何状态都能写对外评论（合并后的工单除外，评论写到目标工单）；
-// 已转出且有 Issue 时同步到 Issue，驳回 / 未转出的只留在灵问。
+// 已转出且有 Issue 时同步到 Issue，驳回 / 未转出的只留在灵工。
 func TestStaffCanCommentAnytime(t *testing.T) {
 	ctx := context.Background()
 	for _, st := range []Status{StatusPendingTriage, StatusAnswered, StatusRejected, StatusSubmitted, StatusOpen, StatusInProgress,

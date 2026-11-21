@@ -1,16 +1,18 @@
-# 灵问 Lingo
+# 灵工 Lingo
+
+<p align="center"><img src="assets/logo/lingo-icon.svg" width="96" alt="灵工 Lingo logo"></p>
 
 [English](README.md) | 简体中文
 
-灵问是可嵌入业务项目的 Go 库，连接终端用户与在 Gitea 中工作的 AI 研发团队：用户在你的应用里提交咨询、Bug 与需求，灵问整理为结构化的 Gitea Issue，双向同步评论与状态，并把进展回传给你的应用，直到修复发布、上线。
+灵工是可嵌入业务项目的 Go 库，连接终端用户与在 Gitea 中工作的 AI 研发团队：用户在你的应用里提交咨询、Bug 与需求，灵工整理为结构化的 Gitea Issue，双向同步评论与状态，并把进展回传给你的应用，直到修复发布、上线。
 
-灵问只提供公开 API（Go 方法、REST Handler、MCP Server、Gitea Webhook Handler），无租户、无前端：登录、用户管理、界面与部署由接入方负责。
+灵工只提供公开 API（Go 方法、REST Handler、MCP Server、Gitea Webhook Handler），无租户、无前端：登录、用户管理、界面与部署由接入方负责。
 
 > **状态：** 工单流程已端到端实现；知识问答（`Ask`、知识库）尚未实现。首个正式版本发布前 API 仍可能调整。
 
 ## 功能
 
-- **反馈工单**：咨询 / Bug / 需求，支持文字、表单字段、截图与附件（灵问只存附件引用，文件在接入方自己的附件系统中，可经 `Config.FetchAttachment` 读取后上传到 Gitea，读取时会传入提交人 ID 供接入方校验归属）；接口按接入方自建的弹窗组件设计
+- **反馈工单**：咨询 / Bug / 需求，支持文字、表单字段、截图与附件（灵工只存附件引用，文件在接入方自己的附件系统中，可经 `Config.FetchAttachment` 读取后上传到 Gitea，读取时会传入提交人 ID 供接入方校验归属）；接口按接入方自建的弹窗组件设计
 - **后台确认**：转出到 Gitea、直接答复、合并或驳回；按项目与类型的自动 / 手动开关；超时提醒
 - **工单整理**：可选的轻量模型生成清晰标题、从自由描述中抽取表单字段、整理描述（按模板逐项校验，并保留原始描述）
 - **Gitea 对接**：按仓库 Issue 表单模板建单、评论双向同步、识别 PR 合并、按提交包含关系关联版本、上线信号（Actions 工作流、提交状态或 `MarkDeployed`）
@@ -146,7 +148,7 @@ lingo.Config{
 ### Gitea 配置
 
 - 创建机器人账号与令牌，scope：`write:issue`、`read:repository`、`read:user`（开启 `AutoRegisterWebhook` 另需 `write:repository`）。
-- 把 Webhook 指向 `WebhookHandler` 并设置共享密钥，或配置 `AutoRegisterWebhook` 与 `WebhookURL` 自动注册；灵问部署在内网时，需在 Gitea 的 `[security] ALLOWED_HOST_LIST` 中放行。
+- 把 Webhook 指向 `WebhookHandler` 并设置共享密钥，或配置 `AutoRegisterWebhook` 与 `WebhookURL` 自动注册；灵工部署在内网时，需在 Gitea 的 `[security] ALLOWED_HOST_LIST` 中放行。
 - 研发以 `/reply` 开头的评论（或 MCP 的 `reply_ticket`）回复提交人；PR 中写 `Fixes #N` 关闭 Issue。
 - `l.SelfCheck(ctx)`（启动时也会执行）报告版本、权限、标签、Webhook、模板与工作流问题。
 

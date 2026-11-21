@@ -49,7 +49,7 @@ const (
 	// Ping 是 push 投递：TestHook 的测试投递与真实 push 无法区分，Handler 不把它写入投递表，
 	// 只经 Store.RecordPing 记录仓库最近一次收到投递的时间，供启动自检确认连通。
 	Ping    Kind = "ping"
-	Ignored Kind = "ignored" // 灵问不处理的事件或动作
+	Ignored Kind = "ignored" // 灵工不处理的事件或动作
 	// Invalid 是验签通过但载荷无法解析的投递：照常落库（便于排查与 Gitea 版本升级后重放），不丢弃。
 	Invalid Kind = "invalid"
 )
@@ -66,7 +66,7 @@ type Event struct {
 	IssueNumber int64  // Issue 或 PR 编号
 	IsPull      bool   // 评论是否发在 PR 上
 	Sender      string // 触发人 login
-	FromBot     bool   // 触发人是灵问机器人自己：只作确认，不再通知，防回环
+	FromBot     bool   // 触发人是灵工机器人自己：只作确认，不再通知，防回环
 	At          time.Time
 
 	// MarkerTicketID 是 Issue 正文中 lingo:ticket 标记的工单 ID，只在 Issue 由机器人创建时采信，否则为 0。

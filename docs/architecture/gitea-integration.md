@@ -1,7 +1,7 @@
 # Gitea 对接调研
 
 > 调研日期：2026-11-18。依据：Gitea v1.27.3（最新稳定版）的 `templates/swagger/v1_json.tmpl`、`services/webhook/deliver.go`、`modules/webhook/type.go`、`modules/structs/hook.go`，并与 v1.22 / v1.24 / v1.25 及 main 分支对比版本差异。
-> 目的：给出灵问各环节（模板提单 → 往来交流 → 开发完成 → 发版 → 上线）可用的 Gitea 接口、事件与可借力的特性，作为 `internal/gitea`、`internal/webhook`、`internal/release` 的设计输入。
+> 目的：给出灵工各环节（模板提单 → 往来交流 → 开发完成 → 发版 → 上线）可用的 Gitea 接口、事件与可借力的特性，作为 `internal/gitea`、`internal/webhook`、`internal/release` 的设计输入。
 
 ## 1. 结论速览
 
@@ -33,7 +33,7 @@
 1. `GET /repos/{o}/{r}`：校验仓库存在、机器人可访问，记录 `has_issues`、默认分支。
 2. **标签补齐**：`GET /repos/{o}/{r}/labels`（组织仓库同时查 `GET /orgs/{org}/labels`），缺的用 `POST /repos/{o}/{r}/labels` 创建，并缓存 `name → id`（建 Issue 时 `labels` 字段传的是 **id**，不是名字）。
    - 建议用 Gitea **作用域标签**（scoped label，名称形如 `scope/name`，`exclusive: true` 时同一作用域互斥）：
-     - `lingo`：灵问来源标记（对账筛选用）
+     - `lingo`：灵工来源标记（对账筛选用）
      - `type/consult`、`type/bug`、`type/feature`（exclusive）
      - `review/pending`、`review/approved`、`review/rejected`、`review/need-info`（exclusive）
      - 可选 `status/in-progress`、`status/fixed` 等，供研发 Agent 显式标记进度
@@ -49,7 +49,7 @@
      "authorization_header": "Bearer <可选的额外令牌>"
    }
    ```
-   同一个组织下的仓库多时，改用 `POST /orgs/{org}/hooks` 注册一次即可覆盖全部仓库（需要组织 owner 权限）。不允许机器人改 hook 的环境，由接入方手工配置，灵问只负责校验。
+   同一个组织下的仓库多时，改用 `POST /orgs/{org}/hooks` 注册一次即可覆盖全部仓库（需要组织 owner 权限）。不允许机器人改 hook 的环境，由接入方手工配置，灵工只负责校验。
 
 ## 4. 模板提单
 
@@ -64,8 +64,8 @@
 ### 4.2 推荐用法
 
 1. 工单类型对应仓库里的模板（如 `bug` → `bug_report.yaml`），映射关系放在 `lingo.Repo` 配置里，没配就按模板 `labels` 自动匹配。
-2. **问答 Agent 按表单字段追问**：把 `body[]` 中必填的 `input` / `textarea` / `dropdown` 当作要收集的槽位，和用户多轮对话把字段补齐；`dropdown` 的 `attributes.options` 直接作为候选项。研发方改了模板，灵问追问的内容会跟着变，不用改代码。
-3. **按 Gitea 表单的渲染格式写正文**：Gitea 网页提交表单时会把每个字段渲染成 `### <label>\n\n<value>`。灵问按同样的格式拼正文，研发 Agent 看到的 Issue 和网页提交的一致。正文末尾追加：
+2. **问答 Agent 按表单字段追问**：把 `body[]` 中必填的 `input` / `textarea` / `dropdown` 当作要收集的槽位，和用户多轮对话把字段补齐；`dropdown` 的 `attributes.options` 直接作为候选项。研发方改了模板，灵工追问的内容会跟着变，不用改代码。
+3. **按 Gitea 表单的渲染格式写正文**：Gitea 网页提交表单时会把每个字段渲染成 `### <label>\n\n<value>`。灵工按同样的格式拼正文，研发 Agent 看到的 Issue 和网页提交的一致。正文末尾追加：
    - 用户上下文（项目、版本 `reported_version`、环境），不放个人敏感信息
    - 隐藏标记 `<!-- lingo:ticket=<id> -->`
 4. `POST /repos/{o}/{r}/issues`：`title`（模板标题前缀 + 摘要）、`body`、`labels`（label id 数组）、`assignees`（研发 Agent 账号，可按仓库配置）、`milestone`、`ref`、`due_date`（可做 SLA）。注意 `projects` 字段在 main 才有，稳定版不传。
@@ -82,7 +82,7 @@
 
 **哪些评论转给用户**：Gitea 没有“内部评论”。研发在 Issue 下的讨论很多是内部的，全部转给用户会泄露过程信息。建议：
 
-- 默认只转发**明确面向用户**的回复：评论以 `/reply` 开头，或含 `<!-- lingo:public -->` 标记，或通过 MCP 的回复用户工具发出（MCP 是首选通道，灵问发评论时自动加标记）；
+- 默认只转发**明确面向用户**的回复：评论以 `/reply` 开头，或含 `<!-- lingo:public -->` 标记，或通过 MCP 的回复用户工具发出（MCP 是首选通道，灵工发评论时自动加标记）；
 - 可配置为“非机器人评论全部转发”（适合用户和研发直接沟通的场景）；
 - 状态类变化（关闭、发版、需补充信息）不依赖评论，由事件驱动通知。
 
@@ -96,7 +96,7 @@ Webhook 头 `X-Gitea-Event` 是大类（如 `issues`），`X-Gitea-Event-Type` �
 
 | Gitea 事件（Event-Type / action） | 工单含义 |
 |---|---|
-| `issues` / opened | 已转研发（灵问自己建单，用于确认 issue number） |
+| `issues` / opened | 已转研发（灵工自己建单，用于确认 issue number） |
 | `issue_assign` / assigned | 已有人领取（处理中） |
 | `issue_label` / label_updated、label_cleared | 类型 / 评审 / 状态标签变化，同步评审结论 |
 | `issue_milestone` / milestoned | 已排期，可告诉用户“计划在 v1.3 发布” |
@@ -134,17 +134,17 @@ PRD 现在的做法是解析版本说明里的 `#N`，但版本说明是人写�
 
 ### 7.3 里程碑当版本计划
 
-`GET/POST /repos/{o}/{r}/milestones`：研发把 Issue 放进 `v1.3` 里程碑时（`issue_milestone` 事件），灵问可以告诉用户预计版本和截止日期（`due_on`）。
+`GET/POST /repos/{o}/{r}/milestones`：研发把 Issue 放进 `v1.3` 里程碑时（`issue_milestone` 事件），灵工可以告诉用户预计版本和截止日期（`due_on`）。
 
 ## 8. 上线
 
 Gitea **没有** GitHub 那样的 Deployments / Environments API，“发版”和“上线”要分开判断。可选信号（按推荐顺序）：
 
 1. **Gitea Actions 部署流水线（≥1.25）**：订阅 `workflow_run` 事件，`action=completed` 且 `conclusion=success`，工作流名或文件名匹配配置（如 `deploy-prod.yml`），用 run 的 `head_sha` / tag 对应到版本 → 该版本的工单状态改为“已上线”。补偿用 `GET /repos/{o}/{r}/actions/runs?status=success`。
-2. **提交状态（commit status）**：外部 CI/CD（Jenkins、Drone、ArgoCD 等）部署成功后调用 `POST /repos/{o}/{r}/statuses/{sha}`，`context` 约定为 `deploy/production`；灵问订阅 `status` 事件识别。不用 Gitea Actions 的团队用这种方式最通用。
-3. **接入方直接告诉灵问**：公开方法 `MarkDeployed(ctx, repo, tag, env)`，由接入方的部署脚本调用。最简单，也是 1、2 都不适用时的兜底。
+2. **提交状态（commit status）**：外部 CI/CD（Jenkins、Drone、ArgoCD 等）部署成功后调用 `POST /repos/{o}/{r}/statuses/{sha}`，`context` 约定为 `deploy/production`；灵工订阅 `status` 事件识别。不用 Gitea Actions 的团队用这种方式最通用。
+3. **接入方直接告诉灵工**：公开方法 `MarkDeployed(ctx, repo, tag, env)`，由接入方的部署脚本调用。最简单，也是 1、2 都不适用时的兜底。
 
-需要灵问主动触发部署时（不建议默认开启），可用 `POST /repos/{o}/{r}/actions/workflows/{workflow_id}/dispatches`（≥1.24）。
+需要灵工主动触发部署时（不建议默认开启），可用 `POST /repos/{o}/{r}/actions/workflows/{workflow_id}/dispatches`（≥1.24）。
 
 多仓库项目（前端 + 后端）：一个工单拆到多个仓库时，**所有关联 Issue 的修复都上线**才算该工单上线。
 
@@ -193,21 +193,21 @@ Gitea **没有** GitHub 那样的 Deployments / Environments API，“发版”�
 
 ## 12. 仓库配置与启动自检
 
-仓库层面的设置基本都有 API（v1.27.3 核实）。灵问只**读**这些设置做自检，**写**仅限标签、Webhook，以及可选的模板初始化；其余设置留给研发方。
+仓库层面的设置基本都有 API（v1.27.3 核实）。灵工只**读**这些设置做自检，**写**仅限标签、Webhook，以及可选的模板初始化；其余设置留给研发方。
 
 ### 12.1 仓库设置相关接口
 
-| 类别 | 接口 | 灵问用途 |
+| 类别 | 接口 | 灵工用途 |
 |------|------|---------|
 | 仓库属性 | `GET / PATCH /repos/{o}/{r}`（`EditRepoOption`：`has_issues`、`has_pull_requests`、`has_releases`、`has_actions`、`has_wiki`、`internal_tracker`、`external_tracker`、`default_branch`、合并方式等） | 只读自检：Issue 已启用、没有改用外部 Issue 跟踪；`internal_tracker.enable_issue_dependencies` 决定能否跨仓库拆单 |
 | 权限 | `GET /repos/{o}/{r}/collaborators/{bot}/permission`、`/teams` | 自检机器人账号在每个仓库至少有 write 权限 |
 | 标签 / 里程碑 | `/labels`、`/milestones`、`/orgs/{org}/labels` | 补齐标签（第 3 节） |
 | Webhook | `/hooks`、`/hooks/{id}/tests`、`/orgs/{org}/hooks` | 自动注册；注册后发一次测试投递，验证 Webhook 能连通 |
-| 文件内容 | `GET /contents/{filepath}`、`POST /contents`（一次提交多个文件）、`POST /branches`、`POST /pulls` | 读 `.gitea/ISSUE_TEMPLATE/`；可选：仓库没有模板时，在新分支提交灵问推荐的模板并开 PR，由研发合并（不直接写默认分支） |
+| 文件内容 | `GET /contents/{filepath}`、`POST /contents`（一次提交多个文件）、`POST /branches`、`POST /pulls` | 读 `.gitea/ISSUE_TEMPLATE/`；可选：仓库没有模板时，在新分支提交灵工推荐的模板并开 PR，由研发合并（不直接写默认分支） |
 | 分支 / Tag 保护 | `/branch_protections`、`/tag_protections` | 不使用 |
 | 协作者 / 团队 / 部署密钥 / 推送镜像 / 主题 / 头像 / 转移 | `/collaborators`、`/teams`、`/keys`、`/push_mirrors`、`/topics`、`/avatar`、`/transfer` | 不使用 |
 | Actions 密钥与变量 | `/actions/secrets`、`/actions/variables` | 不使用（部署信号只读运行结果） |
-| 组织 / 管理员 | `/orgs/{org}/...`、`/admin/...` | 不使用；灵问不需要管理员 token |
+| 组织 / 管理员 | `/orgs/{org}/...`、`/admin/...` | 不使用；灵工不需要管理员 token |
 
 ### 12.2 实例级配置（只能读，部分没有 API）
 
@@ -216,7 +216,7 @@ Gitea **没有** GitHub 那样的 Deployments / Environments API，“发版”�
 - `GET /settings/attachment`：读附件是否启用、允许的类型、大小上限、数量上限，上传前先校验。
 - `GET /settings/repository`：读 `time_tracking_disabled` 等全局开关。
 - **没有 API、只能在 `app.ini` 改的**，需要写进接入文档：
-  - `[security] ALLOWED_HOST_LIST`（旧版本在 `[webhook]` 下）：Webhook 允许投递的目标地址。默认只允许外网地址，灵问部署在内网时 Webhook 会被拒，要加上灵问的地址或网段。
+  - `[security] ALLOWED_HOST_LIST`（旧版本在 `[webhook]` 下）：Webhook 允许投递的目标地址。默认只允许外网地址，灵工部署在内网时 Webhook 会被拒，要加上灵工的地址或网段。
   - `[webhook] DELIVER_TIMEOUT`：投递超时，默认 5 秒。
   - `[repository.pull-request] CLOSE_KEYWORDS` / `REOPEN_KEYWORDS`：PR 自动关闭 Issue 的关键词。
   - `[api] MAX_RESPONSE_ITEMS`：单页最大条数（可经 `/settings/api` 读取）。

@@ -54,7 +54,7 @@ func TestSelfCheckRegistersWebhookAndConfirmsDelivery(t *testing.T) {
 			w.WriteHeader(201)
 			_ = json.NewEncoder(w).Encode(h)
 		case p == "/repos/demo/api/hooks/9/tests":
-			// 模拟 Gitea 的测试投递：以 Hook 配置的密钥签名一个 push 事件发给灵问
+			// 模拟 Gitea 的测试投递：以 Hook 配置的密钥签名一个 push 事件发给灵工
 			secret := hooks[0]["config"].(map[string]any)["secret"].(string)
 			body := `{"ref":"refs/heads/main","repository":{"full_name":"demo/api"},"sender":{"login":"lingo-bot"}}`
 			req := httptest.NewRequest("POST", whURL, strings.NewReader(body))

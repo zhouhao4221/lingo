@@ -72,7 +72,7 @@ func newForwarded(t *testing.T, g *giteaServer) (*lingo.Lingo, *sql.DB, func(str
 }
 
 // 驳回已转研发工单：保留工单、评论与历史，只关闭关联的主 Issue；并发 / 重复驳回只生效一次；
-// 之后 Gitea 回流（灵问自己的关闭、研发重开、删除）不覆盖本地驳回结论；后台人员仍可随时评论（只留在灵问）。
+// 之后 Gitea 回流（灵工自己的关闭、研发重开、删除）不覆盖本地驳回结论；后台人员仍可随时评论（只留在灵工）。
 func TestRejectForwardedClosesLinkedIssue(t *testing.T) {
 	g := &giteaServer{templates: bugTemplate}
 	l, db, count, id := newForwarded(t, g)
@@ -143,7 +143,7 @@ func TestRejectForwardedClosesLinkedIssue(t *testing.T) {
 		t.Errorf("comments = %+v %v", cs, err)
 	}
 
-	// Gitea 回流：灵问关闭 Issue 的回声、研发重开、Issue 被删除，工单都保持 rejected
+	// Gitea 回流：灵工关闭 Issue 的回声、研发重开、Issue 被删除，工单都保持 rejected
 	h := l.WebhookHandler()
 	issue := `"issue":{"id":1000,"number":40,"user":{"login":"lingo-bot"},"body":"x","updated_at":"2026-11-21T01:00:00Z"},"repository":{"full_name":"demo/api"}`
 	if w := deliver(h, "r1", "issues", `{"action":"closed",`+issue+`,"sender":{"login":"lingo-bot"}}`, "s"); w.Code != 200 {

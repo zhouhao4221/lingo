@@ -71,7 +71,7 @@ docs/                需求（requirements/）、架构（architecture/）、Pro
 
 > lingo 嵌入宿主进程，宿主可能单实例也可能多实例部署，库不做阻碍水平扩展的设计。
 
-- **无状态**：会话、限流计数、锁等状态放 PostgreSQL，不放进程内存；附件由接入方的附件系统保存，灵问只存引用，不落本地磁盘
+- **无状态**：会话、限流计数、锁等状态放 PostgreSQL，不放进程内存；附件由接入方的附件系统保存，灵工只存引用，不落本地磁盘
 - **迁移单独执行**：`New` 不自动迁移，由宿主发布流程调用 `lingo.Migrate`（advisory lock 防并发）；迁移须向前兼容，保证新旧版本可同时运行
 - **Handler 与 Run 可分离**：宿主可在同一进程同时挂载 Handler 与运行 `Run`，也可分进程分别扩容
 - **Worker 多实例安全**：outbox 取任务用 `SELECT … FOR UPDATE SKIP LOCKED`；定时任务用数据库咨询锁（advisory lock）保证单实例执行

@@ -253,7 +253,7 @@ type Comment struct {
 	At         time.Time `json:"at"`
 }
 
-// Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存和鉴权，灵问只记录引用：提交工单或补充时
+// Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存和鉴权，灵工只记录引用：提交工单或补充时
 // 传入 ID、Name、URL（及可选的 ContentType、Size），转出时写进 Gitea Issue；配置了 Config.FetchAttachment 时
 // 读取内容上传为 Gitea 附件。
 type Attachment struct {

@@ -16,7 +16,7 @@ func forwardedWithComment(st Status) *memStore {
 	return m
 }
 
-// 驳回先提交：之后的发送仲裁返回 false，评论留在灵问并审计 comment.withheld（source=system），不发事件，同一条只记一次；
+// 驳回先提交：之后的发送仲裁返回 false，评论留在灵工并审计 comment.withheld（source=system），不发事件，同一条只记一次；
 // 未驳回的工单取得租约，不记审计。
 func TestClaimCommentSendAfterRejectForwarded(t *testing.T) {
 	ctx := context.Background()

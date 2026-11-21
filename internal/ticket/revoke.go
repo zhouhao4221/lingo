@@ -246,7 +246,7 @@ func latestClose(ctx context.Context, tx Tx, id int64) (int, *TaskState, error) 
 
 // ClaimCommentSend 是补充评论外发与驳回的仲裁点：在锁定工单的短事务中判定，返回 true 表示 worker 取得发送租约，
 // 可以在 hold 内发出这条评论及其附件（完成后调用 ReleaseCommentSend）；返回 false 表示不发。
-//   - 工单已驳回（驳回先提交）：不发，评论留在灵问，置 withheld_at 并记审计 comment.withheld（source=system，同一条只记一次，不发事件）；
+//   - 工单已驳回（驳回先提交）：不发，评论留在灵工，置 withheld_at 并记审计 comment.withheld（source=system，同一条只记一次，不发事件）；
 //   - 否则写入租约（数据库时间 now() + hold）后提交：此后驳回在同一把工单锁下看到有效租约，不会在本次发送结束（或租约过期）前提交。
 //
 // 租约只在事务内写入，HTTP 请求在事务之外发出，不持有数据库连接与行锁。

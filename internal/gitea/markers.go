@@ -8,12 +8,12 @@ import (
 	"unicode/utf8"
 )
 
-// 灵问与 Gitea 之间的文本约定（PRD 3.2.2）：
+// 灵工与 Gitea 之间的文本约定（PRD 3.2.2）：
 //   - Issue 正文末尾的隐藏标记 <!-- lingo:ticket=<id> --> 关联工单，也用于 outbox 重试前查重；
 //   - 研发评论以 /reply 开头或含 <!-- lingo:public --> 表示面向提交人；
 //   - PR 正文 / 提交信息中的 Fixes owner/repo#N 等关闭关键词表示修复。
 
-// PublicMarker 是面向提交人的评论标记，灵问代研发发出的对外回复会自动带上。
+// PublicMarker 是面向提交人的评论标记，灵工代研发发出的对外回复会自动带上。
 const PublicMarker = "<!-- lingo:public -->"
 
 // ReplyCommand 是研发在评论开头声明“回复提交人”的命令。
@@ -43,7 +43,7 @@ func HasTicketMarker(body string, ticketID int64) bool {
 }
 
 // ParseTicketMarker 从 Issue 正文中取出工单 ID；没有标记时返回 0。
-// 有多个标记时取最后一个（灵问追加在正文末尾，研发引用的旧标记在前）。
+// 有多个标记时取最后一个（灵工追加在正文末尾，研发引用的旧标记在前）。
 func ParseTicketMarker(body string) int64 {
 	ms := ticketMarkerRe.FindAllStringSubmatch(body, -1)
 	if len(ms) == 0 {

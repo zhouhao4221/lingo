@@ -15,7 +15,7 @@ import (
 	"github.com/zhouhao4221/lingo/internal/notify"
 )
 
-// Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存，灵问只记录引用（ID、文件名、地址），
+// Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存，灵工只记录引用（ID、文件名、地址），
 // 以及转出到 Gitea 的结果。随工单 / 评论一起存在 jsonb 列中。
 type Attachment struct {
 	ID          string `json:"id"`            // 接入方的附件 ID，在整个工单（含补充评论）内唯一

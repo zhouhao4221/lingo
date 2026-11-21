@@ -27,11 +27,11 @@ func RejectMarker(ticketID int64) string {
 }
 
 // rejectComment 是机器人发到 Issue 的驳回原因评论：只署驳回人姓名（未记录姓名时不署名，不以用户 ID 代替），
-// 不写提交人的姓名、邮箱或用户 ID；原因中用户写入的灵问标记会被去掉。
+// 不写提交人的姓名、邮箱或用户 ID；原因中用户写入的灵工标记会被去掉。
 func rejectComment(ticketID int64, p closePayload) string {
-	head := "**灵问：该工单已驳回，关闭本 Issue。**"
+	head := "**灵工：该工单已驳回，关闭本 Issue。**"
 	if by := strings.TrimSpace(p.RejectedBy); by != "" {
-		head = "**灵问：该工单已由 " + escapeMarkdown(by) + " 驳回，关闭本 Issue。**"
+		head = "**灵工：该工单已由 " + escapeMarkdown(by) + " 驳回，关闭本 Issue。**"
 	}
 	return head + "\n\n驳回原因：\n\n" + quoteContent(p.Reason) + "\n\n" + RejectMarker(ticketID)
 }
@@ -68,7 +68,7 @@ func (w *Worker) postRejectComment(ctx context.Context, t *ticket.Ticket, p clos
 // sendClaimMargin 是发送租约在任务截止时间之外的余量：覆盖截止前刚发出的请求与进程间的计时差。
 const sendClaimMargin = 10 * time.Second
 
-// claimCommentSend 为补充评论取得发送租约。sent 为 false 表示工单已驳回、评论不发（已留在灵问并记审计），任务记为完成；
+// claimCommentSend 为补充评论取得发送租约。sent 为 false 表示工单已驳回、评论不发（已留在灵工并记审计），任务记为完成；
 // sent 为 true 时发送结束后须调用 release。
 //
 // 租约时长 = 本次任务 ctx 的剩余时限 + sendClaimMargin：任务内的所有 Gitea 请求（评论、附件上传、改评论）都用这个 ctx，

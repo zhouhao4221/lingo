@@ -2,7 +2,7 @@ package gitea
 
 import "time"
 
-// 以下类型对照 Gitea v1.27.3 swagger，只保留灵问用到的字段。
+// 以下类型对照 Gitea v1.27.3 swagger，只保留灵工用到的字段。
 
 // User 是 Gitea 用户。
 type User struct {
@@ -142,7 +142,7 @@ type Comment struct {
 	Assets    []*Attachment `json:"assets"`
 }
 
-// Timeline 事件类型（TimelineComment.Type）中灵问关心的取值。
+// Timeline 事件类型（TimelineComment.Type）中灵工关心的取值。
 const (
 	TimelineComment    = "comment"
 	TimelineClose      = "close"

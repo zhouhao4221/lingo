@@ -36,11 +36,11 @@ type Config struct {
 	Authenticate Authenticator
 	Notifier     Notifier // 可空，为空时不回传进展
 	Tools        []Tool
-	// FetchAttachment 读取附件内容（可选）。附件由接入方自己的附件系统保存，灵问只记录引用；配置后转出 Issue 时
+	// FetchAttachment 读取附件内容（可选）。附件由接入方自己的附件系统保存，灵工只记录引用；配置后转出 Issue 时
 	// 经它读取内容上传为 Gitea 附件（图片在 Issue 中直接显示，单个最多 100 MB）；为空时只把附件地址写进 Issue。
-	// 灵问不会自己请求附件 URL（避免以服务端身份访问用户填写的地址）。
+	// 灵工不会自己请求附件 URL（避免以服务端身份访问用户填写的地址）。
 	//
-	// userID 是提交该附件的用户（工单提交人或补充评论的作者）。附件 ID 由调用方传入、灵问不校验归属，接入方必须确认
+	// userID 是提交该附件的用户（工单提交人或补充评论的作者）。附件 ID 由调用方传入、灵工不校验归属，接入方必须确认
 	// 该附件属于此用户（或其有权访问），否则返回 ErrNotFound / ErrForbidden——该附件不会上传，Issue 中注明未能上传。
 	// 其他错误视为临时错误，随任务重试，连续失败 3 次后同样注明。
 	FetchAttachment func(ctx context.Context, userID string, a Attachment) (io.ReadCloser, error)
@@ -67,7 +67,7 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// Lingo 是一个灵问实例。
+// Lingo 是一个灵工实例。
 type Lingo struct {
 	cfg      Config
 	log      *slog.Logger
@@ -361,9 +361,9 @@ func (l *Lingo) fetchBotLogin() {
 // 并立即返回，由 Run 中的 worker 处理。未配置 Config.Gitea.WebhookSecret 时拒绝所有投递（503）。
 func (l *Lingo) WebhookHandler() http.Handler { return l.webhook }
 
-// MarkDeployed 告知灵问仓库 repo（"owner/name"）的版本 tag 已在环境 env（为空取 "production"）上线，
+// MarkDeployed 告知灵工仓库 repo（"owner/name"）的版本 tag 已在环境 env（为空取 "production"）上线，
 // 修复版本不晚于它的工单变为已上线并通知提交人；用于部署流水线不经 Gitea Actions / 提交状态上报的场景。
-// 灵问尚未记录该版本（Release 或 tag 未同步）时返回 ErrNotFound。
+// 灵工尚未记录该版本（Release 或 tag 未同步）时返回 ErrNotFound。
 func (l *Lingo) MarkDeployed(ctx context.Context, repo, tag, env string) error {
 	if repo == "" || tag == "" {
 		return fmt.Errorf("%w: repo and tag are required", ErrInvalidInput)

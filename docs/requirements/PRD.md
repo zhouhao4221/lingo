@@ -2,8 +2,8 @@
 
 | 字段 | 内容 |
 |-----|------|
-| 产品名称 | 灵问 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
-| 文档版本 | v1.24 |
+| 产品名称 | 灵工 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
+| 文档版本 | v1.26 |
 | 创建日期 | 2026-11-13 |
 | 最后更新 | 2026-11-21 |
 | 文档负责人 | haiqing |
@@ -18,27 +18,28 @@
 | v1.0 | 2026-11-13 | haiqing | 初始版本（模板） |
 | v1.1 | 2026-11-13 | haiqing | 按现有架构设计回填概述、用户、功能、数据、技术方案等章节 |
 | v1.2 | 2026-11-13 | haiqing | 调整产品定位为 Agent 研发与用户的问答平台，重写背景与用户画像；并入数据库迁移约定 |
-| v1.3 | 2026-11-13 | haiqing | 研发方明确为 Agent AI 智能开发团队；灵问定位为知识问答 Agent；新增 MCP、开放接口、固定角色多用户 |
+| v1.3 | 2026-11-13 | haiqing | 研发方明确为 Agent AI 智能开发团队；灵工定位为知识问答 Agent；新增 MCP、开放接口、固定角色多用户 |
 | v1.4 | 2026-11-13 | haiqing | 新增项目与对接仓库：前后端多仓库归属一个项目，按项目授权与提问，Issue 落到项目内合适仓库；新增对接版本记录：同步 Gitea Release、工单关联修复版本 |
 | v1.5 | 2026-11-13 | haiqing | 新增浏览器 JS 接入：嵌入问答组件、JS API、公开 Key 与域名白名单、身份令牌 |
 | v1.6 | 2026-11-13 | haiqing | 新增基于人员权限的业务数据请求：数据接口登记、代用户调用、双重权限校验、审计 |
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.26 | 2026-11-21 | haiqing | 产品中文名由「灵问」改为「灵工」（英文名 Lingo 不变）；新增可由接入方配色的 Logo（`assets/logo/`） |
 | v1.25 | 2026-11-21 | haiqing | 新增转研发后驳回（REQ-002）：`RejectForwardedTicket` / `POST /tickets/{id}/reject-forwarded` / MCP `reject_forwarded_ticket`（reviewer / admin，原因必填），工单保留并改为 `rejected`，经 outbox 只关闭关联主 Issue（可重试、防重复），进度与重试 `TicketIssueClose` / `RetryTicketIssueClose`；驳回后 Gitea 回流不覆盖本地结论；新增只读迁移检查 `lingo.CheckMigrations` |
 | v1.24 | 2026-11-21 | haiqing | 新增需求多视角补充（REQ-001；视角标签 `<前缀>/视角/<视角名>`）：固定视角使用者 / 业务方 / 专家 / 决策者（`User.Perspective`，由 `Authenticate` 提供，与权限角色无关）；需求类工单可由各视角追加补充（转出前后均可、只追加），Issue 正文按视角分层渲染（标记区块，单向同步）并打固定视角标签；必填视角（`Config` 默认、`Project` 覆盖）与缺失标注；新增事件 `ticket.perspective_added`、`ticket.perspective_missing`；数据隔离新增两条例外：补充人与首段提交人姓名写入 Issue、视角补充的追加与查询由 `Config.AuthorizePerspective` 判定（未配置时同工单可见范围） |
 | v1.23 | 2026-11-21 | haiqing | 数据模型精简：表名统一加 `lingo_` 前缀（避免与接入方业务表重名）；表从 23 张减到 12 张——尚未实现的问答、知识库、需求评审、业务数据审计、多仓库拆单的表待实现时再经新迁移加入，自动转出覆盖值、上线记录并为项目 / 版本上的 jsonb 列，后台确认记录并入工单审计（`triage.*`），Webhook 连通时间与对账游标合并为 `lingo_repo_state`；附件不再存数据库：由接入方自己的附件系统保存与鉴权，提交时传引用（ID、文件名、地址），转出时经可选的 `Config.FetchAttachment` 读取内容上传为 Gitea 附件，未配置时只把地址写进 Issue；去掉 `UploadAttachment` / `GetAttachment`、`POST /attachments`、`GET /attachments/{id}` 与 `MaxAttachmentBytes`；`conversation_id` 随问答一并延后 |
 | v1.22 | 2026-11-21 | haiqing | 模型用量与缓存：解析接口返回的 token 用量（含命中服务端前缀缓存的部分：OpenAI `cached_tokens`、DeepSeek `prompt_cache_hit_tokens`），每次调用写入 `llm_usage` 并记日志；`l.LLMUsage` / `GET /usage` / MCP `get_llm_usage`（admin）按天、用途、模型汇总并给出缓存命中率；自定义模型可实现 `UsageModel` 报告用量；建单整理的提示词按“不变在前、变化在后”排布；进程内缓存（Issue 模板、标签、整理结果）统一为带过期时间与容量上限的 `internal/cache` |
 | v1.21 | 2026-11-21 | haiqing | 内置模型适配：`NewOpenAIModel`（OpenAI 及兼容接口，Chat Completions + Embeddings）、`NewDeepSeekModel`（DeepSeek，无向量接口）；标准库 HTTP 实现，429 / 5xx / 网络错误重试两次 |
-| v1.20 | 2026-11-21 | haiqing | 建 Issue 前用轻量模型整理工单：新增 `Config.LightModel`（为空时用 `Model`，都为空按原内容建单），`Config.Model` 改为可选；生成标题（只改写灵问从正文生成的标题；提交人自己写的、后台确认转出的保留）、从描述中抽取模板字段（只采纳模板中的字段与选项，提交人已填的不改）、整理描述；Issue 末尾附提交人原始描述；模型失败或超时按原内容建单；不向模型发送提交人身份。后台预览留待下一步 |
+| v1.20 | 2026-11-21 | haiqing | 建 Issue 前用轻量模型整理工单：新增 `Config.LightModel`（为空时用 `Model`，都为空按原内容建单），`Config.Model` 改为可选；生成标题（只改写灵工从正文生成的标题；提交人自己写的、后台确认转出的保留）、从描述中抽取模板字段（只采纳模板中的字段与选项，提交人已填的不改）、整理描述；Issue 末尾附提交人原始描述；模型失败或超时按原内容建单；不向模型发送提交人身份。后台预览留待下一步 |
 | v1.19 | 2026-11-20 | haiqing | 提交人在 need_info 时补充后由机器人移除 Issue 上的需补充标签；被合并工单的提交人随目标工单收到对外进展（事件挂在各自工单上）；README 与接入示例更新 |
 | v1.18 | 2026-11-20 | haiqing | 定时对账落地：`Run` 按 `Config.ReconcileInterval`（默认 10 分钟，负数关闭）对每个仓库按 PR → Issue → 评论 → 版本增量拉取（游标回看 2 分钟，首次回看 24 小时），补齐 Webhook 漏掉的合并、关闭 / 重开、领取、标签、对外评论与版本；Issue 按快照对齐，只在快照新于已采纳状态时生效；多实例时只有一个执行；某类失败不前移游标 |
 | v1.17 | 2026-11-20 | haiqing | 启动自检落地：`Run` 启动时后台执行、结果写日志，也可调用 `l.SelfCheck(ctx)` 获取；`AutoRegisterWebhook` 时查找或创建 / 修正 Webhook，并发测试投递确认能到达 `WebhookHandler`（未到达时提示 `ALLOWED_HOST_LIST`）；补齐 `type/*`、`review/*` 标签；新增 `Config.SkipSelfCheck` |
 | v1.16 | 2026-11-20 | haiqing | MCP Server 落地（14 个工具，与 REST 对齐）；研发 Agent 可经 `reply_ticket` 回复提交人；新增 Go 方法 `ListProjects`、`ListReleases`、`GetRelease` 与 REST `GET /projects`、`GET /releases`、`GET /releases/{id}` |
 | v1.15 | 2026-11-20 | haiqing | 版本与上线落地：处理 `release`（published / updated，草稿忽略，deleted 保留记录）、`create`（只打 tag，按 semver 后缀识别预发布）、`status`、`workflow_run` 事件与 `MarkDeployed`；正式版本逐个检查已修复工单的修复提交是否包含在该 tag 中（不依赖版本先后，维护分支并行发版也适用），修复提交未知的按说明中对本仓库 Issue 的引用补漏，工单 fixed → released 并发 `ticket.released`；预发布只记录关联；只认版本号形式的 tag，且 tag 已有 Release 时以 Release 为准；上线时修复提交包含在上线版本中的 released 工单 → deployed 并发 `ticket.deployed`，版本已上线后才关联的工单发布即上线；上线信号先于版本到达时等待 2 分钟，带 tag 的信号之后按 tag 补建版本 |
-| v1.14 | 2026-11-20 | haiqing | 附件与补充评论落地：`UploadAttachment` / `GetAttachment` / `AddTicketComment`，REST `POST /attachments`（multipart）、`GET /attachments/{id}`、`POST /tickets/{id}/comments`；附件随 Issue 上传并在正文引用，转出时可勾选；建单前的补充写进 Issue 正文，建单后的补充由机器人发为 Issue 评论并上传评论附件；Gitea 拒收的附件只留在灵问并在 Issue 中注明；未关联工单的附件 24 小时后清理 |
+| v1.14 | 2026-11-20 | haiqing | 附件与补充评论落地：`UploadAttachment` / `GetAttachment` / `AddTicketComment`，REST `POST /attachments`（multipart）、`GET /attachments/{id}`、`POST /tickets/{id}/comments`；附件随 Issue 上传并在正文引用，转出时可勾选；建单前的补充写进 Issue 正文，建单后的补充由机器人发为 Issue 评论并上传评论附件；Gitea 拒收的附件只留在灵工并在 Issue 中注明；未关联工单的附件 24 小时后清理 |
 | v1.13 | 2026-11-20 | haiqing | REST `Handler` 落地（工单、后台确认、待确认列表与统计、变更流、自动转出开关、`GET /ticket-types`）；新增 Go 方法 `ListMyTickets`、`ListTicketComments`、`TicketTypes`、`AutoForwardSettings`；实现 `ListTriage`、`TriageSummary`、`ListEvents` 与待确认超时提醒；变更流只返回早于所有进行中事务的事件，游标不会跳过；PostgreSQL 最低 13 |
-| v1.12 | 2026-11-18 | haiqing | 工单提交与后台确认落地：Go 方法 `CreateTicket`、`ForwardTicket`、`AnswerTicket`、`MergeTicket`、`RejectTicket` 与公开错误 `ErrInvalidInput` / `ErrForbidden` / `ErrConflict`；项目在 `Run` 启动或首次调用时同步入库（不停用配置中删掉的项目与仓库，以当前 Config 为准校验，避免滚动发布时旧实例停掉新项目）；建 Issue 经 outbox 执行，重试时按隐藏标记查重，用户文本中的灵问标记被去掉，Issue 正文不含提交人身份；建单被放弃时工单变为 `abnormal`，可再次转出 |
+| v1.12 | 2026-11-18 | haiqing | 工单提交与后台确认落地：Go 方法 `CreateTicket`、`ForwardTicket`、`AnswerTicket`、`MergeTicket`、`RejectTicket` 与公开错误 `ErrInvalidInput` / `ErrForbidden` / `ErrConflict`；项目在 `Run` 启动或首次调用时同步入库（不停用配置中删掉的项目与仓库，以当前 Config 为准校验，避免滚动发布时旧实例停掉新项目）；建 Issue 经 outbox 执行，重试时按隐藏标记查重，用户文本中的灵工标记被去掉，Issue 正文不含提交人身份；建单被放弃时工单变为 `abnormal`，可再次转出 |
 | v1.11 | 2026-11-18 | haiqing | Webhook 回流规则补充：新增事件 `ticket.scheduled`（排期）；Issue 关闭但尚无修复 PR 时等待 30 秒再判定；重开清除修复记录；标签全名带 `LabelPrefix`（如 `lingo/review/need-info`） |
 | v1.9 | 2026-11-18 | haiqing | 细化 Gitea 对接（含启动自检；调研见 [gitea-integration.md](../architecture/gitea-integration.md)）：按仓库 Issue 表单模板提单、评论往来与对外回复规则、工单状态机、PR 合并识别修复、按 tag 区间提交关联版本、上线信号、Webhook 自动注册与对账；Gitea 最低 1.22 |
 
@@ -58,14 +59,14 @@
 - **知识没有沉淀**：问答散落在各处，同样的问题被反复提出、反复解答。
 
 **机会**：做一个可嵌入业务项目的知识问答 Agent Go 库，站在用户与 AI 研发团队之间：
-- 先由灵问基于知识库直接回答，能答的当场解决；
+- 先由灵工基于知识库直接回答，能答的当场解决；
 - 答不了的，整理成结构化、带上下文的 Issue 交给 AI 研发团队，处理进展自动回传用户；
 - 业务项目 `import "github.com/zhouhao4221/lingo"` 即可嵌入，通过 Go 接口、HTTP Handler 与 MCP，让业务系统、用户侧的 AI 客户端和研发侧的 Agent 都能直接接入；
-- 每一次问答与 Issue 处理都回流知识库，让灵问越用越聪明。
+- 每一次问答与 Issue 处理都回流知识库，让灵工越用越聪明。
 
 ### 1.2 产品愿景
 
-灵问是可嵌入业务项目的知识问答 Agent Go 库，连接 Agent AI 智能开发团队与用户：用户随时提问，灵问能答即答，答不了的转成 AI 研发团队能直接处理的任务，结果自动回到用户手中，每一次问答都让知识库更完整。
+灵工是可嵌入业务项目的知识问答 Agent Go 库，连接 Agent AI 智能开发团队与用户：用户随时提问，灵工能答即答，答不了的转成 AI 研发团队能直接处理的任务，结果自动回到用户手中，每一次问答都让知识库更完整。
 
 ### 1.3 目标与成功指标
 
@@ -96,7 +97,7 @@
 - 知识库：结案工单与问答会话自动抽取问答对，供问答 Agent 检索
 
 **不包含（Out of Scope）**：
-- AI 研发 Agent 本身（领取 Issue、写代码、提 PR 由研发侧 Agent 完成，灵问只负责交付任务与回传结果）
+- AI 研发 Agent 本身（领取 Issue、写代码、提 PR 由研发侧 Agent 完成，灵工只负责交付任务与回传结果）
 - 替代 Gitea 的研发协作功能（看板、代码评审、CI 等）
 - 支持 Gitea 以外的代码托管平台（GitHub、GitLab 等）
 - 前端界面（原 Web 门户、管理后台、浏览器 JS 嵌入 SDK 均不提供），界面由接入方自行实现
@@ -116,7 +117,7 @@
 |---------|---------|---------|---------|---------|
 | 接入开发者 | 集成 lingo 的业务项目的开发者 | `import` lingo，配置 `lingo.Config`，挂载 Handler、运行 worker，实现 Model / Notifier / Tool | 自建反馈与问答通道成本高 | 以 Go 库方式嵌入，复用业务项目已有的登录、用户体系与界面 |
 | 用户（external） | 使用研发团队交付的产品的人，无 Gitea 账号，不关心研发流程；经接入方界面或 MCP 使用 | 不会用、遇到 Bug、希望增加功能 | 不知道找谁问；问题说不清；提了之后石沉大海 | 随时提问、即时得到答复；答不了的有人跟进，进展主动告知 |
-| AI 研发 Agent | Agent AI 智能开发团队中的 AI Agent，在 Gitea 领取并处理 Issue；经 MCP 使用 | 读取灵问转出的 Issue，开发修复后在 Issue 中回复；通过 MCP 查询知识库与问题上下文 | 需求描述模糊、缺少复现信息时无法直接动手 | 拿到结构化、可执行的任务；处理结果自动回传用户 |
+| AI 研发 Agent | Agent AI 智能开发团队中的 AI Agent，在 Gitea 领取并处理 Issue；经 MCP 使用 | 读取灵工转出的 Issue，开发修复后在 Issue 中回复；通过 MCP 查询知识库与问题上下文 | 需求描述模糊、缺少复现信息时无法直接动手 | 拿到结构化、可执行的任务；处理结果自动回传用户 |
 | 研发负责人（reviewer） | 监督 AI 研发团队的人类工程师 / 产品；经接入方界面或 MCP 使用 | 评审需求、把关 AI 产出、处理 AI 无法解决的问题、审核知识库 | 需求来源杂，评审结论难留痕 | 统一评审入口，结论自动同步 Gitea 与用户 |
 
 ### 2.2 用户旅程
@@ -127,16 +128,16 @@ journey
   title 用户提问并获得答复
   section 提问
     在接入方界面/AI 助手(MCP)提问: 4: 用户
-    灵问基于知识库直接回答: 5: 灵问
+    灵工基于知识库直接回答: 5: 灵工
   section 转出
     答不了，确认转为工单: 3: 用户
-    整理为结构化 Issue: 5: 灵问
+    整理为结构化 Issue: 5: 灵工
   section 处理
     AI Agent 领取并处理: 4: AI 研发 Agent
     需求评审与把关: 3: 研发负责人
   section 反馈
     收到处理结果通知: 5: 用户
-    问答回流知识库: 5: 灵问
+    问答回流知识库: 5: 灵工
 ```
 
 ### 2.3 竞品分析
@@ -177,7 +178,7 @@ journey
 
 #### 3.2.0 知识问答 Agent
 
-**功能描述**：灵问本身是一个知识问答 Agent。用户从任一入口提问，灵问检索知识库并结合 LLM 生成回答；无法回答或用户不满意时，引导用户补充信息并转为工单。
+**功能描述**：灵工本身是一个知识问答 Agent。用户从任一入口提问，灵工检索知识库并结合 LLM 生成回答；无法回答或用户不满意时，引导用户补充信息并转为工单。
 
 **用户故事**：
 > 作为用户，我希望提问后立刻得到答复；答不了时，系统帮我把问题整理清楚交给研发，而不是让我重新描述一遍。
@@ -200,18 +201,18 @@ flowchart LR
 
 **业务规则**：
 - 回答需附知识来源（知识条目 / 历史工单），无可靠依据时不编造，直接说明并引导转工单
-- 转工单前由灵问追问关键信息（Bug：复现步骤、期望与实际结果、版本；需求：场景与期望），整理成 AI 研发 Agent 可执行的 Issue 模板
+- 转工单前由灵工追问关键信息（Bug：复现步骤、期望与实际结果、版本；需求：场景与期望），整理成 AI 研发 Agent 可执行的 Issue 模板
 - 转工单需用户确认，会话记录随工单附带
 - 模型服务由接入方经 `Config.Model`（`lingo.Model` 接口：Chat + Embed）提供；提示词是否可配置：待定
 
 **验收标准**：
-- [ ] 知识库已有答案的问题，灵问直接回答并给出来源
+- [ ] 知识库已有答案的问题，灵工直接回答并给出来源
 - [ ] 知识库无答案时不编造，引导转为工单
 - [ ] 转出的 Issue 包含结构化的问题描述、复现信息与原始会话链接
 
 #### 3.2.0.1 公开 API：Go 接口、HTTP Handler 与 MCP
 
-**功能描述**：灵问只提供公开 Go API：单一公开包（根包 `lingo`），其余实现位于 `internal/`。`lingo.New` 返回的实例 `l` 提供以下接入形式，能力一致：
+**功能描述**：灵工只提供公开 Go API：单一公开包（根包 `lingo`），其余实现位于 `internal/`。`lingo.New` 返回的实例 `l` 提供以下接入形式，能力一致：
 - **Go 方法**：`Ask`、`CreateTicket`、`GetTicket`、`ReplyTicket`、`Review`、`SearchKnowledge`、`ListReleases` 等，接入方可不走 HTTP 直接调用
 - **REST JSON 接口**：`l.Handler()`，提供提问、工单、评审、知识库、版本能力
 - **MCP Server**：`l.MCPHandler()`，Streamable HTTP，以 MCP 工具形式暴露能力，与 REST 对齐，供用户侧 AI 客户端（IDE、桌面助手等）和研发侧 AI Agent 直接调用
@@ -263,7 +264,7 @@ flowchart LR
 | 管理员 | `admin` | 全部权限 |
 
 **用户故事**：
-> 作为接入开发者，我希望沿用业务项目已有的登录与用户体系，只把当前用户映射为灵问的固定角色，不必维护第二套账号。
+> 作为接入开发者，我希望沿用业务项目已有的登录与用户体系，只把当前用户映射为灵工的固定角色，不必维护第二套账号。
 
 **业务规则**：
 - 角色集合固定，权限随角色内置，不提供角色编辑
@@ -277,10 +278,10 @@ flowchart LR
 
 #### 3.2.0.3 项目与对接仓库（代码声明）
 
-**功能描述**：灵问以**项目**为对接单位。一个项目可包含多个 Gitea 仓库（如前端、后端、移动端）。项目与仓库由接入方在 `Config.Projects`（`[]lingo.Project`）中声明，`New` 时同步入库；提问或提交工单时指定项目（可进一步指定仓库），问答在整个项目范围内进行，转出的 Issue 落到项目下合适的仓库。
+**功能描述**：灵工以**项目**为对接单位。一个项目可包含多个 Gitea 仓库（如前端、后端、移动端）。项目与仓库由接入方在 `Config.Projects`（`[]lingo.Project`）中声明，`New` 时同步入库；提问或提交工单时指定项目（可进一步指定仓库），问答在整个项目范围内进行，转出的 Issue 落到项目下合适的仓库。
 
 **用户故事**：
-> 作为用户，我只关心“哪个产品出了问题”，不想分辨是前端还是后端；我希望选择项目后提问，由灵问判断问题该交给哪个仓库。
+> 作为用户，我只关心“哪个产品出了问题”，不想分辨是前端还是后端；我希望选择项目后提问，由灵工判断问题该交给哪个仓库。
 >
 > 作为接入开发者，我希望在代码中把一个产品的前后端仓库声明到同一个项目下，并设置项目内的默认仓库。
 
@@ -321,7 +322,7 @@ flowchart LR
 
 #### 3.2.0.4 对接版本记录
 
-**功能描述**：灵问同步各对接仓库在 Gitea 中的版本记录（Release / Tag 及版本说明），用于三件事：
+**功能描述**：灵工同步各对接仓库在 Gitea 中的版本记录（Release / Tag 及版本说明），用于三件事：
 - **问答**：版本说明入知识库，回答“最新版本有什么变化”“这个问题在哪个版本修复了”“某功能从哪个版本开始支持”
 - **关联**：以两个版本 tag 之间的提交为准定位已发布的修复，版本说明中的 Issue 引用（如 `closes #12`、`#12`）补漏，把工单与修复版本关联
 - **通知**：包含某工单的版本发布后，通知提交人“已在 vX.Y.Z 发布”；识别到上线后再通知“已上线”
@@ -358,7 +359,7 @@ flowchart LR
 - 跨仓库工单（一个工单对应前端、后端多个 Issue）：所有关联 Issue 的修复都已发布才算 `released`，都已上线才算 `deployed`
 - 上线识别（Gitea 无 Deployment API），按仓库配置 `Repo.Deploy`，任一信号命中即视为该版本上线：
   - Gitea Actions（需 Gitea ≥ 1.25）：`workflow_run` 事件 `completed` 且 `conclusion=success`，工作流文件名匹配 `Deploy.Workflow`，以 run 的 `head_sha` / tag 对应版本；补偿用 `GET /actions/runs`
-  - 提交状态：外部 CI/CD 调用 `POST /statuses/{sha}`，`context` 等于 `Deploy.StatusContext`（如 `deploy/production`）且 `state=success`，灵问经 `status` 事件识别
+  - 提交状态：外部 CI/CD 调用 `POST /statuses/{sha}`，`context` 等于 `Deploy.StatusContext`（如 `deploy/production`）且 `state=success`，灵工经 `status` 事件识别
   - 接入方调用 `l.MarkDeployed(ctx, repo, tag, env)`（始终可用的兜底）
 - 研发约定：PR 正文写 `Fixes owner/repo#N`（Gitea 关闭关键词，PR 合并后自动关闭 Issue）
 - 提交 Bug 时可填写当前使用版本（Go 方法 / HTTP 接口 / MCP 参数 `version`），问答 Agent 据此判断问题是否已在更新版本修复，并提示升级
@@ -374,7 +375,7 @@ flowchart LR
 | `get_release` | 查看某版本的说明与关联工单 |
 
 **验收标准**：
-- [ ] Gitea 发布 Release 后，灵问在 1 分钟内同步该版本记录
+- [ ] Gitea 发布 Release 后，灵工在 1 分钟内同步该版本记录
 - [ ] 修复 PR 已合并的工单，在包含该合并提交的版本发布后显示修复版本，提交人收到发布通知；版本说明未写 `#N` 时同样能关联
 - [ ] 配置的部署工作流成功、提交状态成功或调用 `MarkDeployed` 后，相关工单变为已上线，提交人收到通知
 - [ ] 用户问“某问题在哪个版本修复”时，问答 Agent 能给出版本号并附版本说明来源
@@ -382,12 +383,12 @@ flowchart LR
 
 #### 3.2.0.5 基于人员权限的业务数据请求（Tool 函数）
 
-**功能描述**：问答过程中，灵问可以**以提问人员的身份**调用接入方注册的业务数据工具（`lingo.Tool`，Go 函数），查询数据或提交业务操作，把结果用于回答或附到工单中。是否能取到数据、能取到哪些数据，由该人员的权限决定，灵问不持有超越用户本人的权限。
+**功能描述**：问答过程中，灵工可以**以提问人员的身份**调用接入方注册的业务数据工具（`lingo.Tool`，Go 函数），查询数据或提交业务操作，把结果用于回答或附到工单中。是否能取到数据、能取到哪些数据，由该人员的权限决定，灵工不持有超越用户本人的权限。
 
 **用户故事**：
-> 作为用户，我问“我昨天提交的订单 1024 为什么审批失败”，希望灵问直接查到这张订单的状态和失败原因来回答，而不是让我截图。
+> 作为用户，我问“我昨天提交的订单 1024 为什么审批失败”，希望灵工直接查到这张订单的状态和失败原因来回答，而不是让我截图。
 >
-> 作为接入方，我希望灵问只能看到当前用户本人有权看到的数据，并且每一次数据请求都有记录可查。
+> 作为接入方，我希望灵工只能看到当前用户本人有权看到的数据，并且每一次数据请求都有记录可查。
 
 **人员信息**：
 
@@ -396,9 +397,9 @@ flowchart LR
 | `Authenticate` 返回的 `lingo.User` | `ID`（接入方用户 ID）、`Name`、`Email`、`Role` |
 | `User.Scopes` | 用户可用的数据权限，如 `order:read`、`order:read:dept`、`leave:apply` |
 
-> 人员信息与权限由接入方提供，灵问只校验和使用，不自行修改。
+> 人员信息与权限由接入方提供，灵工只校验和使用，不自行修改。
 
-**工具注册**：接入方在 `Config.Tools`（`[]lingo.Tool`）中注册可供灵问调用的业务数据工具：
+**工具注册**：接入方在 `Config.Tools`（`[]lingo.Tool`）中注册可供灵工调用的业务数据工具：
 
 | 字段 | 说明 |
 |-----|-----|
@@ -427,7 +428,7 @@ flowchart LR
 ```
 
 **业务规则**：
-- **代用户请求，双重校验**：灵问先校验 `User.Scopes` 含 `Tool.Scope`；`Call` 收到当前 `lingo.User`，业务侧必须在 `Call` 内按该用户的权限二次校验并做数据范围过滤。灵问不使用任何超级账号
+- **代用户请求，双重校验**：灵工先校验 `User.Scopes` 含 `Tool.Scope`；`Call` 收到当前 `lingo.User`，业务侧必须在 `Call` 内按该用户的权限二次校验并做数据范围过滤。灵工不使用任何超级账号
 - **只用于本次会话**：取到的数据只用于本次会话，不写入知识库，不用于回答其他用户
 - **操作需确认**：`write` 类工具必须向用户展示将要提交的内容并经明确确认后才调用；防重复提交：调用方传入幂等键（idempotency key），同一用户 + 工具 + 幂等键只执行一次，记录于 `data_requests.idempotency_key`
 - **转工单时的数据**：业务数据随工单转给 AI 研发 Agent 前需用户同意，并按 `Sensitive` 脱敏
@@ -437,8 +438,8 @@ flowchart LR
 
 **验收标准**：
 - [ ] 接入方可在 `Config.Tools` 注册工具并配置 `Scope`、`Mode` 与 `Sensitive`
-- [ ] 具备权限的用户提问时，灵问以其身份调用 `Call` 并基于返回数据回答
-- [ ] 不具备权限的用户无法触发调用；`Call` 拒绝时灵问如实告知
+- [ ] 具备权限的用户提问时，灵工以其身份调用 `Call` 并基于返回数据回答
+- [ ] 不具备权限的用户无法触发调用；`Call` 拒绝时灵工如实告知
 - [ ] `write` 类工具未经用户确认不会被调用
 - [ ] 每次请求均有审计记录；业务数据不进入知识库，转工单时按 `Sensitive` 脱敏
 
@@ -459,7 +460,7 @@ flowchart LR
 
 - **越权返回 404**：访问不属于自己的工单、附件时返回“不存在”，不暴露其存在
 - **存储层强制带范围**：store 层查询函数必须接收访问范围（用户 ID / 项目集合），不提供不带范围的列表查询；测试覆盖越权场景
-- **对 Gitea 脱敏**：Issue 与评论中不写提交人姓名、邮箱、手机号与业务系统账号，只写工单号（`lingo:ticket=<id>`）；例外：需求视角区块在 Issue 中标注补充人 `User.Name` 与首段提交人姓名（不含邮箱与 `User.ID`，见 3.2.2.1）；研发需要联系提交人时通过灵问评论往来。附件转出前由后台人员勾选（3.2.1.2）
+- **对 Gitea 脱敏**：Issue 与评论中不写提交人姓名、邮箱、手机号与业务系统账号，只写工单号（`lingo:ticket=<id>`）；例外：需求视角区块在 Issue 中标注补充人 `User.Name` 与首段提交人姓名（不含邮箱与 `User.ID`，见 3.2.2.1）；研发需要联系提交人时通过灵工评论往来。附件转出前由后台人员勾选（3.2.1.2）
 - **研发回复的可见性**：只有按 `ReplyMode` 判定为对外的评论（3.2.2）才出现在提交人的工单详情中
 - **知识库**：从工单抽取问答对时去除提交人身份信息与附件内容；业务数据工具的结果不入库（3.2.0.5）
 - **合并工单**：被合并工单的提交人只能看到目标工单的对外进展，看不到其他提交人的内容与附件
@@ -626,7 +627,7 @@ flowchart LR
 
 #### 3.2.2 工单提交与 Gitea 同步
 
-**功能描述**：用户经 Go 方法、REST 接口或 MCP 提交工单（或由问答 Agent 转出），灵问以机器人账号在项目内确定的仓库（规则见 3.2.0.3）按仓库的 Issue 表单模板创建 Issue，打上作用域标签并保存 `repo + issue number` 关联；之后用户与研发经 Issue 评论往来，Gitea 侧变更经 Webhook 回流并定时对账。接口与事件明细见 [Gitea 对接调研](../architecture/gitea-integration.md)。
+**功能描述**：用户经 Go 方法、REST 接口或 MCP 提交工单（或由问答 Agent 转出），灵工以机器人账号在项目内确定的仓库（规则见 3.2.0.3）按仓库的 Issue 表单模板创建 Issue，打上作用域标签并保存 `repo + issue number` 关联；之后用户与研发经 Issue 评论往来，Gitea 侧变更经 Webhook 回流并定时对账。接口与事件明细见 [Gitea 对接调研](../architecture/gitea-integration.md)。
 
 **用户故事**：
 > 作为用户，我希望不用登录 Gitea 就能提交问题并看到处理进度。
@@ -657,7 +658,7 @@ flowchart LR
   5. Webhook 存在、已启用、事件订阅完整，测试投递成功；失败时提示检查 Gitea `[security] ALLOWED_HOST_LIST`
   6. `Repo.Templates` 中的模板文件存在，`GET /issue_config/validate` 通过
   7. 配置了 `Repo.Deploy.Workflow` 时，`GET /actions/workflows` 中能找到该工作流
-- 灵问对仓库设置只读；写操作仅限标签、Webhook 与 Issue 相关接口，不修改仓库属性、分支保护、协作者等，不需要管理员 token
+- 灵工对仓库设置只读；写操作仅限标签、Webhook 与 Issue 相关接口，不修改仓库属性、分支保护、协作者等，不需要管理员 token
 
 **模板提单**：
 - `GET /repos/{o}/{r}/issue_templates` 读取仓库 `.gitea/ISSUE_TEMPLATE/`（兼容 `.github/`）下的模板；工单类型到模板的映射见 `Repo.Templates`，未配置时按模板 `labels` 匹配类型标签，都没有时用内置结构（现象 / 复现步骤 / 期望 / 环境）
@@ -694,7 +695,7 @@ flowchart LR
 `issues` reopened 时回到 `in_progress`、清除已记录的修复 PR 与提交并通知提交人；`issue_milestone` milestoned 时记录计划版本与截止日期，经 `ticket.scheduled` 通知提交人。
 
 回流处理细则（`internal/ticket`、`internal/worker`）：
-- 指派、标签、里程碑、关闭 / 重开等状态类事件只是触发器：worker 先 `GET /issues/{index}` 读取当前状态再判定，返回 404 时按 Issue 已删除处理（`abnormal`）；与灵问工单无关的 Issue 直接跳过，不调用 Gitea
+- 指派、标签、里程碑、关闭 / 重开等状态类事件只是触发器：worker 先 `GET /issues/{index}` 读取当前状态再判定，返回 404 时按 Issue 已删除处理（`abnormal`）；与灵工工单无关的 Issue 直接跳过，不调用 Gitea
 - PR 合并经关闭关键词自动关闭 Issue 时，`issues` closed 常先于 `pull_request` merged 到达：Issue 关闭而工单尚无修复 PR 时，等待 30 秒、且队列中没有同项目仓库更早收到的未处理 PR 合并投递（失败过的不计）后再判定；Gitea 读取 Issue 返回 404 记为 `abnormal`，之后又能读到时按当前状态恢复，避免先把工单误判为 `closed` 并通知提交人
 - 只有带关闭关键词（`Fixes #N` 等）的 PR 合并才记为 `fixed`；仅提及的 PR 打开时工单进入 `in_progress`
 - `need_info` 由带前缀的标签全名判定，如 `lingo/review/need-info`；标签移除后回到 `in_progress`
@@ -783,7 +784,7 @@ flowchart LR
 
 #### 3.2.3 信息反馈（Notifier）
 
-**功能描述**：工单状态变化、待确认与处理、评审结论、Issue 评论、修复版本发布与上线时，灵问调用接入方实现的 `Notifier.Notify(ctx, lingo.Event)`；发邮件、站内信等渠道由接入方决定。接入方还可以主动查询（Go 方法 / REST）或按事件 ID 增量拉取变更流。
+**功能描述**：工单状态变化、待确认与处理、评审结论、Issue 评论、修复版本发布与上线时，灵工调用接入方实现的 `Notifier.Notify(ctx, lingo.Event)`；发邮件、站内信等渠道由接入方决定。接入方还可以主动查询（Go 方法 / REST）或按事件 ID 增量拉取变更流。
 
 **事件类型**：
 
@@ -878,7 +879,7 @@ flowchart LR
 | 认证 | lingo 不做登录、不发令牌；请求身份由接入方 `Authenticate` 解析 | P0 |
 | 授权 | 固定角色 external / agent / reviewer / admin；用户仅能访问本人会话与工单；可选 `User.Projects` 限制项目 | P0 |
 | 模型安全 | 回答仅基于知识库；防提示词注入；不在回答中泄露其他用户数据 | P0 |
-| 业务数据权限 | 代用户调用 Tool，灵问预校验 `User.Scopes` + 业务侧在 `Call` 内二次校验；业务数据不入知识库；`write` 需确认；审计只存摘要 | P0 |
+| 业务数据权限 | 代用户调用 Tool，灵工预校验 `User.Scopes` + 业务侧在 `Call` 内二次校验；业务数据不入知识库；`write` 需确认；审计只存摘要 | P0 |
 | 数据安全 | Gitea token 与 Webhook 密钥经 `Config.Gitea` 传入 | P0 |
 | 集成安全 | Webhook 验签 + 按事件去重 | P0 |
 | 数据隔离 | 按 `user_id` 与 `User.Projects` 在领域层统一做访问控制，越权返回 404；store 查询强制带范围；个人信息不写入 Gitea（3.2.0.6） | P0 |
@@ -1014,7 +1015,7 @@ flowchart LR
 | `l.AddPerspective` / `l.ListPerspectives` | Go | 需求视角补充的追加与查询（见 3.2.2.1，名称暂定） |
 | `l.GetTicket` / `l.ListTriage` / `l.TriageSummary` / `l.ListEvents` | Go | 查询工单、待确认列表、待确认统计、变更流（均接收 `lingo.User` 做数据隔离） |
 | 反馈与确认接口 | REST | 见 3.2.1.1、3.2.1.2、3.2.2.1（`/tickets/{id}/perspectives`、`/ticket-types`、`/tickets`、`/triage`、`/triage/summary`、`/events`、`/settings/auto-forward` 等） |
-| `l.MarkDeployed(ctx, repo, tag, env)` | Go | 接入方部署完成后告知灵问某仓库版本已上线（`repo` 为 `owner/name`） |
+| `l.MarkDeployed(ctx, repo, tag, env)` | Go | 接入方部署完成后告知灵工某仓库版本已上线（`repo` 为 `owner/name`） |
 | `l.Handler()`（示例挂载 `/lingo/`） | - | REST JSON：提问、工单、评审、知识库、版本，路径待设计 |
 | `l.MCPHandler()`（示例挂载 `/mcp`） | POST/GET | MCP Server（Streamable HTTP），工具见 3.2.0.1、3.2.0.4；提问 / 工单接口支持 `project`、`repo`、`version` 参数 |
 | `l.WebhookHandler()`（示例挂载 `/webhooks/gitea`） | POST | Gitea Webhook 接收，验签 + 去重 |
@@ -1102,12 +1103,12 @@ flowchart LR
 |-----|-----|
 | 接入方 | 以 Go 库方式集成 lingo 的业务项目 |
 | Agent AI 智能开发团队 | 由 AI Agent 承担开发、人类工程师评审把关的研发团队 |
-| 知识问答 Agent | 灵问自身：基于知识库回答提问，答不了时转为工单 |
+| 知识问答 Agent | 灵工自身：基于知识库回答提问，答不了时转为工单 |
 | MCP | Model Context Protocol，AI 客户端调用外部工具的开放协议 |
-| 工单（ticket） | 灵问中的咨询 / Bug / 需求记录，与一个 Gitea Issue 关联 |
-| 机器人账号 | 灵问用于调用 Gitea API 的专用账号 |
+| 工单（ticket） | 灵工中的咨询 / Bug / 需求记录，与一个 Gitea Issue 关联 |
+| 机器人账号 | 灵工用于调用 Gitea API 的专用账号 |
 | outbox | 先写库再由 worker 异步投递的任务表，保证可重试 |
-| 同步补偿 | 定期比对 Gitea 与灵问的工单状态，修复不一致 |
+| 同步补偿 | 定期比对 Gitea 与灵工的工单状态，修复不一致 |
 | Notifier | 接入方实现的 `lingo.Notifier` 接口，接收工单 / 版本事件回调 |
 | Tool | 接入方注册的业务数据工具（Go 函数），代用户取数 |
 

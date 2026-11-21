@@ -79,7 +79,7 @@ func TestRejectForwardedWaitsForInFlightComment(t *testing.T) {
 	}
 }
 
-// 驳回先提交：worker 停止期间排队的补充评论在驳回后执行时一个请求也不发（评论、附件均不发），评论留在灵问，
+// 驳回先提交：worker 停止期间排队的补充评论在驳回后执行时一个请求也不发（评论、附件均不发），评论留在灵工，
 // 记一条 comment.withheld；关单链路照常。
 func TestRejectForwardedBeforeQueuedCommentSends(t *testing.T) {
 	g := &giteaServer{templates: bugTemplate}

@@ -31,7 +31,7 @@ func ref(id, name, ctype string) map[string]any {
 	return map[string]any{"id": id, "name": name, "url": "https://app.example.com/files/" + id, "content_type": ctype}
 }
 
-// 附件由接入方保存，灵问只记引用；配置 FetchAttachment 时读取内容上传为 Gitea 附件，读取失败的退回为链接。
+// 附件由接入方保存，灵工只记引用；配置 FetchAttachment 时读取内容上传为 Gitea 附件，读取失败的退回为链接。
 func TestAttachmentsAndCommentsFlow(t *testing.T) {
 	g := &giteaServer{templates: "[]"}
 	db := testDB(t, true)

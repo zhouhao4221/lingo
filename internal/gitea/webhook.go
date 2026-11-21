@@ -20,7 +20,7 @@ const (
 	HeaderSignature = "X-Gitea-Signature"  // hex(HMAC-SHA256(secret, body))
 )
 
-// X-Gitea-Event-Type 取值中灵问处理的事件。
+// X-Gitea-Event-Type 取值中灵工处理的事件。
 const (
 	EventIssues         = "issues"
 	EventIssueAssign    = "issue_assign"

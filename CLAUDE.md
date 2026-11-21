@@ -1,4 +1,4 @@
-# 灵问 Lingo
+# 灵工 Lingo
 
 可嵌入业务项目的知识问答 Agent Go 库：基于知识库回答用户提问，答不了的转为结构化 Gitea Issue 交给 AI 研发团队，进展经 `Notifier` 回传接入方，问答回流知识库。只提供公开 API（根包 `lingo` 的 Go 方法、REST `Handler`、`MCPHandler`、`WebhookHandler`、`Run`、`Migrate`）；无租户、无前端，登录、用户管理、界面、部署与升级由接入者自己处理。固定角色（external / agent / reviewer / admin）由接入方映射；按项目对接（一个项目含前端、后端等多个仓库），同步各仓库的 Gitea 版本记录；可通过接入方注册的 `Tool` 以人员权限代用户取数。
 
