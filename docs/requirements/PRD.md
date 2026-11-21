@@ -772,7 +772,7 @@ flowchart LR
 
 #### 3.2.2.2 转研发后驳回（REQ-002）
 
-**功能描述**：已转研发、尚未修复的工单（`submitted` / `open` / `in_progress` / `need_info` / 无修复记录的 `abnormal`）可由 reviewer / admin 驳回：工单、评论、历史保留，状态改为 `rejected`，只关闭工单关联的主 Issue。详见 [REQ-002](active/REQ-002-转研发后驳回与迁移就绪检查.md)。
+**功能描述**：已转研发、尚未修复的工单（`submitted` / `open` / `in_progress` / `need_info` / 无修复记录的 `abnormal`）可由 reviewer / admin 驳回：工单、评论、历史保留，状态改为 `rejected`，只关闭工单关联的主 Issue。详见 [REQ-002](completed/REQ-002-转研发后驳回与迁移就绪检查.md)。
 
 **业务规则**：
 - 原因必填，作为 `ticket.status` 事件正文通知提交人；审计 `ticket.rejected`；不发 `triage.resolved`
@@ -1092,6 +1092,7 @@ flowchart LR
 | 编号 | 标题 | 模块 | 状态 | 创建日期 | 完成日期 |
 |-----|------|------|------|---------|---------|
 | REQ-001 | 需求多视角分层补充 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
+| REQ-002 | 转研发后驳回与迁移就绪检查 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
 
 ---
 
