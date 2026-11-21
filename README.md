@@ -1,6 +1,6 @@
 # Lingo
 
-<p align="center"><img src="assets/logo/lingo-icon.svg" width="96" alt="Lingo logo"></p>
+<p align="center"><img src="assets/logo/lingo-icon-color.svg" width="96" alt="Lingo logo"></p>
 
 English | [简体中文](README.zh-CN.md)
 

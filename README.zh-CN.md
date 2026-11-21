@@ -1,6 +1,6 @@
 # 灵工 Lingo
 
-<p align="center"><img src="assets/logo/lingo-icon.svg" width="96" alt="灵工 Lingo logo"></p>
+<p align="center"><img src="assets/logo/lingo-icon-color.svg" width="96" alt="灵工 Lingo logo"></p>
 
 [English](README.md) | 简体中文
 
