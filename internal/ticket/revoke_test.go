@@ -82,6 +82,40 @@ func TestRejectForwardedAbnormalWithFix(t *testing.T) {
 	if got, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做"); err != nil || got.Status != StatusRejected {
 		t.Errorf("in progress then deleted: %v %+v", err, got)
 	}
+	// 存量：早期版本把已关闭工单在 Issue 删除后改成了 abnormal。按最近一次进入 abnormal 的状态历史判断
+	entered := func(prev Status) History {
+		return History{TicketID: 1, Source: "gitea", Kind: string(IssueDeleted),
+			Payload: map[string]any{"status": string(StatusAbnormal), "prev_status": string(prev)}}
+	}
+	stale := History{TicketID: 1, Source: "gitea", Kind: string(IssueLabeled),
+		Payload: map[string]any{"status": string(StatusAbnormal), "prev_status": string(StatusAbnormal), "stale": true}}
+	recovered := History{TicketID: 1, Source: "gitea", Kind: string(IssueSynced),
+		Payload: map[string]any{"status": string(StatusInProgress), "prev_status": string(StatusAbnormal)}}
+	other := History{TicketID: 2, Source: "gitea", Kind: string(IssueDeleted),
+		Payload: map[string]any{"status": string(StatusAbnormal), "prev_status": string(StatusClosed)}}
+	for _, c := range []struct {
+		name    string
+		history []History
+		ok      bool
+	}{
+		{"legacy closed", []History{entered(StatusClosed)}, false},
+		{"legacy closed then stale event", []History{entered(StatusClosed), stale}, false},
+		{"in progress", []History{entered(StatusInProgress)}, true},
+		{"closed, recovered, deleted again while in progress", []History{entered(StatusClosed), recovered, entered(StatusInProgress)}, true},
+		{"create failed", []History{{TicketID: 1, Source: "system", Kind: "issue.create_failed"}}, true},
+		{"other ticket's history", []History{other, entered(StatusOpen)}, true},
+		{"no history", nil, true},
+	} {
+		m := newMem(base(StatusAbnormal))
+		m.history = append(m.history, c.history...)
+		got, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做")
+		if c.ok != (err == nil) {
+			t.Errorf("%s: %v %+v", c.name, err, got)
+		}
+		if !c.ok && (!errors.Is(err, ErrConflict) || m.tickets[1].Status != StatusAbnormal || len(m.tasks) != 0 || len(m.events) != 0) {
+			t.Errorf("%s: err %v %+v", c.name, err, m.tickets[1])
+		}
+	}
 	// 建单失败：没有 Issue、没有修复记录，可驳回且不入队关闭
 	failed := base(StatusAbnormal)
 	failed.IssueNumber = 0

@@ -70,6 +70,10 @@ type Tx interface {
 	Emit(ctx context.Context, e notify.Event) error
 	// TaskState 按幂等键读取 Gitea 写操作任务的执行状态；不存在时返回 nil。
 	TaskState(ctx context.Context, key string) (*TaskState, error)
+	// AbnormalFrom 返回工单最近一次进入 abnormal 之前的状态，取自与状态变更同事务写入的历史：
+	// payload.status = abnormal 且 prev_status 不是 abnormal 的最新一条（建单失败 issue.create_failed 视为从 submitted 进入）。
+	// 没有这样的历史时返回空串。
+	AbnormalFrom(ctx context.Context, ticketID int64) (Status, error)
 }
 
 // TaskState 是 Gitea 写操作任务（outbox）的执行状态。

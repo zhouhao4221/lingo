@@ -18,7 +18,6 @@ type fakeCloseIssues struct {
 	state   string
 	getErr  error
 	editErr error
-	repoErr error // GetRepo 的结果：nil 表示仓库可读
 	closed  []int64
 }
 
@@ -27,13 +26,6 @@ func (f *fakeCloseIssues) GetIssue(_ context.Context, _, _ string, n int64) (*gi
 		return nil, f.getErr
 	}
 	return &gitea.Issue{Number: n, State: f.state}, nil
-}
-
-func (f *fakeCloseIssues) GetRepo(_ context.Context, o, n string) (*gitea.Repository, error) {
-	if f.repoErr != nil {
-		return nil, f.repoErr
-	}
-	return &gitea.Repository{Name: n}, nil
 }
 
 func (f *fakeCloseIssues) EditIssue(_ context.Context, _, _ string, n int64, o gitea.EditIssueOption) (*gitea.Issue, error) {
@@ -120,25 +112,14 @@ func TestCloseIssue(t *testing.T) {
 			t.Errorf("%+v: %v %v", tk, err, g.closed)
 		}
 	}
-	// Issue 404 而仓库可读：确认已删除，完成
+	// Issue 404（已删除、权限被收回、Issues 被禁用或单独拒权都是 404）：无法确认，不可重试的失败，原因可查
 	nf := &gitea.APIError{StatusCode: 404}
-	if err := newW(&fakeCloseIssues{getErr: nf}, rejected).closeIssue(ctx, 8); err != nil {
-		t.Errorf("deleted: %v", err)
-	}
-	if err := newW(&fakeCloseIssues{state: gitea.StateOpen, editErr: nf}, rejected).closeIssue(ctx, 8); err != nil {
-		t.Errorf("deleted during edit: %v", err)
-	}
-	// Issue 与仓库都 404（权限被收回等）：无法确认已删除，不可重试的失败，原因可查
 	var pe *permanentError
-	for _, g := range []*fakeCloseIssues{{getErr: nf, repoErr: nf}, {state: gitea.StateOpen, editErr: nf, repoErr: nf}} {
+	for _, g := range []*fakeCloseIssues{{getErr: nf}, {state: gitea.StateOpen, editErr: nf}} {
 		err := newW(g, rejected).closeIssue(ctx, 8)
-		if !errors.As(err, &pe) || !strings.Contains(err.Error(), "repository not accessible") {
-			t.Errorf("hidden repo: %v", err)
+		if !errors.As(err, &pe) || !strings.Contains(err.Error(), "not found") || len(g.closed) != 0 {
+			t.Errorf("404: %v", err)
 		}
-	}
-	// 读仓库遇到 5xx：可重试
-	if err := newW(&fakeCloseIssues{getErr: nf, repoErr: &gitea.APIError{StatusCode: 502}}, rejected).closeIssue(ctx, 8); err == nil || errors.As(err, &pe) {
-		t.Errorf("repo 5xx: %v", err)
 	}
 	// 5xx / 429 可重试；403 等不可重试，直接放弃并可查
 	for _, c := range []struct {
@@ -200,8 +181,7 @@ func TestCloseIssueTaskOutcomes(t *testing.T) {
 		{"5xx", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 503}}, 0, "retry"},
 		{"5xx at limit", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 503}}, 2, "fail"},
 		{"403", &fakeCloseIssues{state: gitea.StateOpen, editErr: &gitea.APIError{StatusCode: 403}}, 0, "fail"},
-		{"404 deleted", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 404}}, 0, "complete"},
-		{"404 repo hidden", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 404}, repoErr: &gitea.APIError{StatusCode: 404}}, 0, "fail"},
+		{"404", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 404}}, 0, "fail"},
 	} {
 		q := &fakeTaskQueue{got: map[int64]outcome{}}
 		drafts := &fakeCloseDrafts{t: rejected}

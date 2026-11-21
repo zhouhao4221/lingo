@@ -332,6 +332,21 @@ func (x *ticketTx) SeenPull(ctx context.Context, ticketID int64, kind, pull stri
 	return ok, nil
 }
 
+func (x *ticketTx) AbnormalFrom(ctx context.Context, ticketID int64) (ticket.Status, error) {
+	var prev sql.NullString
+	err := x.tx.QueryRowContext(ctx, `SELECT CASE WHEN kind = 'issue.create_failed' THEN 'submitted' ELSE payload->>'prev_status' END
+		FROM lingo_ticket_events WHERE ticket_id = $1 AND (kind = 'issue.create_failed'
+			OR (payload->>'status' = 'abnormal' AND payload->>'prev_status' IS DISTINCT FROM 'abnormal'))
+		ORDER BY id DESC LIMIT 1`, ticketID).Scan(&prev)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("store: abnormal from %d: %w", ticketID, err)
+	}
+	return ticket.Status(prev.String), nil
+}
+
 func (x *ticketTx) AddHistory(ctx context.Context, h ticket.History) error {
 	payload, err := jsonObject(h.Payload)
 	if err != nil {

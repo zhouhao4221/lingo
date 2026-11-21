@@ -268,6 +268,21 @@ func (m *memStore) SeenPull(_ context.Context, id int64, kind, pull string) (boo
 	return false, nil
 }
 
+func (m *memStore) AbnormalFrom(_ context.Context, id int64) (Status, error) {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		h := m.history[i]
+		switch {
+		case h.TicketID != id:
+		case h.Kind == "issue.create_failed":
+			return StatusSubmitted, nil
+		case h.Payload["status"] == string(StatusAbnormal) && h.Payload["prev_status"] != string(StatusAbnormal):
+			p, _ := h.Payload["prev_status"].(string)
+			return Status(p), nil
+		}
+	}
+	return "", nil
+}
+
 func (m *memStore) AddHistory(_ context.Context, h History) error {
 	m.history = append(m.history, h)
 	return nil

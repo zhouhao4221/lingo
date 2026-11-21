@@ -312,7 +312,7 @@ func TestRejectDuringIssueCreation(t *testing.T) {
 	}
 }
 
-// 关闭时 Issue 返回 404 而仓库也读不到（机器人权限被收回）：无法确认 Issue 已删除，任务 failed、原因可查，
+// 关闭时机器人对仓库的权限被收回（Issue 返回 404）：无法确认 Issue 已删除，任务 failed、原因可查，
 // 工单保持 rejected；权限恢复后人工重试关闭成功。
 func TestRejectForwardedCloseNotFoundRepoHidden(t *testing.T) {
 	g := &giteaServer{templates: bugTemplate}
@@ -325,7 +325,7 @@ func TestRejectForwardedCloseNotFoundRepoHidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := waitIssueClose(t, l, id, "failed")
-	if c.Attempt != 1 || !strings.Contains(c.LastError, "repository not accessible") {
+	if c.Attempt != 1 || !strings.Contains(c.LastError, "not found") {
 		t.Errorf("close = %+v", c)
 	}
 	if tk, err := l.GetTicket(ctx, rita, id); err != nil || tk.Status != "rejected" {
@@ -347,20 +347,68 @@ func TestRejectForwardedCloseNotFoundRepoHidden(t *testing.T) {
 	}
 }
 
-// 关闭时 Issue 返回 404 而仓库可读：确认 Issue 已删除，按幂等完成，不调用关闭。
-func TestRejectForwardedCloseIssueDeleted(t *testing.T) {
+// 关闭时 Issue 返回 404（Issue 已删除，或权限 / Issues 设置导致不可见，Gitea 无法区分）：不按完成处理，
+// 任务 failed、原因可查，不调用关闭；人工重试仍然 404 时再次 failed。
+func TestRejectForwardedCloseIssueNotFound(t *testing.T) {
 	g := &giteaServer{templates: bugTemplate}
 	l, _, _, id := newForwarded(t, g)
+	ctx := context.Background()
 	g.mu.Lock()
 	g.issues = nil
 	g.mu.Unlock()
-	if _, err := l.RejectForwardedTicket(context.Background(), rita, id, "不在支持范围"); err != nil {
+	if _, err := l.RejectForwardedTicket(ctx, rita, id, "不在支持范围"); err != nil {
 		t.Fatal(err)
 	}
-	if c := waitIssueClose(t, l, id, "done"); c.LastError != "" {
+	if c := waitIssueClose(t, l, id, "failed"); !strings.Contains(c.LastError, "not found") {
 		t.Errorf("close = %+v", c)
 	}
+	if r, err := l.RetryTicketIssueClose(ctx, rita, id); err != nil || r.Attempt != 2 {
+		t.Fatalf("retry = %+v %v", r, err)
+	}
+	waitUntil(t, "retry failed", func() bool {
+		c, err := l.TicketIssueClose(ctx, rita, id)
+		return err == nil && c.Attempt == 2 && c.State == "failed"
+	})
 	if closes, _, _ := g.snapshot(); len(closes) != 0 {
 		t.Errorf("gitea closes = %v", closes)
+	}
+}
+
+// 存量数据：早期版本把已关闭工单在 Issue 删除后改成了 abnormal。按最近一次进入 abnormal 的状态历史（prev_status=closed）
+// 拒绝驳回；处理中的工单 Issue 被删除后为 abnormal，仍可驳回。
+func TestRejectForwardedAbnormalHistory(t *testing.T) {
+	g := &giteaServer{templates: bugTemplate}
+	l, db, _, legacy := newForwarded(t, g)
+	ctx := context.Background()
+	// 模拟早期版本留下的数据：工单为 abnormal，最近一条进入 abnormal 的历史 prev_status=closed
+	if _, err := db.ExecContext(ctx, `UPDATE lingo_tickets SET status = 'abnormal' WHERE id = $1`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO lingo_ticket_events (ticket_id, source, kind, payload)
+		VALUES ($1, 'gitea', 'issue.deleted', '{"status":"abnormal","prev_status":"closed"}'),
+		       ($1, 'gitea', 'issue.labeled', '{"status":"abnormal","prev_status":"abnormal","stale":true}')`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.RejectForwardedTicket(ctx, rita, legacy, "不做"); !errors.Is(err, lingo.ErrConflict) {
+		t.Fatalf("legacy closed→abnormal: %v", err)
+	}
+	if tk, err := l.GetTicket(ctx, rita, legacy); err != nil || tk.Status != "abnormal" {
+		t.Errorf("legacy ticket = %+v %v", tk, err)
+	}
+
+	// 普通异常：处理中的工单 Issue 被删除 → abnormal → 可驳回
+	tk, err := l.CreateTicket(ctx, alice, lingo.TicketInput{Type: lingo.TicketBug, Content: "导出失败",
+		Fields: map[string][]string{"what": {"导出失败"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTicket(t, l, rita, tk.ID, "open")
+	issue := `"issue":{"id":1001,"number":41,"user":{"login":"lingo-bot"},"body":"x","updated_at":"2026-11-21T01:00:00Z"},"repository":{"full_name":"demo/api"}`
+	if w := deliver(l.WebhookHandler(), "d1", "issues", `{"action":"deleted",`+issue+`,"sender":{"login":"dev-agent"}}`, "s"); w.Code != 200 {
+		t.Fatalf("deliver: %d", w.Code)
+	}
+	waitTicket(t, l, rita, tk.ID, "abnormal")
+	if got, err := l.RejectForwardedTicket(ctx, rita, tk.ID, "不做"); err != nil || got.Status != "rejected" {
+		t.Errorf("abnormal after delete: %+v %v", got, err)
 	}
 }

@@ -39,7 +39,6 @@ type IssueWriter interface {
 	CreateLabel(ctx context.Context, owner, repo string, opt gitea.CreateLabelOption) (*gitea.Label, error)
 	ListIssueTemplates(ctx context.Context, owner, repo string) ([]*gitea.IssueTemplate, error)
 	GetIssue(ctx context.Context, owner, repo string, index int64) (*gitea.Issue, error)
-	GetRepo(ctx context.Context, owner, repo string) (*gitea.Repository, error)
 	EditIssue(ctx context.Context, owner, repo string, index int64, opt gitea.EditIssueOption) (*gitea.Issue, error)
 	CreateComment(ctx context.Context, owner, repo string, index int64, body string) (*gitea.Comment, error)
 	EditComment(ctx context.Context, owner, repo string, id int64, body string) (*gitea.Comment, error)
@@ -726,8 +725,8 @@ func (w *Worker) removeLabel(ctx context.Context, ticketID int64, label string) 
 }
 
 // closeIssue 关闭被驳回工单的主 Issue：只处理库中记录的这一个 Issue（工单仓库 + 编号），不按标记搜索、不动 PR。
-// Issue 已关闭、或确认已删除（仓库可读而 Issue 404）时视为完成；仓库也读不到时无法确认 Issue 已删除（可能是权限被收回），
-// 按不可重试的失败处理（failed，原因可查，恢复权限后可 RetryIssueClose）。工单不再是驳回状态（不应出现）时不关闭。
+// Issue 已关闭时视为完成；读取或关闭返回 404 时无法确认 Issue 已删除（也可能是权限被收回、Issues 被禁用或单独拒权），
+// 按不可重试的失败处理（failed，原因可查，可人工 RetryIssueClose）。工单不再是驳回状态（不应出现）时不关闭。
 func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
 	t, err := w.o.Drafts.Draft(ctx, ticketID)
 	if errors.Is(err, ticket.ErrNotFound) {
@@ -742,7 +741,7 @@ func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
 	owner, name, _ := strings.Cut(t.Repo, "/")
 	is, err := w.o.Issues.GetIssue(ctx, owner, name, t.IssueNumber)
 	if errors.Is(err, gitea.ErrNotFound) {
-		return w.issueNotFound(ctx, t, owner, name)
+		return issueNotFound(t, err)
 	}
 	if err != nil {
 		return giteaErr("get issue", err)
@@ -753,26 +752,18 @@ func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
 	state := gitea.StateClosed
 	if _, err := w.o.Issues.EditIssue(ctx, owner, name, t.IssueNumber, gitea.EditIssueOption{State: &state}); err != nil {
 		if errors.Is(err, gitea.ErrNotFound) {
-			return w.issueNotFound(ctx, t, owner, name)
+			return issueNotFound(t, err)
 		}
 		return giteaErr("close issue", err)
 	}
 	return nil
 }
 
-// issueNotFound 判断关闭时 Issue 404 的含义。Gitea 对“Issue 已删除”和“机器人无权查看仓库”都返回 404，
-// 只有仓库仍可读时才能确认 Issue 已删除，按幂等完成；仓库也是 404（权限被收回、仓库被删除或改名）时无法确认，
-// 返回不可重试的失败，任务置为 failed 并保留原因。
-func (w *Worker) issueNotFound(ctx context.Context, t *ticket.Ticket, owner, name string) error {
-	if _, err := w.o.Issues.GetRepo(ctx, owner, name); err != nil {
-		if errors.Is(err, gitea.ErrNotFound) {
-			return permanent(fmt.Errorf("issue %s#%d not found and repository not accessible "+
-				"(bot permission revoked, or repository deleted or renamed): cannot confirm the issue is deleted", t.Repo, t.IssueNumber))
-		}
-		return giteaErr("get repository", err)
-	}
-	w.log.Info("issue to close is deleted, treating as done", "ticket", t.ID, "repo", t.Repo, "issue", t.IssueNumber)
-	return nil
+// issueNotFound 处理关闭时 Issue 返回 404：Gitea 对 Issue 已删除、机器人无权查看仓库、Issues 被禁用或单独拒权
+// 都返回 404，仓库可读也不能证明 Issue 已删除，一律按不可重试的失败处理（任务 failed，原因可查，可人工重试）。
+func issueNotFound(t *ticket.Ticket, err error) error {
+	return permanent(fmt.Errorf("issue %s#%d not found (deleted, or bot cannot access it): cannot confirm the issue is closed: %w",
+		t.Repo, t.IssueNumber, err))
 }
 
 // createComment 把补充评论由机器人发到 Issue，并上传评论附件；评论已发出时（上次附件未传完）只继续处理附件。
