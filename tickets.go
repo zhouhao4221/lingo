@@ -100,7 +100,9 @@ func (l *Lingo) RejectTicket(ctx context.Context, u User, id int64, reason strin
 // RejectForwardedTicket 驳回已转研发的工单（仅 reviewer / admin），reason 必填且对提交人可见（ticket.status 事件正文）。
 // 可驳回的状态：submitted、open、in_progress、need_info、abnormal；已修复（fixed / released / deployed）、已关闭的
 // 返回 ErrConflict，待确认工单请用 RejectTicket。工单、评论、历史全部保留，状态改为 rejected；工单关联了主 Issue 时
-// 由 Run 异步关闭该 Issue（持久化、失败按退避重试，同一工单只入队一次），只关闭这一个 Issue，不评论、不改标签、不动 PR。
+// 由 Run 异步关闭该 Issue（持久化、失败按退避重试，同一工单只入队一次），只关闭这一个 Issue：关闭前在其上留一条驳回原因评论
+// （只署 u.Name，不含提交人信息，重试沿用原原因），不改标签、不动 PR。有补充评论正在发往 Gitea 时驳回不会先于它提交：
+// 最多等待 5 秒，仍在发送则返回 ErrConflict，稍后重试即可；驳回先提交时排队中的补充评论不再发出。
 // 驳回后 Gitea 侧的关闭、重开、删除与对账都不再改变工单状态。对已驳回的工单重复调用返回当前工单，不重复通知或入队。
 // 关闭进度用 TicketIssueClose 查询，失败后用 RetryTicketIssueClose 重新入队。
 func (l *Lingo) RejectForwardedTicket(ctx context.Context, u User, id int64, reason string) (Ticket, error) {

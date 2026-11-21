@@ -110,9 +110,15 @@ func TestRejectForwardedClosesLinkedIssue(t *testing.T) {
 	if c.Repo != "demo/api" || c.Number != 40 || c.Attempt != 1 || c.Failures != 0 {
 		t.Errorf("close = %+v", c)
 	}
-	closes, _, state := g.snapshot()
+	closes, comments, state := g.snapshot()
 	if len(closes) != 1 || closes[0] != "/repos/demo/api/issues/40" || state != "closed" {
 		t.Errorf("gitea closes = %v state %s", closes, state)
+	}
+	// 待办 #698：关闭前在该 Issue 上留一条原因评论，只署驳回人姓名，不含提交人信息
+	if len(comments) != 2 || !strings.Contains(comments[1], "由 Rita 驳回") || !strings.Contains(comments[1], "> 不在支持范围") ||
+		!strings.Contains(comments[1], "<!-- lingo:reject="+jsonNum(id)+" -->") ||
+		strings.Contains(comments[1], "alice") || strings.Contains(comments[1], "Alice") {
+		t.Errorf("gitea comments = %q", comments)
 	}
 	if n := count("SELECT count(*) FROM lingo_outbox WHERE payload->>'op' = 'close_issue'"); n != 1 {
 		t.Errorf("close tasks = %d", n)
@@ -162,8 +168,8 @@ func TestRejectForwardedClosesLinkedIssue(t *testing.T) {
 	if n := count("SELECT count(*) FROM lingo_ticket_events WHERE source = 'gitea'"); n != 3 {
 		t.Errorf("gitea history = %d, want 3 (recorded, not applied)", n)
 	}
-	if closes, _, _ := g.snapshot(); len(closes) != 1 {
-		t.Errorf("reopened issue was closed again: %v", closes)
+	if closes, comments, _ := g.snapshot(); len(closes) != 1 || len(comments) != 2 {
+		t.Errorf("reopened issue was closed or commented again: %v %d", closes, len(comments))
 	}
 }
 
@@ -325,7 +331,7 @@ func TestRejectForwardedCloseNotFoundRepoHidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := waitIssueClose(t, l, id, "failed")
-	if c.Attempt != 1 || !strings.Contains(c.LastError, "not found") {
+	if c.Attempt != 1 || !strings.Contains(c.LastError, "HTTP 404") || strings.Contains(c.LastError, "/repos/") {
 		t.Errorf("close = %+v", c)
 	}
 	if tk, err := l.GetTicket(ctx, rita, id); err != nil || tk.Status != "rejected" {
@@ -359,7 +365,8 @@ func TestRejectForwardedCloseIssueNotFound(t *testing.T) {
 	if _, err := l.RejectForwardedTicket(ctx, rita, id, "不在支持范围"); err != nil {
 		t.Fatal(err)
 	}
-	if c := waitIssueClose(t, l, id, "failed"); !strings.Contains(c.LastError, "not found") {
+	// 失败原因只给脱敏说明（不含地址与响应正文）
+	if c := waitIssueClose(t, l, id, "failed"); !strings.Contains(c.LastError, "HTTP 404") || strings.Contains(c.LastError, "/repos/") {
 		t.Errorf("close = %+v", c)
 	}
 	if r, err := l.RetryTicketIssueClose(ctx, rita, id); err != nil || r.Attempt != 2 {

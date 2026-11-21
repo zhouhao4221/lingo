@@ -27,6 +27,8 @@ type memStore struct {
 	reminded map[int64]time.Time
 
 	perspectives []Perspective
+	withheld     map[int64]bool // 评论 ID → 已标记驳回后未发出
+	sending      map[int64]bool // 评论 ID → 持有发送租约
 
 	lastEventQuery EventQuery
 }
@@ -266,6 +268,54 @@ func (m *memStore) SeenPull(_ context.Context, id int64, kind, pull string) (boo
 		}
 	}
 	return false, nil
+}
+
+func (m *memStore) RejectionNote(_ context.Context, id int64) (string, string, error) {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if h := m.history[i]; h.TicketID == id && h.Kind == "ticket.rejected" {
+			reason, _ := h.Payload["note"].(string)
+			by, _ := h.Payload["rejected_by"].(string)
+			return reason, by, nil
+		}
+	}
+	return "", "", nil
+}
+
+func (m *memStore) ClaimCommentSend(_ context.Context, ticketID, commentID int64, _ time.Duration) (bool, error) {
+	if commentID < 1 || commentID > int64(len(m.notes)) || m.notes[commentID-1].TicketID != ticketID || m.withheld[commentID] {
+		return false, nil
+	}
+	if m.sending == nil {
+		m.sending = map[int64]bool{}
+	}
+	m.sending[commentID] = true
+	return true, nil
+}
+
+func (m *memStore) ReleaseCommentSend(_ context.Context, _, commentID int64) error {
+	delete(m.sending, commentID)
+	return nil
+}
+
+func (m *memStore) CommentSending(_ context.Context, ticketID int64) (bool, error) {
+	for id := range m.sending {
+		if m.notes[id-1].TicketID == ticketID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *memStore) MarkCommentWithheld(_ context.Context, ticketID, commentID int64) (bool, error) {
+	if commentID < 1 || commentID > int64(len(m.notes)) || m.notes[commentID-1].TicketID != ticketID || m.withheld[commentID] {
+		return false, nil
+	}
+	if m.withheld == nil {
+		m.withheld = map[int64]bool{}
+	}
+	m.withheld[commentID] = true
+	delete(m.sending, commentID)
+	return true, nil
 }
 
 func (m *memStore) AbnormalFrom(_ context.Context, id int64) (Status, error) {

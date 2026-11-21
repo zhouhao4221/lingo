@@ -290,6 +290,58 @@ func (x *ticketTx) Enqueue(ctx context.Context, t ticket.Task) error {
 }
 
 // TaskState 按幂等键读取 Gitea 写操作任务的状态（走 key 唯一索引）；不存在时返回 nil。
+func (x *ticketTx) RejectionNote(ctx context.Context, ticketID int64) (string, string, error) {
+	var reason, by string
+	err := x.tx.QueryRowContext(ctx, `SELECT COALESCE(payload->>'note', ''), COALESCE(payload->>'rejected_by', '')
+		FROM lingo_ticket_events WHERE ticket_id = $1 AND kind = 'ticket.rejected' ORDER BY id DESC LIMIT 1`, ticketID).Scan(&reason, &by)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("store: rejection note %d: %w", ticketID, err)
+	}
+	return reason, by, nil
+}
+
+func (x *ticketTx) ClaimCommentSend(ctx context.Context, ticketID, commentID int64, hold time.Duration) (bool, error) {
+	res, err := x.tx.ExecContext(ctx, `UPDATE lingo_ticket_comments SET sending_until = now() + $3 * interval '1 millisecond'
+		WHERE ticket_id = $1 AND id = $2 AND withheld_at IS NULL`, ticketID, commentID, hold.Milliseconds())
+	if err != nil {
+		return false, fmt.Errorf("store: claim comment send: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func (x *ticketTx) ReleaseCommentSend(ctx context.Context, ticketID, commentID int64) error {
+	if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_ticket_comments SET sending_until = NULL WHERE ticket_id = $1 AND id = $2`,
+		ticketID, commentID); err != nil {
+		return fmt.Errorf("store: release comment send: %w", err)
+	}
+	return nil
+}
+
+// CommentSending 用 now()（事务开始时间）比较：驳回事务等待工单锁期间对方提交的租约，按偏早的 now() 只会显得更久，
+// 偏向安全（不提交）一侧。
+func (x *ticketTx) CommentSending(ctx context.Context, ticketID int64) (bool, error) {
+	var ok bool
+	if err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM lingo_ticket_comments
+		WHERE ticket_id = $1 AND sending_until > now())`, ticketID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("store: comment sending: %w", err)
+	}
+	return ok, nil
+}
+
+func (x *ticketTx) MarkCommentWithheld(ctx context.Context, ticketID, commentID int64) (bool, error) {
+	res, err := x.tx.ExecContext(ctx, `UPDATE lingo_ticket_comments SET withheld_at = now(), sending_until = NULL
+		WHERE ticket_id = $1 AND id = $2 AND withheld_at IS NULL`, ticketID, commentID)
+	if err != nil {
+		return false, fmt.Errorf("store: mark comment withheld: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 func (x *ticketTx) TaskState(ctx context.Context, key string) (*ticket.TaskState, error) {
 	st := ticket.TaskState{Key: key}
 	err := x.tx.QueryRowContext(ctx, `SELECT status, failures, last_error, updated_at FROM lingo_outbox WHERE key = $1 AND kind = 'gitea'`,
