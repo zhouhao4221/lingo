@@ -141,14 +141,18 @@ type MigrationStatus struct {
 	MissingTables []string `json:"missing_tables,omitempty"`
 }
 
+// 缺表推算只从迁移 SQL 中识别 CREATE TABLE / DROP TABLE（去掉 -- 与 /* */ 注释后匹配），表名须是不带引号、不带
+// schema 前缀的小写标识符，且不用 ALTER TABLE … RENAME 改表名；TestMigrationTablesParsed 对内嵌迁移校验这些约束（PRD 5.4）。
 var (
+	sqlCommentRe  = regexp.MustCompile(`(?s)/\*.*?\*/|--[^\n]*`)
 	createTableRe = regexp.MustCompile(`(?i)\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)`)
 	dropTableRe   = regexp.MustCompile(`(?i)\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-z_][a-z0-9_]*)`)
 )
 
 // CheckMigrations 只读地检查 db 当前 schema（search_path 第一项，与 Migrate 相同）的迁移是否就绪，供接入方在
-// 迁移未执行、缺表时降级（如只禁用反馈入口）而不影响宿主其他功能。检查在只读事务中进行：不建表、不加锁、
-// 不回填校验和，也不修改任何数据；可在 New 之前、任意实例上频繁调用。
+// 迁移未执行、缺表时降级（如只禁用反馈入口）而不影响宿主其他功能。检查在只读事务中进行：不建表、不取 advisory lock、
+// 不回填校验和，也不修改任何数据；可在 New 之前、任意实例上频繁调用。查询只读系统目录与迁移记录表，取的是普通读锁
+// （AccessShareLock），遇到正在执行、持有排他锁的 DDL（如 Migrate 进行中）时会等待，调用方应给 ctx 设置超时。
 //
 // 返回 err == nil 时，MigrationStatus.Ready 说明是否就绪（未执行迁移、缺表、迁移内容被改都是 Ready=false，
 // 不是错误）；返回 err != nil 表示检查本身失败（连接失败、超时、权限不足、ctx 取消等），此时无法判断是否就绪，
@@ -243,13 +247,14 @@ func migrationStatus(ms []migration, applied map[string]string, tables map[strin
 		default:
 			st.Applied = append(st.Applied, m.name)
 		}
-		for _, mt := range createTableRe.FindAllStringSubmatch(m.body, -1) {
+		body := sqlCommentRe.ReplaceAllString(m.body, "")
+		for _, mt := range createTableRe.FindAllStringSubmatch(body, -1) {
 			if n := strings.ToLower(mt[1]); !want[n] {
 				want[n] = true
 				order = append(order, n)
 			}
 		}
-		for _, mt := range dropTableRe.FindAllStringSubmatch(m.body, -1) {
+		for _, mt := range dropTableRe.FindAllStringSubmatch(body, -1) {
 			delete(want, strings.ToLower(mt[1]))
 		}
 	}

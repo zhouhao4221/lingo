@@ -771,15 +771,15 @@ flowchart LR
 
 #### 3.2.2.2 转研发后驳回（REQ-002）
 
-**功能描述**：已转研发、尚未修复的工单（`submitted` / `open` / `in_progress` / `need_info` / `abnormal`）可由 reviewer / admin 驳回：工单、评论、历史保留，状态改为 `rejected`，只关闭工单关联的主 Issue。详见 [REQ-002](active/REQ-002-转研发后驳回与迁移就绪检查.md)。
+**功能描述**：已转研发、尚未修复的工单（`submitted` / `open` / `in_progress` / `need_info` / 无修复记录的 `abnormal`）可由 reviewer / admin 驳回：工单、评论、历史保留，状态改为 `rejected`，只关闭工单关联的主 Issue。详见 [REQ-002](active/REQ-002-转研发后驳回与迁移就绪检查.md)。
 
 **业务规则**：
 - 原因必填，作为 `ticket.status` 事件正文通知提交人；审计 `ticket.rejected`；不发 `triage.resolved`
-- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭 / 已删除视为完成；只 `PATCH state=closed`，不评论、不改标签、不动 PR 与其他 Issue
+- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭或返回 404（已删除或机器人不可见）视为完成；只 `PATCH state=closed`，不评论、不改标签、不动 PR 与其他 Issue
 - 可重试错误按 outbox 退避重试，超过上限或不可重试时任务 `failed` 并保留原因，工单仍为 `rejected`；`TicketIssueClose` 查询进度，`RetryTicketIssueClose` 仅在 `failed` 时入队新一轮
 - 重复 / 并发驳回只生效一次；建单途中被驳回时，事后发现的 Issue 补记关联并关闭
-- 驳回后 Gitea 侧的关闭、重开、删除、标签、指派、里程碑、对账与 PR 合并只记审计，不改变工单
-- 已修复（`fixed` / `released` / `deployed`）、已关闭与待确认工单不适用（`conflict`；待确认用 `reject`）
+- 驳回后 Gitea 侧的关闭、重开、删除、标签、指派、里程碑、对账与 PR 合并只记审计，不改变工单；驳回前已排队的补充评论、标签移除与视角同步不再写 Gitea，建单途中被驳回的不再补传附件
+- 已修复（`fixed` / `released` / `deployed`，以及有修复记录的 `abnormal`）、已关闭与待确认工单不适用（`conflict`；待确认用 `reject`）
 
 #### 3.2.3 信息反馈（Notifier）
 
@@ -937,7 +937,8 @@ flowchart LR
 
 - 迁移 SQL 目录：`migrations/`，数据库 PostgreSQL；迁移文件经 `go:embed` 打包在库内
 - 执行：由接入方在发布流程中显式调用 `lingo.Migrate(ctx, db)`，`lingo.New` 时不自动执行
-- 就绪检查：`lingo.CheckMigrations(ctx, db)` 只读对比内嵌迁移与当前 schema（未执行、内容被改、缺表），不建表不改数据；未就绪返回 `Ready=false`，查询失败返回错误，二者区分，供接入方降级（如只禁用反馈入口）
+- 就绪检查：`lingo.CheckMigrations(ctx, db)` 只读对比内嵌迁移与当前 schema（未执行、内容被改、缺表），不建表不改数据、不取 advisory lock（普通读锁会等待进行中的 DDL，调用方应设 ctx 超时）；未就绪返回 `Ready=false`，查询失败返回错误，二者区分，供接入方降级（如只禁用反馈入口）
+- 表名写法：缺表按迁移中的 `CREATE TABLE` / `DROP TABLE` 推算（忽略注释），表名须为不带引号、不带 schema 前缀的小写标识符，不用 `ALTER TABLE … RENAME TO` 改表名（需要改名时新建表并迁移数据）；`TestMigrationTablesParsed` 校验
 - 文件命名：`NNNN_<snake_case_name>.sql`，编号四位递增（现有 `0001_init.sql`），新文件取当前最大编号 + 1
 - 已发布的迁移文件不得修改，结构变更一律新增文件
 - 迁移须向前兼容，保证滚动发布期间新旧版本可同时运行；每个迁移需可在已有数据上执行（加列给默认值或允许 NULL，避免锁大表的操作）

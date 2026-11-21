@@ -15,7 +15,7 @@ import (
 const (
 	CloseNone    = "none"    // 没有要关闭的 Issue（驳回时 Issue 尚未创建，或工单不是转研发后驳回的）
 	ClosePending = "pending" // 排队或重试中
-	CloseDone    = "done"    // 已关闭（或 Issue 已是关闭 / 已删除状态）
+	CloseDone    = "done"    // 已关闭，或 Issue 已是关闭状态，或读取 / 关闭时 Gitea 返回 404（已删除，或机器人已无权查看该仓库）
 	CloseFailed  = "failed"  // 超过重试上限或遇到不可重试的错误，可调用 RetryIssueClose 重新入队
 )
 
@@ -41,12 +41,18 @@ func closeKey(id int64, attempt int) string {
 	return key
 }
 
+// hasFix 报告工单是否已记录修复（PR、提交、修复版本或上线）。
+func hasFix(t *Ticket) bool {
+	return t.FixedPR != 0 || t.FixedCommit != "" || t.FixedReleaseID != 0 || t.DeployedAt != nil
+}
+
 func enqueueClose(ctx context.Context, tx Tx, t *Ticket, attempt int) error {
 	return tx.Enqueue(ctx, Task{Key: closeKey(t.ID, attempt), TicketID: t.ID, Op: OpCloseIssue,
 		Payload: map[string]any{"issue": t.IssueNumber, "repo": t.Repo}})
 }
 
 // RejectForwarded 驳回已转研发、尚未修复的工单（reviewer / admin），reason 必填且对提交人可见。
+// abnormal 工单只在没有修复记录时可驳回（建单失败或 Issue 被删除前尚未修复）；已记录修复 PR / 提交 / 版本 / 上线的返回 ErrConflict。
 // 工单、评论与历史全部保留，状态改为 rejected；工单已关联主 Issue 时入队关闭该 Issue（持久化、可重试，
 // 同一工单只入队一次），不动其他 Issue 与 PR。驳回之后 Gitea 侧的关闭、重开、删除等变化不再改变工单状态。
 // 对已驳回的工单重复调用直接返回当前工单，不重复留痕、通知或入队；待确认工单请用 Reject。
@@ -73,6 +79,9 @@ func (s *Service) RejectForwarded(ctx context.Context, p auth.Principal, id int6
 			return fmt.Errorf("%w: ticket %d is pending_triage, use reject", ErrConflict, id)
 		case !t.Status.revocable():
 			return fmt.Errorf("%w: ticket %d is %s, cannot be rejected", ErrConflict, id, t.Status)
+		case hasFix(t):
+			// 已修复的工单 Issue 被删除后为 abnormal，修复记录仍在：同样不可驳回
+			return fmt.Errorf("%w: ticket %d has a recorded fix, cannot be rejected", ErrConflict, id)
 		}
 		prev := t.Status
 		t.Status = StatusRejected

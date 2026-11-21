@@ -2,6 +2,7 @@ package lingo
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"testing"
 )
@@ -72,9 +73,22 @@ func TestMigrationTablesParsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := migrationStatus(ms, map[string]string{"0001_init.sql": ms[0].checksum}, map[string]bool{})
-	for _, n := range []string{"lingo_projects", "lingo_tickets", "lingo_outbox", "lingo_events"} {
-		if !slices.Contains(st.MissingTables, n) {
-			t.Errorf("%s not expected: %v", n, st.MissingTables)
+	want := []string{"lingo_projects", "lingo_repos", "lingo_releases", "lingo_tickets", "lingo_ticket_comments",
+		"lingo_ticket_perspectives", "lingo_release_tickets", "lingo_ticket_events", "lingo_events", "lingo_outbox",
+		"lingo_webhook_deliveries", "lingo_llm_usage", "lingo_repo_state"}
+	if !slices.Equal(st.MissingTables, want) {
+		t.Errorf("0001 tables = %v, want %v", st.MissingTables, want)
+	}
+	// 缺表推算的约束（PRD 5.4）：表名不带引号与 schema 前缀，不用 ALTER TABLE … RENAME 改表名
+	bad := regexp.MustCompile(`(?i)\b(?:CREATE|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:"|[a-z_][a-z0-9_]*\s*\.)|\bALTER\s+TABLE\b[^;]*\bRENAME\s+TO\b`)
+	for _, m := range ms {
+		if b := bad.FindString(sqlCommentRe.ReplaceAllString(m.body, "")); b != "" {
+			t.Errorf("%s: unsupported table statement for CheckMigrations: %q", m.name, b)
 		}
+	}
+	// 注释里的 CREATE / DROP TABLE 不计入
+	fake := []migration{{name: "0001_x.sql", checksum: "c", body: "-- CREATE TABLE lingo_ghost (\n/* DROP TABLE lingo_a; */\nCREATE TABLE lingo_a (id int);\n"}}
+	if st := migrationStatus(fake, map[string]string{"0001_x.sql": "c"}, map[string]bool{}); !slices.Equal(st.MissingTables, []string{"lingo_a"}) {
+		t.Errorf("comments parsed: %v", st.MissingTables)
 	}
 }

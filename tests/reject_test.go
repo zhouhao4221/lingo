@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -265,5 +267,47 @@ func TestRESTRejectForwarded(t *testing.T) {
 	}
 	if code, body, _ := c.do("r1", "reviewer", "POST", ppath+"/issue-close/retry", nil); code != 409 {
 		t.Errorf("retry without issue: %d %v", code, body)
+	}
+}
+
+// 建单与驳回并发：Issue 在 Gitea 建好、结果尚未记下时工单被驳回。补记关联并关闭该 Issue，
+// 工单保持 rejected，不再补传附件、不改 Issue 正文。
+func TestRejectDuringIssueCreation(t *testing.T) {
+	g := &giteaServer{templates: bugTemplate}
+	l, _, _ := newTicketLingo(t, g, nil, map[lingo.TicketType]bool{lingo.TicketBug: true})
+	marker := regexp.MustCompile(`lingo:ticket=(\d+)`)
+	var rejectErr error
+	g.onCreate = func(body string) {
+		m := marker.FindStringSubmatch(body)
+		if m == nil {
+			rejectErr = errors.New("no ticket marker in issue body")
+			return
+		}
+		id, _ := strconv.ParseInt(m[1], 10, 64)
+		_, rejectErr = l.RejectForwardedTicket(context.Background(), rita, id, "重复需求")
+	}
+	runLingo(t, l)
+	ctx := context.Background()
+	tk, err := l.CreateTicket(ctx, alice, lingo.TicketInput{Type: lingo.TicketBug, Content: "登录失败",
+		Fields:      map[string][]string{"what": {"登录失败"}},
+		Attachments: []lingo.Attachment{{ID: "a", Name: "a.png", URL: "https://app.example.com/files/a", ContentType: "image/png"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := waitIssueClose(t, l, tk.ID, "done")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if rejectErr != nil {
+		t.Fatalf("reject during create: %v", rejectErr)
+	}
+	if c.Repo != "demo/api" || c.Number != 40 || len(g.created) != 1 || len(g.closes) != 1 || g.issues[0]["state"] != "closed" {
+		t.Errorf("close = %+v created %d closes %v", c, len(g.created), g.closes)
+	}
+	if len(g.edits) != 0 || len(g.assets) != 0 {
+		t.Errorf("attachments forwarded after reject: edits %q assets %v", g.edits, g.assets)
+	}
+	got, err := l.GetTicket(ctx, rita, tk.ID)
+	if err != nil || got.Status != "rejected" || !strings.HasSuffix(got.IssueURL, "/demo/api/issues/40") {
+		t.Errorf("ticket = %+v %v", got, err)
 	}
 }

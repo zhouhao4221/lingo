@@ -136,6 +136,36 @@ func TestCloseIssue(t *testing.T) {
 	}
 }
 
+type rejectedPerspDrafts struct {
+	fakeCloseDrafts
+}
+
+func (f *rejectedPerspDrafts) Perspectives(context.Context, int64) (*ticket.PerspectiveSet, error) {
+	c := *f.t
+	return &ticket.PerspectiveSet{Ticket: &c}, nil
+}
+
+// 驳回前已排队的评论、标签与视角同步在驳回后直接完成，不再写 Gitea（fakeCloseIssues 未实现这些方法，调用即 panic）。
+func TestQueuedWritesSkippedAfterReject(t *testing.T) {
+	ctx := context.Background()
+	rejected := &ticket.Ticket{ID: 8, Type: ticket.TypeFeature, Repo: "demo/api", IssueNumber: 12, Status: ticket.StatusRejected}
+	g := &fakeCloseIssues{state: gitea.StateOpen}
+	w := &Worker{o: Options{Issues: g, Drafts: &rejectedPerspDrafts{fakeCloseDrafts{t: rejected}}, Now: time.Now},
+		log: slog.New(slog.DiscardHandler)}
+	if err := w.createComment(ctx, 8, 5); err != nil {
+		t.Errorf("comment: %v", err)
+	}
+	if err := w.removeLabel(ctx, 8, "lingo/review/need-info"); err != nil {
+		t.Errorf("label: %v", err)
+	}
+	if err := w.syncPerspectives(ctx, 8, 3); err != nil {
+		t.Errorf("perspectives: %v", err)
+	}
+	if len(g.closed) != 0 {
+		t.Errorf("gitea touched: %v", g.closed)
+	}
+}
+
 // close_issue 任务经 handleTask：成功完成、可重试错误退避重试、达到上限或不可重试时放弃（failed，原因可查），
 // 且不会像建单失败那样把工单改为 abnormal。
 func TestCloseIssueTaskOutcomes(t *testing.T) {

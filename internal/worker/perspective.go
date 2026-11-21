@@ -132,6 +132,9 @@ func (w *Worker) syncPerspectives(ctx context.Context, ticketID, perspectiveID i
 		return err
 	}
 	t := set.Ticket
+	if t.Status == ticket.StatusRejected {
+		return nil // 已驳回：驳回前排队的视角同步不再改 Issue 正文与标签，补充留在灵问
+	}
 	if t.Type != ticket.TypeFeature {
 		return nil // 转出时改成了其他类型：补充留在灵问
 	}

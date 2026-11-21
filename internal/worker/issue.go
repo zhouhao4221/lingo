@@ -257,11 +257,7 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 				if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "dedup", commentIDs(inBody)); err != nil {
 					return err
 				}
-				if t.Status == ticket.StatusRejected {
-					return nil // IssueCreated 已补记关联并入队关闭
-				}
-				t.IssueNumber = is.Number
-				return w.uploadIssueAttachments(ctx, t, exclude)
+				return w.afterIssueCreated(ctx, id, is.Number, exclude)
 			}
 		}
 	}
@@ -318,7 +314,25 @@ func (w *Worker) createIssue(ctx context.Context, id int64, forwardedBy, note st
 	if _, err := w.o.Drafts.IssueCreated(ctx, id, is.Number, "create", commentIDs(comments)); err != nil {
 		return err // 重试时会按标记查到这个 Issue，不会重复建
 	}
-	t.IssueNumber = is.Number
+	return w.afterIssueCreated(ctx, id, is.Number, exclude)
+}
+
+// afterIssueCreated 在建单结果记下后重读工单再补传附件：建单途中工单可能已被驳回（IssueCreated 已补记关联并入队关闭），
+// 此时不再上传附件、不改正文，只由 close_issue 关闭。
+func (w *Worker) afterIssueCreated(ctx context.Context, id, number int64, exclude []string) error {
+	t, err := w.o.Drafts.Draft(ctx, id)
+	if errors.Is(err, ticket.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err // 重试时工单已有 Issue 编号，按当前状态决定是否补传
+	}
+	if t.Status == ticket.StatusRejected {
+		return nil
+	}
+	if t.IssueNumber == 0 {
+		t.IssueNumber = number
+	}
 	return w.uploadIssueAttachments(ctx, t, exclude)
 }
 
@@ -687,8 +701,8 @@ func (w *Worker) removeLabel(ctx context.Context, ticketID int64, label string) 
 	if err != nil {
 		return err
 	}
-	if t.IssueNumber == 0 {
-		return nil
+	if t.IssueNumber == 0 || t.Status == ticket.StatusRejected {
+		return nil // 已驳回：驳回前排队的标签调整不再执行（只关闭 Issue，不改标签）
 	}
 	owner, name, _ := strings.Cut(t.Repo, "/")
 	for attempt := 0; ; attempt++ {
@@ -726,7 +740,9 @@ func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
 	owner, name, _ := strings.Cut(t.Repo, "/")
 	is, err := w.o.Issues.GetIssue(ctx, owner, name, t.IssueNumber)
 	if errors.Is(err, gitea.ErrNotFound) {
-		return nil // Issue 已被删除：没有可关闭的
+		// Issue 已被删除，或机器人已无权查看该仓库（Gitea 同样返回 404）：没有可关闭的，按完成处理
+		w.log.Warn("issue to close not found, treating as done", "ticket", t.ID, "repo", t.Repo, "issue", t.IssueNumber)
+		return nil
 	}
 	if err != nil {
 		return giteaErr("get issue", err)
@@ -737,6 +753,7 @@ func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
 	state := gitea.StateClosed
 	if _, err := w.o.Issues.EditIssue(ctx, owner, name, t.IssueNumber, gitea.EditIssueOption{State: &state}); err != nil {
 		if errors.Is(err, gitea.ErrNotFound) {
+			w.log.Warn("issue to close not found, treating as done", "ticket", t.ID, "repo", t.Repo, "issue", t.IssueNumber)
 			return nil
 		}
 		return giteaErr("close issue", err)
@@ -755,6 +772,9 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 	}
 	if err != nil {
 		return err
+	}
+	if t.Status == ticket.StatusRejected {
+		return nil // 已驳回：驳回前排队的补充不再发到 Issue（只关闭 Issue，不评论），评论留在灵问
 	}
 	c, err := w.o.Forwarding.Comment(ctx, commentID)
 	if errors.Is(err, ticket.ErrNotFound) {

@@ -32,6 +32,48 @@ func TestRejectForwardedByStatus(t *testing.T) {
 	}
 }
 
+// abnormal 只在没有修复记录时可驳回：已修复的工单 Issue 被删除后为 abnormal，修复记录仍在，不可驳回；
+// 建单失败的 abnormal（没有 Issue）可驳回。
+func TestRejectForwardedAbnormalWithFix(t *testing.T) {
+	ctx := context.Background()
+	fixed := base(StatusFixed)
+	fixed.FixedPR = 7
+	m := newMem(fixed)
+	if err := newSync(t, m, t0).ApplyIssue(ctx, issue(IssueDeleted, IssueState{})); err != nil {
+		t.Fatal(err)
+	}
+	if tk := m.tickets[1]; tk.Status != StatusAbnormal || tk.FixedPR != 7 {
+		t.Fatalf("after delete: %+v", tk)
+	}
+	events, tasks := len(m.events), len(m.tasks)
+	if _, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做"); !errors.Is(err, ErrConflict) ||
+		m.tickets[1].Status != StatusAbnormal || len(m.events) != events || len(m.tasks) != tasks {
+		t.Errorf("fixed then deleted: err %v %+v", err, m.tickets[1])
+	}
+	for name, set := range map[string]func(*Ticket){
+		"commit":  func(tk *Ticket) { tk.FixedCommit = "abc" },
+		"release": func(tk *Ticket) { tk.FixedReleaseID = 3 },
+		"deployed": func(tk *Ticket) {
+			at := t0
+			tk.DeployedAt = &at
+		},
+	} {
+		tk := base(StatusAbnormal)
+		set(&tk)
+		m := newMem(tk)
+		if _, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做"); !errors.Is(err, ErrConflict) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// 建单失败：没有 Issue、没有修复记录，可驳回且不入队关闭
+	failed := base(StatusAbnormal)
+	failed.IssueNumber = 0
+	m = newMem(failed)
+	if got, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做"); err != nil || got.Status != StatusRejected || len(m.tasks) != 0 {
+		t.Errorf("create failed: %v %+v tasks %v", err, got, m.tasks)
+	}
+}
+
 func TestRejectForwardedEffectsAndIdempotent(t *testing.T) {
 	tk := base(StatusInProgress)
 	m := newMem(tk)
