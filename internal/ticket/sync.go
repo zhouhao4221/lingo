@@ -184,6 +184,18 @@ func (s *Sync) linkByMarker(ctx context.Context, tx Tx, u IssueUpdate, mergePend
 	if err != nil {
 		return err
 	}
+	if t.IssueNumber == 0 && t.Status == StatusRejected && strings.EqualFold(t.Repo, u.Repo) {
+		// 建单途中被驳回、建单结果未能保存：补记关联并入队关闭这个 Issue，工单保持驳回
+		t.IssueNumber = u.Number
+		if err := tx.Update(ctx, t); err != nil {
+			return err
+		}
+		if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: "issue.linked", Payload: map[string]any{
+			"delivery": u.DeliveryID, "issue": u.Number, "repo": t.Repo, "rejected": true}}); err != nil {
+			return err
+		}
+		return enqueueClose(ctx, tx, t, 1)
+	}
 	if t.IssueNumber != 0 || t.Status != StatusSubmitted || !strings.EqualFold(t.Repo, u.Repo) {
 		return nil // 标记与库中记录不符：不采信
 	}
@@ -263,6 +275,10 @@ func (s *Sync) awaitFix(u IssueUpdate, mergePending bool) error {
 // transitIssue 按变化与 Issue 当前状态推进工单（PRD 3.2.2 工单状态表）。
 func (s *Sync) transitIssue(t *Ticket, u IssueUpdate, ignoreNeedInfo bool) {
 	cur := u.Current
+	if t.Status == StatusRejected {
+		// 本地驳回是终态：灵问关闭 Issue 回流的 closed、研发重开、删除或对账快照都不改变工单状态与排期，只留痕
+		return
+	}
 	switch u.Change {
 	case IssueOpened:
 		if t.Status == StatusSubmitted {
@@ -277,6 +293,11 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate, ignoreNeedInfo bool) {
 			reopenTicket(t)
 		}
 	case IssueDeleted:
+		if t.Status == StatusClosed {
+			// 已关闭（未修复）是终态：Issue 删除或读取 404（含权限被收回）只留痕，保持 closed，不转 abnormal，
+			// 也就不会因此变成可驳回（RejectForwarded 不开放已关闭工单）
+			return
+		}
 		t.Status = StatusAbnormal
 		return
 	case IssueAssigned:

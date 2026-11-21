@@ -228,6 +228,20 @@ type Ticket struct {
 	TriageSince *time.Time `json:"triage_since,omitempty"` // 进入待确认的时间，非待确认为空
 }
 
+// IssueClose 是转研发后被驳回的工单关闭关联 Issue 的进度（RejectForwardedTicket 之后由 Run 异步执行）。
+type IssueClose struct {
+	TicketID int64  `json:"ticket_id"`
+	Repo     string `json:"repo,omitempty"`  // 关联 Issue 所在仓库 "owner/name"；没有要关闭的 Issue 时为空
+	Number   int64  `json:"issue,omitempty"` // 关联的主 Issue 编号
+	// State 取值：none（没有要关闭的 Issue）| pending（排队或重试中）| done（已关闭，或 Issue 已是关闭状态）|
+	// failed（超过重试上限或不可重试的错误，含 Issue 返回 404、无法确认已删除；可调用 RetryTicketIssueClose）
+	State     string     `json:"state"`
+	Attempt   int        `json:"attempt"`              // 第几轮关闭任务，首轮为 1，每次重试入队加 1；没有任务为 0
+	Failures  int        `json:"failures"`             // 本轮已失败次数
+	LastError string     `json:"last_error,omitempty"` // 本轮最近一次失败原因
+	UpdatedAt *time.Time `json:"updated_at,omitempty"` // 本轮任务最近更新时间
+}
+
 // Comment 是工单评论：提交人补充、后台答复、研发在 Gitea 的回复。external 只能看到对外评论。
 type Comment struct {
 	ID         int64     `json:"id"`

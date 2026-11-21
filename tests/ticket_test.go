@@ -22,12 +22,16 @@ type giteaServer struct {
 	labels    []map[string]any
 	issues    []map[string]any
 	templates string
-	created   []map[string]any // POST /issues 的请求体
-	createErr int              // 非 0 时 POST /issues 返回该状态码
-	assets    []string         // 上传的附件：路径 + 文件名
-	comments  []string         // 机器人发出的评论正文
-	edits     []string         // 编辑后的 Issue / 评论正文
-	added     []int64          // POST issues/{n}/labels 追加的标签 id
+	created   []map[string]any  // POST /issues 的请求体
+	createErr int               // 非 0 时 POST /issues 返回该状态码
+	assets    []string          // 上传的附件：路径 + 文件名
+	comments  []string          // 机器人发出的评论正文
+	edits     []string          // 编辑后的 Issue / 评论正文
+	added     []int64           // POST issues/{n}/labels 追加的标签 id
+	closes    []string          // PATCH state=closed 的 Issue 路径
+	closeErr  int               // 非 0 时 PATCH state 返回该状态码
+	onCreate  func(body string) // 非空时在 POST /issues 建好 Issue、返回之前调用（持有 mu）
+	hidden    bool              // 为真时 demo/api 下的请求都返回 404（模拟机器人对仓库的权限被收回）
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +41,8 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/user":
 		_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
+	case g.hidden && (p == "/repos/demo/api" || strings.HasPrefix(p, "/repos/demo/api/")):
+		http.NotFound(w, r)
 	case p == "/repos/demo/api/labels" && r.Method == "GET":
 		_ = json.NewEncoder(w).Encode(g.labels)
 	case p == "/repos/demo/api/labels" && r.Method == "POST":
@@ -60,6 +66,10 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		is := map[string]any{"id": 1000 + len(g.issues), "number": 40 + len(g.issues), "title": req["title"], "body": req["body"],
 			"state": "open", "user": map[string]any{"login": "lingo-bot"}}
 		g.issues = append(g.issues, is)
+		if g.onCreate != nil {
+			body, _ := req["body"].(string)
+			g.onCreate(body)
+		}
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(is)
 	case strings.Contains(p, "/labels/") && r.Method == "DELETE":
@@ -85,6 +95,22 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.HasPrefix(p, "/repos/demo/api/issues/") && r.Method == "PATCH":
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if st, ok := req["state"].(string); ok && !strings.Contains(p, "/comments/") {
+			if g.closeErr != 0 {
+				http.Error(w, `{"message":"forbidden"}`, g.closeErr)
+				return
+			}
+			g.closes = append(g.closes, p)
+			for _, is := range g.issues {
+				if "/repos/demo/api/issues/"+jsonNum(int64(is["number"].(int))) == p {
+					is["state"] = st
+					_ = json.NewEncoder(w).Encode(is)
+					return
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		body, _ := req["body"].(string)
 		g.edits = append(g.edits, body)
 		for _, is := range g.issues { // 编辑 Issue 正文后 GET 读到新正文

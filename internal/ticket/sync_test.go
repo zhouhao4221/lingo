@@ -23,6 +23,7 @@ type memStore struct {
 	auto     map[string]bool     // "project:type"
 	notes    []Comment
 	tasks    map[string]Task
+	states   map[string]*TaskState // 任务执行状态（测试设置）；有任务而未设置时为 pending
 	reminded map[int64]time.Time
 
 	perspectives []Perspective
@@ -205,6 +206,17 @@ func (m *memStore) Enqueue(_ context.Context, t Task) error {
 	return nil
 }
 
+func (m *memStore) TaskState(_ context.Context, key string) (*TaskState, error) {
+	if _, ok := m.tasks[key]; !ok {
+		return nil, nil
+	}
+	if st, ok := m.states[key]; ok {
+		c := *st
+		return &c, nil
+	}
+	return &TaskState{Key: key, Status: "pending"}, nil
+}
+
 func (m *memStore) HasIssue(ctx context.Context, repo string, n int64) (bool, error) {
 	_, err := m.LockByIssue(ctx, repo, n)
 	return err == nil, nil
@@ -254,6 +266,21 @@ func (m *memStore) SeenPull(_ context.Context, id int64, kind, pull string) (boo
 		}
 	}
 	return false, nil
+}
+
+func (m *memStore) AbnormalFrom(_ context.Context, id int64) (Status, error) {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		h := m.history[i]
+		switch {
+		case h.TicketID != id:
+		case h.Kind == "issue.create_failed":
+			return StatusSubmitted, nil
+		case h.Payload["status"] == string(StatusAbnormal) && h.Payload["prev_status"] != string(StatusAbnormal):
+			p, _ := h.Payload["prev_status"].(string)
+			return Status(p), nil
+		}
+	}
+	return "", nil
 }
 
 func (m *memStore) AddHistory(_ context.Context, h History) error {
@@ -332,6 +359,7 @@ func TestApplyIssueTransitions(t *testing.T) {
 		{"reopened from fixed", StatusReleased, 7, issue(IssueReopened, IssueState{State: "open"}), StatusInProgress, "ticket.status:released>in_progress"},
 		{"reopened but closed since", StatusClosed, 0, issue(IssueReopened, IssueState{State: "closed"}), StatusClosed, ""},
 		{"deleted", StatusInProgress, 0, issue(IssueDeleted, IssueState{}), StatusAbnormal, "ticket.status:in_progress>abnormal"},
+		{"deleted when closed", StatusClosed, 0, issue(IssueDeleted, IssueState{}), StatusClosed, ""},
 		{"edited", StatusOpen, 0, issue(IssueEdited, IssueState{State: "open"}), StatusOpen, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {

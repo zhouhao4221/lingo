@@ -68,6 +68,21 @@ type Tx interface {
 	Perspectives(ctx context.Context, ticketID int64) ([]Perspective, error)
 	// Emit 写入对外事件（分配 ID），并在启用通知时写入通知 outbox。
 	Emit(ctx context.Context, e notify.Event) error
+	// TaskState 按幂等键读取 Gitea 写操作任务的执行状态；不存在时返回 nil。
+	TaskState(ctx context.Context, key string) (*TaskState, error)
+	// AbnormalFrom 返回工单最近一次进入 abnormal 之前的状态，取自与状态变更同事务写入的历史：
+	// payload.status = abnormal 且 prev_status 不是 abnormal 的最新一条（建单失败 issue.create_failed 视为从 submitted 进入）。
+	// 没有这样的历史时返回空串。
+	AbnormalFrom(ctx context.Context, ticketID int64) (Status, error)
+}
+
+// TaskState 是 Gitea 写操作任务（outbox）的执行状态。
+type TaskState struct {
+	Key       string
+	Status    string // pending | done | failed
+	Failures  int
+	LastError string
+	UpdatedAt time.Time
 }
 
 // History 是 ticket_events 中的一条审计记录。
@@ -116,6 +131,8 @@ const (
 	OpRemoveLabel   = "remove_label"
 	// OpSyncPerspectives 把需求视角补充同步到 Issue：重写正文区块、补打视角标签、发提示评论。
 	OpSyncPerspectives = "sync_perspectives"
+	// OpCloseIssue 在工单转研发后被驳回时关闭工单的主 Issue（只关闭这一个，不动其他 Issue 与 PR）。
+	OpCloseIssue = "close_issue"
 )
 
 // Task 是 Gitea 写操作任务（outbox kind=gitea）。

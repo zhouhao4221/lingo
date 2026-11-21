@@ -12,7 +12,7 @@ const (
 	StatusPendingTriage Status = "pending_triage" // 待后台确认
 	StatusAnswered      Status = "answered"       // 后台直接答复，未转出
 	StatusMerged        Status = "merged"         // 已合并到其他工单
-	StatusRejected      Status = "rejected"       // 已驳回，未转出
+	StatusRejected      Status = "rejected"       // 已驳回：待确认时驳回（未转出），或转研发后由后台驳回（关闭关联 Issue）
 	StatusSubmitted     Status = "submitted"      // 已确认，Issue 待创建
 	StatusOpen          Status = "open"           // 已转研发
 	StatusInProgress    Status = "in_progress"    // 已领取 / 开发中
@@ -46,6 +46,16 @@ func (s Status) fixed() bool {
 func (s Status) ended() bool {
 	switch s {
 	case StatusAnswered, StatusMerged, StatusRejected, StatusClosed:
+		return true
+	}
+	return false
+}
+
+// revocable 表示已转研发、尚未修复或结束的工单，可由后台驳回（RejectForwarded）。
+// 已修复（fixed / released / deployed）与已关闭的工单结论已定，不再驳回。
+func (s Status) revocable() bool {
+	switch s {
+	case StatusSubmitted, StatusOpen, StatusInProgress, StatusNeedInfo, StatusAbnormal:
 		return true
 	}
 	return false

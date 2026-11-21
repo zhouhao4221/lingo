@@ -97,6 +97,38 @@ func (l *Lingo) RejectTicket(ctx context.Context, u User, id int64, reason strin
 	return l.ticketResult(t, err)
 }
 
+// RejectForwardedTicket 驳回已转研发的工单（仅 reviewer / admin），reason 必填且对提交人可见（ticket.status 事件正文）。
+// 可驳回的状态：submitted、open、in_progress、need_info、abnormal；已修复（fixed / released / deployed）、已关闭的
+// 返回 ErrConflict，待确认工单请用 RejectTicket。工单、评论、历史全部保留，状态改为 rejected；工单关联了主 Issue 时
+// 由 Run 异步关闭该 Issue（持久化、失败按退避重试，同一工单只入队一次），只关闭这一个 Issue，不评论、不改标签、不动 PR。
+// 驳回后 Gitea 侧的关闭、重开、删除与对账都不再改变工单状态。对已驳回的工单重复调用返回当前工单，不重复通知或入队。
+// 关闭进度用 TicketIssueClose 查询，失败后用 RetryTicketIssueClose 重新入队。
+func (l *Lingo) RejectForwardedTicket(ctx context.Context, u User, id int64, reason string) (Ticket, error) {
+	t, err := l.tickets.RejectForwarded(ctx, l.principal(u), id, reason)
+	return l.ticketResult(t, err)
+}
+
+// TicketIssueClose 返回工单驳回后关闭关联 Issue 的进度（仅 reviewer / admin）；不改变任何数据。
+func (l *Lingo) TicketIssueClose(ctx context.Context, u User, id int64) (IssueClose, error) {
+	c, err := l.tickets.IssueClose(ctx, l.principal(u), id)
+	return publicIssueClose(c, err)
+}
+
+// RetryTicketIssueClose 在关闭关联 Issue 失败（State 为 failed）后重新入队一轮（仅 reviewer / admin），返回入队后的进度；
+// 任务仍在排队或已完成时不重复入队，直接返回当前进度；工单没有要关闭的 Issue 时返回 ErrConflict。
+func (l *Lingo) RetryTicketIssueClose(ctx context.Context, u User, id int64) (IssueClose, error) {
+	c, err := l.tickets.RetryIssueClose(ctx, l.principal(u), id)
+	return publicIssueClose(c, err)
+}
+
+func publicIssueClose(c *ticket.IssueClose, err error) (IssueClose, error) {
+	if err != nil {
+		return IssueClose{}, publicErr(err)
+	}
+	return IssueClose{TicketID: c.TicketID, Repo: c.Repo, Number: c.Number, State: c.State, Attempt: c.Attempt,
+		Failures: c.Failures, LastError: c.LastError, UpdatedAt: c.UpdatedAt}, nil
+}
+
 // SetAutoForward 在运行时覆盖项目 project 下工单类型 t 是否自动转出（仅 admin），存入数据库并优先于
 // Project.AutoForward；u 为操作人，用于权限校验与留痕。
 func (l *Lingo) SetAutoForward(ctx context.Context, u User, project string, t TicketType, on bool) error {

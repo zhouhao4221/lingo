@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.25 | 2026-11-21 | haiqing | 新增转研发后驳回（REQ-002）：`RejectForwardedTicket` / `POST /tickets/{id}/reject-forwarded` / MCP `reject_forwarded_ticket`（reviewer / admin，原因必填），工单保留并改为 `rejected`，经 outbox 只关闭关联主 Issue（可重试、防重复），进度与重试 `TicketIssueClose` / `RetryTicketIssueClose`；驳回后 Gitea 回流不覆盖本地结论；新增只读迁移检查 `lingo.CheckMigrations` |
 | v1.24 | 2026-11-21 | haiqing | 新增需求多视角补充（REQ-001；视角标签 `<前缀>/视角/<视角名>`）：固定视角使用者 / 业务方 / 专家 / 决策者（`User.Perspective`，由 `Authenticate` 提供，与权限角色无关）；需求类工单可由各视角追加补充（转出前后均可、只追加），Issue 正文按视角分层渲染（标记区块，单向同步）并打固定视角标签；必填视角（`Config` 默认、`Project` 覆盖）与缺失标注；新增事件 `ticket.perspective_added`、`ticket.perspective_missing`；数据隔离新增两条例外：补充人与首段提交人姓名写入 Issue、视角补充的追加与查询由 `Config.AuthorizePerspective` 判定（未配置时同工单可见范围） |
 | v1.23 | 2026-11-21 | haiqing | 数据模型精简：表名统一加 `lingo_` 前缀（避免与接入方业务表重名）；表从 23 张减到 12 张——尚未实现的问答、知识库、需求评审、业务数据审计、多仓库拆单的表待实现时再经新迁移加入，自动转出覆盖值、上线记录并为项目 / 版本上的 jsonb 列，后台确认记录并入工单审计（`triage.*`），Webhook 连通时间与对账游标合并为 `lingo_repo_state`；附件不再存数据库：由接入方自己的附件系统保存与鉴权，提交时传引用（ID、文件名、地址），转出时经可选的 `Config.FetchAttachment` 读取内容上传为 Gitea 附件，未配置时只把地址写进 Issue；去掉 `UploadAttachment` / `GetAttachment`、`POST /attachments`、`GET /attachments/{id}` 与 `MaxAttachmentBytes`；`conversation_id` 随问答一并延后 |
 | v1.22 | 2026-11-21 | haiqing | 模型用量与缓存：解析接口返回的 token 用量（含命中服务端前缀缓存的部分：OpenAI `cached_tokens`、DeepSeek `prompt_cache_hit_tokens`），每次调用写入 `llm_usage` 并记日志；`l.LLMUsage` / `GET /usage` / MCP `get_llm_usage`（admin）按天、用途、模型汇总并给出缓存命中率；自定义模型可实现 `UsageModel` 报告用量；建单整理的提示词按“不变在前、变化在后”排布；进程内缓存（Issue 模板、标签、整理结果）统一为带过期时间与容量上限的 `internal/cache` |
@@ -230,6 +231,7 @@ flowchart LR
 | `add_perspective` / `list_perspectives` | 以调用者视角追加需求补充 / 查询按视角分组的补充与缺失视角（见 3.2.2.1，名称暂定） | 两侧 |
 | `list_events` | 按 ID 增量拉取进展事件 | 两侧 |
 | `list_triage` / `forward_ticket` / `answer_ticket` / `merge_ticket` / `reject_ticket` | 后台确认（reviewer / admin） | 研发负责人 |
+| `reject_forwarded_ticket` / `get_issue_close` / `retry_issue_close` | 驳回已转研发工单、关闭关联 Issue 的进度与重试（reviewer / admin，见 3.2.2.2） | 研发负责人 |
 | `list_releases` / `get_release` | 版本记录、关联工单与上线记录 | 两侧 |
 | `ask` / `search_knowledge` | 提问与检索知识库（待知识问答实现） | 两侧 |
 
@@ -611,6 +613,8 @@ flowchart LR
 | `POST /tickets/{id}/answer` | 直接答复并关闭 |
 | `POST /tickets/{id}/merge` | 合并到 `target_ticket_id` |
 | `POST /tickets/{id}/reject` | 驳回，必须带 `reason` |
+| `POST /tickets/{id}/reject-forwarded` | 驳回已转研发工单，必须带 `reason`（见 3.2.2.2） |
+| `GET /tickets/{id}/issue-close`、`POST /tickets/{id}/issue-close/retry` | 驳回后关闭关联 Issue 的进度、失败后重试 |
 | `GET / PUT /settings/auto-forward` | 查看 / 修改自动转出开关（修改仅 `admin`） |
 
 **验收标准**：
@@ -676,7 +680,7 @@ flowchart LR
 | `pending_triage` | 待后台确认 | 该项目 + 类型未开启自动转出（3.2.1.2） |
 | `answered` | 后台直接答复，未转出 | 后台 `answer` |
 | `merged` | 已合并到其他工单 | 后台 `merge` |
-| `rejected` | 已驳回，未转出 | 后台 `reject` |
+| `rejected` | 已驳回：未转出，或转研发后驳回（保留 Issue 关联并关闭该 Issue） | 后台 `reject`；已转研发后 `reject-forwarded`（3.2.2.2） |
 | `submitted` | 已确认，Issue 待创建 | 自动转出或后台 `forward` |
 | `open` | 已转研发 | Issue 创建成功 |
 | `in_progress` | 已领取 / 开发中 | `issue_assign` assigned；引用本 Issue 的 PR opened |
@@ -685,7 +689,7 @@ flowchart LR
 | `released` | 修复已随版本发布 | 见 3.2.0.4 关联规则 |
 | `deployed` | 已上线 | 见 3.2.0.4 上线识别 |
 | `closed` | 关闭未修复（已答复 / 不修复 / 重复） | `issues` closed 且无已合并的修复 PR |
-| `abnormal` | Issue 被删除或仓库不可访问 | `issues` deleted；API 返回 404 |
+| `abnormal` | Issue 被删除或仓库不可访问 | `issues` deleted；API 返回 404（已关闭工单保持 `closed`，不转 `abnormal`） |
 
 `issues` reopened 时回到 `in_progress`、清除已记录的修复 PR 与提交并通知提交人；`issue_milestone` milestoned 时记录计划版本与截止日期，经 `ticket.scheduled` 通知提交人。
 
@@ -764,6 +768,18 @@ flowchart LR
 - [ ] 配置必填视角后，缺少决策意见的需求在 Issue 中标注"缺少：决策意见"，接入方收到 `ticket.perspective_missing`；补齐后标注消失
 - [ ] 咨询 / Bug 工单、已关闭工单补充失败；`User.Projects` 之外的项目返回 404
 - [ ] lingo 自己改正文触发的 Webhook 不会引起视角数据变化，也不会再次重写
+
+#### 3.2.2.2 转研发后驳回（REQ-002）
+
+**功能描述**：已转研发、尚未修复的工单（`submitted` / `open` / `in_progress` / `need_info` / 无修复记录的 `abnormal`）可由 reviewer / admin 驳回：工单、评论、历史保留，状态改为 `rejected`，只关闭工单关联的主 Issue。详见 [REQ-002](active/REQ-002-转研发后驳回与迁移就绪检查.md)。
+
+**业务规则**：
+- 原因必填，作为 `ticket.status` 事件正文通知提交人；审计 `ticket.rejected`；不发 `triage.resolved`
+- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭视为完成；Issue 返回 404（已删除、权限被收回、Issues 被禁用或单独拒权，无法区分）时任务 `failed`、原因可查、可人工重试；只 `PATCH state=closed`，不评论、不改标签、不动 PR 与其他 Issue
+- 可重试错误按 outbox 退避重试，超过上限或不可重试时任务 `failed` 并保留原因，工单仍为 `rejected`；`TicketIssueClose` 查询进度，`RetryTicketIssueClose` 仅在 `failed` 时入队新一轮
+- 重复 / 并发驳回只生效一次；建单途中被驳回时，事后发现的 Issue 补记关联并关闭
+- 驳回后 Gitea 侧的关闭、重开、删除、标签、指派、里程碑、对账与 PR 合并只记审计，不改变工单；驳回前已排队的补充评论、标签移除与视角同步不再写 Gitea，建单途中被驳回的不再补传附件
+- 已修复（`fixed` / `released` / `deployed`，以及有修复记录的 `abnormal`）、已关闭（含 Issue 删除后仍保持 `closed` 的，以及早期版本由 `closed` 转入 `abnormal`、按状态历史识别的）与待确认工单不适用（`conflict`；待确认用 `reject`）
 
 #### 3.2.3 信息反馈（Notifier）
 
@@ -921,6 +937,8 @@ flowchart LR
 
 - 迁移 SQL 目录：`migrations/`，数据库 PostgreSQL；迁移文件经 `go:embed` 打包在库内
 - 执行：由接入方在发布流程中显式调用 `lingo.Migrate(ctx, db)`，`lingo.New` 时不自动执行
+- 就绪检查：`lingo.CheckMigrations(ctx, db)` 只读对比内嵌迁移与当前 schema（未执行、内容被改、缺表），不建表不改数据、不取 advisory lock（普通读锁会等待进行中的 DDL，调用方应设 ctx 超时）；未就绪返回 `Ready=false`，查询失败返回错误，二者区分，供接入方降级（如只禁用反馈入口）
+- 表名写法：缺表按迁移中的 `CREATE TABLE` / `DROP TABLE` 推算（忽略注释），表名须为不带引号、不带 schema 前缀的小写标识符，不用 `ALTER TABLE … RENAME TO` 改表名（需要改名时新建表并迁移数据）；`TestMigrationTablesParsed` 校验
 - 文件命名：`NNNN_<snake_case_name>.sql`，编号四位递增（现有 `0001_init.sql`），新文件取当前最大编号 + 1
 - 已发布的迁移文件不得修改，结构变更一律新增文件
 - 迁移须向前兼容，保证滚动发布期间新旧版本可同时运行；每个迁移需可在已有数据上执行（加列给默认值或允许 NULL，避免锁大表的操作）
