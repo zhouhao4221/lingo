@@ -65,6 +65,23 @@ func TestRejectForwardedAbnormalWithFix(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	// 关闭未修复的工单 Issue 被删除（或读取 404）：保持 closed，仍不可驳回
+	m = newMem(base(StatusClosed))
+	if err := newSync(t, m, t0).ApplyIssue(ctx, issue(IssueDeleted, IssueState{})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做"); m.tickets[1].Status != StatusClosed ||
+		!errors.Is(err, ErrConflict) || len(m.tasks) != 0 {
+		t.Errorf("closed then deleted: err %v %+v", err, m.tickets[1])
+	}
+	// 处理中的工单 Issue 被删除：abnormal，仍可驳回
+	m = newMem(base(StatusInProgress))
+	if err := newSync(t, m, t0).ApplyIssue(ctx, issue(IssueDeleted, IssueState{})); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := newService(t, m, nil).RejectForwarded(ctx, reviewer, 1, "不做"); err != nil || got.Status != StatusRejected {
+		t.Errorf("in progress then deleted: %v %+v", err, got)
+	}
 	// 建单失败：没有 Issue、没有修复记录，可驳回且不入队关闭
 	failed := base(StatusAbnormal)
 	failed.IssueNumber = 0

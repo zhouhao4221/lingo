@@ -311,3 +311,56 @@ func TestRejectDuringIssueCreation(t *testing.T) {
 		t.Errorf("ticket = %+v %v", got, err)
 	}
 }
+
+// 关闭时 Issue 返回 404 而仓库也读不到（机器人权限被收回）：无法确认 Issue 已删除，任务 failed、原因可查，
+// 工单保持 rejected；权限恢复后人工重试关闭成功。
+func TestRejectForwardedCloseNotFoundRepoHidden(t *testing.T) {
+	g := &giteaServer{templates: bugTemplate}
+	l, _, count, id := newForwarded(t, g)
+	ctx := context.Background()
+	g.mu.Lock()
+	g.hidden = true
+	g.mu.Unlock()
+	if _, err := l.RejectForwardedTicket(ctx, rita, id, "不在支持范围"); err != nil {
+		t.Fatal(err)
+	}
+	c := waitIssueClose(t, l, id, "failed")
+	if c.Attempt != 1 || !strings.Contains(c.LastError, "repository not accessible") {
+		t.Errorf("close = %+v", c)
+	}
+	if tk, err := l.GetTicket(ctx, rita, id); err != nil || tk.Status != "rejected" {
+		t.Errorf("ticket = %+v %v", tk, err)
+	}
+	g.mu.Lock()
+	g.hidden = false
+	g.mu.Unlock()
+	if r, err := l.RetryTicketIssueClose(ctx, rita, id); err != nil || r.State != "pending" || r.Attempt != 2 {
+		t.Fatalf("retry = %+v %v", r, err)
+	}
+	waitIssueClose(t, l, id, "done")
+	closes, _, state := g.snapshot()
+	if len(closes) != 1 || state != "closed" {
+		t.Errorf("gitea closes = %v state %s", closes, state)
+	}
+	if n := count("SELECT count(*) FROM lingo_outbox WHERE payload->>'op' = 'close_issue'"); n != 2 {
+		t.Errorf("close tasks = %d", n)
+	}
+}
+
+// 关闭时 Issue 返回 404 而仓库可读：确认 Issue 已删除，按幂等完成，不调用关闭。
+func TestRejectForwardedCloseIssueDeleted(t *testing.T) {
+	g := &giteaServer{templates: bugTemplate}
+	l, _, _, id := newForwarded(t, g)
+	g.mu.Lock()
+	g.issues = nil
+	g.mu.Unlock()
+	if _, err := l.RejectForwardedTicket(context.Background(), rita, id, "不在支持范围"); err != nil {
+		t.Fatal(err)
+	}
+	if c := waitIssueClose(t, l, id, "done"); c.LastError != "" {
+		t.Errorf("close = %+v", c)
+	}
+	if closes, _, _ := g.snapshot(); len(closes) != 0 {
+		t.Errorf("gitea closes = %v", closes)
+	}
+}

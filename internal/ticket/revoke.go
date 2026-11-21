@@ -15,8 +15,8 @@ import (
 const (
 	CloseNone    = "none"    // 没有要关闭的 Issue（驳回时 Issue 尚未创建，或工单不是转研发后驳回的）
 	ClosePending = "pending" // 排队或重试中
-	CloseDone    = "done"    // 已关闭，或 Issue 已是关闭状态，或读取 / 关闭时 Gitea 返回 404（已删除，或机器人已无权查看该仓库）
-	CloseFailed  = "failed"  // 超过重试上限或遇到不可重试的错误，可调用 RetryIssueClose 重新入队
+	CloseDone    = "done"    // 已关闭，或 Issue 已是关闭状态，或确认已删除（仓库可读而 Issue 返回 404）
+	CloseFailed  = "failed"  // 超过重试上限或遇到不可重试的错误（含 Issue 与仓库都返回 404、无法确认已删除），可调用 RetryIssueClose 重新入队
 )
 
 // IssueClose 是驳回后关闭关联 Issue 的进度。
@@ -52,7 +52,7 @@ func enqueueClose(ctx context.Context, tx Tx, t *Ticket, attempt int) error {
 }
 
 // RejectForwarded 驳回已转研发、尚未修复的工单（reviewer / admin），reason 必填且对提交人可见。
-// abnormal 工单只在没有修复记录时可驳回（建单失败或 Issue 被删除前尚未修复）；已记录修复 PR / 提交 / 版本 / 上线的返回 ErrConflict。
+// abnormal 工单只在没有修复记录时可驳回（建单失败，或 Issue 被删除时尚在处理中；已关闭工单的 Issue 被删除时保持 closed）；已记录修复 PR / 提交 / 版本 / 上线的返回 ErrConflict。
 // 工单、评论与历史全部保留，状态改为 rejected；工单已关联主 Issue 时入队关闭该 Issue（持久化、可重试，
 // 同一工单只入队一次），不动其他 Issue 与 PR。驳回之后 Gitea 侧的关闭、重开、删除等变化不再改变工单状态。
 // 对已驳回的工单重复调用直接返回当前工单，不重复留痕、通知或入队；待确认工单请用 Reject。

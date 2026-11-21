@@ -689,7 +689,7 @@ flowchart LR
 | `released` | 修复已随版本发布 | 见 3.2.0.4 关联规则 |
 | `deployed` | 已上线 | 见 3.2.0.4 上线识别 |
 | `closed` | 关闭未修复（已答复 / 不修复 / 重复） | `issues` closed 且无已合并的修复 PR |
-| `abnormal` | Issue 被删除或仓库不可访问 | `issues` deleted；API 返回 404 |
+| `abnormal` | Issue 被删除或仓库不可访问 | `issues` deleted；API 返回 404（已关闭工单保持 `closed`，不转 `abnormal`） |
 
 `issues` reopened 时回到 `in_progress`、清除已记录的修复 PR 与提交并通知提交人；`issue_milestone` milestoned 时记录计划版本与截止日期，经 `ticket.scheduled` 通知提交人。
 
@@ -775,11 +775,11 @@ flowchart LR
 
 **业务规则**：
 - 原因必填，作为 `ticket.status` 事件正文通知提交人；审计 `ticket.rejected`；不发 `triage.resolved`
-- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭或返回 404（已删除或机器人不可见）视为完成；只 `PATCH state=closed`，不评论、不改标签、不动 PR 与其他 Issue
+- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭或确认已删除（仓库可读而 Issue 404）视为完成，Issue 与仓库都 404（可能是权限被收回）时任务 `failed`、原因可查、可人工重试；只 `PATCH state=closed`，不评论、不改标签、不动 PR 与其他 Issue
 - 可重试错误按 outbox 退避重试，超过上限或不可重试时任务 `failed` 并保留原因，工单仍为 `rejected`；`TicketIssueClose` 查询进度，`RetryTicketIssueClose` 仅在 `failed` 时入队新一轮
 - 重复 / 并发驳回只生效一次；建单途中被驳回时，事后发现的 Issue 补记关联并关闭
 - 驳回后 Gitea 侧的关闭、重开、删除、标签、指派、里程碑、对账与 PR 合并只记审计，不改变工单；驳回前已排队的补充评论、标签移除与视角同步不再写 Gitea，建单途中被驳回的不再补传附件
-- 已修复（`fixed` / `released` / `deployed`，以及有修复记录的 `abnormal`）、已关闭与待确认工单不适用（`conflict`；待确认用 `reject`）
+- 已修复（`fixed` / `released` / `deployed`，以及有修复记录的 `abnormal`）、已关闭（含 Issue 删除后仍保持 `closed` 的）与待确认工单不适用（`conflict`；待确认用 `reject`）
 
 #### 3.2.3 信息反馈（Notifier）
 

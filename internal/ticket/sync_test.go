@@ -344,6 +344,7 @@ func TestApplyIssueTransitions(t *testing.T) {
 		{"reopened from fixed", StatusReleased, 7, issue(IssueReopened, IssueState{State: "open"}), StatusInProgress, "ticket.status:released>in_progress"},
 		{"reopened but closed since", StatusClosed, 0, issue(IssueReopened, IssueState{State: "closed"}), StatusClosed, ""},
 		{"deleted", StatusInProgress, 0, issue(IssueDeleted, IssueState{}), StatusAbnormal, "ticket.status:in_progress>abnormal"},
+		{"deleted when closed", StatusClosed, 0, issue(IssueDeleted, IssueState{}), StatusClosed, ""},
 		{"edited", StatusOpen, 0, issue(IssueEdited, IssueState{State: "open"}), StatusOpen, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {

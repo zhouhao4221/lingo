@@ -233,8 +233,8 @@ type IssueClose struct {
 	TicketID int64  `json:"ticket_id"`
 	Repo     string `json:"repo,omitempty"`  // 关联 Issue 所在仓库 "owner/name"；没有要关闭的 Issue 时为空
 	Number   int64  `json:"issue,omitempty"` // 关联的主 Issue 编号
-	// State 取值：none（没有要关闭的 Issue）| pending（排队或重试中）| done（已关闭；或 Issue 已是关闭状态；或 Gitea 返回 404，即已删除或机器人已无权查看）|
-	// failed（超过重试上限或不可重试的错误，可调用 RetryTicketIssueClose）
+	// State 取值：none（没有要关闭的 Issue）| pending（排队或重试中）| done（已关闭；或 Issue 已是关闭状态；或确认已删除：仓库可读而 Issue 返回 404）|
+	// failed（超过重试上限或不可重试的错误，含 Issue 与仓库都返回 404、无法确认已删除；可调用 RetryTicketIssueClose）
 	State     string     `json:"state"`
 	Attempt   int        `json:"attempt"`              // 第几轮关闭任务，首轮为 1，每次重试入队加 1；没有任务为 0
 	Failures  int        `json:"failures"`             // 本轮已失败次数

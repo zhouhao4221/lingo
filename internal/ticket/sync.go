@@ -293,6 +293,11 @@ func (s *Sync) transitIssue(t *Ticket, u IssueUpdate, ignoreNeedInfo bool) {
 			reopenTicket(t)
 		}
 	case IssueDeleted:
+		if t.Status == StatusClosed {
+			// 已关闭（未修复）是终态：Issue 删除或读取 404（含权限被收回）只留痕，保持 closed，不转 abnormal，
+			// 也就不会因此变成可驳回（RejectForwarded 不开放已关闭工单）
+			return
+		}
 		t.Status = StatusAbnormal
 		return
 	case IssueAssigned:

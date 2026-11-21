@@ -31,6 +31,7 @@ type giteaServer struct {
 	closes    []string          // PATCH state=closed 的 Issue 路径
 	closeErr  int               // 非 0 时 PATCH state 返回该状态码
 	onCreate  func(body string) // 非空时在 POST /issues 建好 Issue、返回之前调用（持有 mu）
+	hidden    bool              // 为真时 demo/api 下的请求都返回 404（模拟机器人对仓库的权限被收回）
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +41,10 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/user":
 		_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
+	case g.hidden && (p == "/repos/demo/api" || strings.HasPrefix(p, "/repos/demo/api/")):
+		http.NotFound(w, r)
+	case p == "/repos/demo/api" && r.Method == "GET":
+		_, _ = w.Write([]byte(`{"id":1,"name":"api","full_name":"demo/api","owner":{"login":"demo"}}`))
 	case p == "/repos/demo/api/labels" && r.Method == "GET":
 		_ = json.NewEncoder(w).Encode(g.labels)
 	case p == "/repos/demo/api/labels" && r.Method == "POST":
