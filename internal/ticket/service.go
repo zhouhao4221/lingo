@@ -47,6 +47,8 @@ type ServiceOptions struct {
 	// 返回 ErrNotFound / ErrForbidden 等拒绝。为空时按 Visible 的可见范围。
 	AuthorizePerspective func(ctx context.Context, p auth.Principal, t *Ticket, write bool) error
 	Now                  func() time.Time
+	// SendWait 是转研发后驳回等待正在发送的补充评论结束的最长时间，默认 5 秒；负数表示不等待（直接返回 ErrConflict）。
+	SendWait time.Duration
 }
 
 // Service 是工单的提交、后台确认与查询；所有方法在领域层执行访问控制（PRD 3.2.0.6）。
@@ -64,6 +66,9 @@ func NewService(o ServiceOptions) (*Service, error) {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.SendWait == 0 {
+		o.SendWait = 5 * time.Second
 	}
 	if o.Queries == nil {
 		q, ok := o.Store.(QueryStore)

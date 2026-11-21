@@ -95,10 +95,10 @@ func TestCloseIssue(t *testing.T) {
 	// 关闭库中记录的主 Issue；重试时已关闭则不再调用
 	g := &fakeCloseIssues{state: gitea.StateOpen}
 	w := newW(g, rejected)
-	if err := w.closeIssue(ctx, 8); err != nil || len(g.closed) != 1 || g.closed[0] != 12 {
+	if err := w.closeIssue(ctx, 8, closePayload{}); err != nil || len(g.closed) != 1 || g.closed[0] != 12 {
 		t.Fatalf("close: %v %v", err, g.closed)
 	}
-	if err := w.closeIssue(ctx, 8); err != nil || len(g.closed) != 1 {
+	if err := w.closeIssue(ctx, 8, closePayload{}); err != nil || len(g.closed) != 1 {
 		t.Errorf("retry after close: %v %v", err, g.closed)
 	}
 	// 工单不是驳回状态、没有 Issue、或已不存在：不动 Gitea
@@ -108,7 +108,7 @@ func TestCloseIssue(t *testing.T) {
 		nil,
 	} {
 		g := &fakeCloseIssues{state: gitea.StateOpen}
-		if err := newW(g, tk).closeIssue(ctx, 8); err != nil || len(g.closed) != 0 {
+		if err := newW(g, tk).closeIssue(ctx, 8, closePayload{}); err != nil || len(g.closed) != 0 {
 			t.Errorf("%+v: %v %v", tk, err, g.closed)
 		}
 	}
@@ -116,7 +116,7 @@ func TestCloseIssue(t *testing.T) {
 	nf := &gitea.APIError{StatusCode: 404}
 	var pe *permanentError
 	for _, g := range []*fakeCloseIssues{{getErr: nf}, {state: gitea.StateOpen, editErr: nf}} {
-		err := newW(g, rejected).closeIssue(ctx, 8)
+		err := newW(g, rejected).closeIssue(ctx, 8, closePayload{})
 		if !errors.As(err, &pe) || !strings.Contains(err.Error(), "not found") || len(g.closed) != 0 {
 			t.Errorf("404: %v", err)
 		}
@@ -130,7 +130,7 @@ func TestCloseIssue(t *testing.T) {
 		{&fakeCloseIssues{state: gitea.StateOpen, editErr: &gitea.APIError{StatusCode: 429}}, false},
 		{&fakeCloseIssues{state: gitea.StateOpen, editErr: &gitea.APIError{StatusCode: 403, Message: "forbidden"}}, true},
 	} {
-		err := newW(c.g, rejected).closeIssue(ctx, 8)
+		err := newW(c.g, rejected).closeIssue(ctx, 8, closePayload{})
 		if err == nil || errors.As(err, &pe) != c.permanent {
 			t.Errorf("%+v: err %v, want permanent=%v", c.g, err, c.permanent)
 		}
@@ -139,6 +139,24 @@ func TestCloseIssue(t *testing.T) {
 
 type rejectedPerspDrafts struct {
 	fakeCloseDrafts
+	withheld []int64
+}
+
+// ClaimCommentSend 模拟发送仲裁：工单已驳回时不给租约（记入 withheld）。
+func (f *rejectedPerspDrafts) ClaimCommentSend(_ context.Context, _, commentID int64, _ time.Duration) (bool, error) {
+	if f.t.Status == ticket.StatusRejected {
+		f.withheld = append(f.withheld, commentID)
+		return false, nil
+	}
+	return true, nil
+}
+
+func (f *rejectedPerspDrafts) ReleaseCommentSend(context.Context, int64, int64) error { return nil }
+
+type oneComment struct{ Forwarding }
+
+func (oneComment) Comment(_ context.Context, id int64) (*ticket.Comment, error) {
+	return &ticket.Comment{ID: id, TicketID: 8, Source: "user", Body: "驳回前排队的补充", Public: true}, nil
 }
 
 func (f *rejectedPerspDrafts) Perspectives(context.Context, int64) (*ticket.PerspectiveSet, error) {
@@ -151,10 +169,11 @@ func TestQueuedWritesSkippedAfterReject(t *testing.T) {
 	ctx := context.Background()
 	rejected := &ticket.Ticket{ID: 8, Type: ticket.TypeFeature, Repo: "demo/api", IssueNumber: 12, Status: ticket.StatusRejected}
 	g := &fakeCloseIssues{state: gitea.StateOpen}
-	w := &Worker{o: Options{Issues: g, Drafts: &rejectedPerspDrafts{fakeCloseDrafts{t: rejected}}, Now: time.Now},
+	d := &rejectedPerspDrafts{fakeCloseDrafts: fakeCloseDrafts{t: rejected}}
+	w := &Worker{o: Options{Issues: g, Drafts: d, Forwarding: oneComment{}, Now: time.Now, TaskTimeout: time.Minute},
 		log: slog.New(slog.DiscardHandler)}
-	if err := w.createComment(ctx, 8, 5); err != nil {
-		t.Errorf("comment: %v", err)
+	if err := w.createComment(ctx, 8, 5); err != nil || len(d.withheld) != 1 || d.withheld[0] != 5 {
+		t.Errorf("comment: %v withheld %v", err, d.withheld)
 	}
 	if err := w.removeLabel(ctx, 8, "lingo/review/need-info"); err != nil {
 		t.Errorf("label: %v", err)

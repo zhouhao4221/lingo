@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -32,9 +33,39 @@ type giteaServer struct {
 	closeErr  int               // 非 0 时 PATCH state 返回该状态码
 	onCreate  func(body string) // 非空时在 POST /issues 建好 Issue、返回之前调用（持有 mu）
 	hidden    bool              // 为真时 demo/api 下的请求都返回 404（模拟机器人对仓库的权限被收回）
+	// entered 非空时，下一条非驳回原因的评论 POST 关闭 entered 后阻塞到 release 关闭（模拟请求在途；阻塞期间不持有 mu）
+	entered, release chan struct{}
+}
+
+// holdNextComment 让下一条补充评论的 POST 挂起，返回“已到达”与“放行”信号；用例结束时自动放行。
+func (g *giteaServer) holdNextComment(t *testing.T) (entered <-chan struct{}, release func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.entered, g.release = make(chan struct{}), make(chan struct{})
+	rel := g.release
+	var once sync.Once
+	release = func() { once.Do(func() { close(rel) }) }
+	t.Cleanup(release)
+	return g.entered, release
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/comments") {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		g.mu.Lock()
+		entered, release := g.entered, g.release
+		if entered != nil && !strings.Contains(string(body), "lingo:reject=") {
+			g.entered = nil
+		} else {
+			entered = nil
+		}
+		g.mu.Unlock()
+		if entered != nil {
+			close(entered)
+			<-release
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	p := strings.TrimPrefix(r.URL.Path, "/api/v1")
@@ -119,6 +150,13 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "number": 40, "body": body})
+	case strings.HasSuffix(p, "/comments") && r.Method == "GET":
+		// 机器人发出的全部评论（驳回原因评论去重用；本模拟只有一个 Issue 会被评论）
+		out := make([]map[string]any, 0, len(g.comments))
+		for i, body := range g.comments {
+			out = append(out, map[string]any{"id": 501 + i, "body": body, "user": map[string]any{"login": "lingo-bot"}})
+		}
+		_ = json.NewEncoder(w).Encode(out)
 	case strings.HasSuffix(p, "/comments") && r.Method == "POST":
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)

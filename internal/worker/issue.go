@@ -42,6 +42,7 @@ type IssueWriter interface {
 	EditIssue(ctx context.Context, owner, repo string, index int64, opt gitea.EditIssueOption) (*gitea.Issue, error)
 	CreateComment(ctx context.Context, owner, repo string, index int64, body string) (*gitea.Comment, error)
 	EditComment(ctx context.Context, owner, repo string, id int64, body string) (*gitea.Comment, error)
+	ListIssueComments(ctx context.Context, owner, repo string, index int64, since time.Time) ([]*gitea.Comment, error)
 	CreateIssueAttachment(ctx context.Context, owner, repo string, index int64, name string, r io.Reader) (*gitea.Attachment, error)
 	CreateCommentAttachment(ctx context.Context, owner, repo string, commentID int64, name string, r io.Reader) (*gitea.Attachment, error)
 	RemoveIssueLabel(ctx context.Context, owner, repo string, index, labelID int64) error
@@ -63,6 +64,10 @@ type Drafts interface {
 	Draft(ctx context.Context, id int64) (*ticket.Ticket, error)
 	IssueCreated(ctx context.Context, id, number int64, via string, commentIDs []int64) (bool, error)
 	IssueFailed(ctx context.Context, id int64, reason string) error
+	// ClaimCommentSend / ReleaseCommentSend 是补充评论外发与驳回的仲裁（见 ticket.Service.ClaimCommentSend）：取得租约才发送，
+	// 工单已驳回时返回 false（评论留在灵问并记审计 comment.withheld）。
+	ClaimCommentSend(ctx context.Context, ticketID, commentID int64, hold time.Duration) (bool, error)
+	ReleaseCommentSend(ctx context.Context, ticketID, commentID int64) error
 	// Perspectives 返回工单的需求视角补充（含首段与缺失的必填视角）。
 	Perspectives(ctx context.Context, id int64) (*ticket.PerspectiveSet, error)
 }
@@ -132,11 +137,11 @@ func (w *Worker) handleTask(ctx context.Context, t store.Task) {
 				return
 			}
 		}
-		w.finishTask(t, w.o.Tasks.FailTask(fctx, t, err.Error()))
+		w.finishTask(t, w.o.Tasks.FailTask(fctx, t, taskError(t, err, true)))
 	default:
 		retryAt := w.o.Now().Add(backoff(t.Failures + 1))
 		log.Warn("task failed, will retry", "err", err, "retry_at", retryAt)
-		w.finishTask(t, w.o.Tasks.RetryTask(fctx, t, err.Error(), retryAt))
+		w.finishTask(t, w.o.Tasks.RetryTask(fctx, t, taskError(t, err, false), retryAt))
 	}
 }
 
@@ -186,7 +191,11 @@ func (w *Worker) runTask(ctx context.Context, t store.Task) error {
 		}
 		return w.syncPerspectives(ctx, t.TicketID, p.PerspectiveID)
 	case ticket.OpCloseIssue:
-		return w.closeIssue(ctx, t.TicketID)
+		var p closePayload
+		if err := json.Unmarshal(t.Payload, &p); err != nil {
+			return permanent(fmt.Errorf("task payload: %w", err))
+		}
+		return w.closeIssue(ctx, t.TicketID, p)
 	}
 	return permanent(fmt.Errorf("unknown task op %q", t.Op))
 }
@@ -725,9 +734,11 @@ func (w *Worker) removeLabel(ctx context.Context, ticketID int64, label string) 
 }
 
 // closeIssue 关闭被驳回工单的主 Issue：只处理库中记录的这一个 Issue（工单仓库 + 编号），不按标记搜索、不动 PR。
-// Issue 已关闭时视为完成；读取或关闭返回 404 时无法确认 Issue 已删除（也可能是权限被收回、Issues 被禁用或单独拒权），
+// 关闭前在该 Issue 上留一条驳回原因评论（p.Reason 为空，即早期版本入队的任务时不评论）：带隐藏标记，已有机器人发出的
+// 同一标记评论时不再发，重试与重复执行只留一条；只署驳回人姓名，不写提交人信息。Issue 已关闭时只补评论。
+// 读取、评论或关闭返回 404 时无法确认 Issue 已删除（也可能是权限被收回、Issues 被禁用或单独拒权），
 // 按不可重试的失败处理（failed，原因可查，可人工 RetryIssueClose）。工单不再是驳回状态（不应出现）时不关闭。
-func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
+func (w *Worker) closeIssue(ctx context.Context, ticketID int64, p closePayload) error {
 	t, err := w.o.Drafts.Draft(ctx, ticketID)
 	if errors.Is(err, ticket.ErrNotFound) {
 		return nil
@@ -745,6 +756,11 @@ func (w *Worker) closeIssue(ctx context.Context, ticketID int64) error {
 	}
 	if err != nil {
 		return giteaErr("get issue", err)
+	}
+	if strings.TrimSpace(p.Reason) != "" {
+		if err := w.postRejectComment(ctx, t, p); err != nil {
+			return err
+		}
 	}
 	if is.State == gitea.StateClosed {
 		return nil // 已关闭（重试或研发已手动关闭）：幂等
@@ -778,9 +794,6 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 	if err != nil {
 		return err
 	}
-	if t.Status == ticket.StatusRejected {
-		return nil // 已驳回：驳回前排队的补充不再发到 Issue（只关闭 Issue，不评论），评论留在灵问
-	}
 	c, err := w.o.Forwarding.Comment(ctx, commentID)
 	if errors.Is(err, ticket.ErrNotFound) {
 		return nil
@@ -795,8 +808,15 @@ func (w *Worker) createComment(ctx context.Context, ticketID, commentID int64) e
 		if t.Status == ticket.StatusSubmitted {
 			return &ticket.DeferError{Until: w.o.Now().Add(commentWait), Reason: "issue not created yet"}
 		}
-		return nil // 工单未转出（或建单失败）：补充留在灵问
+		return nil // 工单未转出、建单失败或在建单前被驳回：补充留在灵问
 	}
+	// 与驳回仲裁：取得发送租约后才发出评论及其附件，驳回先提交时一个请求也不发（评论留在灵问并记审计）。
+	// 不以上面无锁读到的状态为准，判定只在 ClaimCommentSend 的工单锁内进行
+	sent, release, err := w.claimCommentSend(ctx, t.ID, c.ID)
+	if err != nil || !sent {
+		return err
+	}
+	defer release()
 	owner, name, _ := strings.Cut(t.Repo, "/")
 	body := commentText(c)
 	giteaID := c.PostedID

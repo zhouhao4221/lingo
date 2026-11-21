@@ -238,7 +238,7 @@ type IssueClose struct {
 	State     string     `json:"state"`
 	Attempt   int        `json:"attempt"`              // 第几轮关闭任务，首轮为 1，每次重试入队加 1；没有任务为 0
 	Failures  int        `json:"failures"`             // 本轮已失败次数
-	LastError string     `json:"last_error,omitempty"` // 本轮最近一次失败原因
+	LastError string     `json:"last_error,omitempty"` // 本轮最近一次失败原因（脱敏说明：类别与 HTTP 状态码，不含地址与响应正文）
 	UpdatedAt *time.Time `json:"updated_at,omitempty"` // 本轮任务最近更新时间
 }
 

@@ -2,6 +2,7 @@ package ticket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -46,9 +47,15 @@ func hasFix(t *Ticket) bool {
 	return t.FixedPR != 0 || t.FixedCommit != "" || t.FixedReleaseID != 0 || t.DeployedAt != nil
 }
 
+// enqueueClose 入队第 attempt 轮关闭任务。驳回原因与驳回人姓名取自审计 ticket.rejected（与驳回同事务写入），
+// 由 worker 写成 Issue 上的一条原因评论：重试轮次、建单途中驳回后补记 Issue 时都沿用原驳回原因与署名。
 func enqueueClose(ctx context.Context, tx Tx, t *Ticket, attempt int) error {
+	reason, by, err := tx.RejectionNote(ctx, t.ID)
+	if err != nil {
+		return err
+	}
 	return tx.Enqueue(ctx, Task{Key: closeKey(t.ID, attempt), TicketID: t.ID, Op: OpCloseIssue,
-		Payload: map[string]any{"issue": t.IssueNumber, "repo": t.Repo}})
+		Payload: map[string]any{"issue": t.IssueNumber, "repo": t.Repo, "reason": reason, "rejected_by": by}})
 }
 
 // RejectForwarded 驳回已转研发、尚未修复的工单（reviewer / admin），reason 必填且对提交人可见。
@@ -57,7 +64,35 @@ func enqueueClose(ctx context.Context, tx Tx, t *Ticket, attempt int) error {
 // 工单、评论与历史全部保留，状态改为 rejected；工单已关联主 Issue 时入队关闭该 Issue（持久化、可重试，
 // 同一工单只入队一次），不动其他 Issue 与 PR。驳回之后 Gitea 侧的关闭、重开、删除等变化不再改变工单状态。
 // 对已驳回的工单重复调用直接返回当前工单，不重复留痕、通知或入队；待确认工单请用 Reject。
+//
+// 与补充评论外发仲裁（见 ClaimCommentSend）：工单有补充评论正在发往 Gitea（发送租约有效）时本次不提交，在事务外每 100 毫秒
+// 重试，最多等 SendWait（默认 5 秒），仍在发送则返回 ErrConflict（稍后重试即可）。
 func (s *Service) RejectForwarded(ctx context.Context, p auth.Principal, id int64, reason string) (*Ticket, error) {
+	deadline := time.Now().Add(s.o.SendWait)
+	for {
+		t, err := s.rejectForwarded(ctx, p, id, reason)
+		if !errors.Is(err, errSending) {
+			return t, err
+		}
+		wait := min(rejectPoll, time.Until(deadline))
+		if wait <= 0 {
+			return nil, fmt.Errorf("%w: ticket %d has a comment being sent to gitea, retry later", ErrConflict, id)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+// errSending 表示工单有补充评论正在发往 Gitea，驳回事务已回滚，可稍后重试。
+var errSending = errors.New("ticket: comment being sent")
+
+// rejectPoll 是驳回等待评论发送结束时的重试间隔。
+const rejectPoll = 100 * time.Millisecond
+
+func (s *Service) rejectForwarded(ctx context.Context, p auth.Principal, id int64, reason string) (*Ticket, error) {
 	if !p.Staff() {
 		return nil, fmt.Errorf("%w: rejecting a forwarded ticket requires reviewer or admin", ErrForbidden)
 	}
@@ -95,12 +130,20 @@ func (s *Service) RejectForwarded(ctx context.Context, p auth.Principal, id int6
 				return fmt.Errorf("%w: ticket %d was closed before it became abnormal, cannot be rejected", ErrConflict, id)
 			}
 		}
+		// 仲裁：工单已锁定，补充评论的发送租约只能在这把锁下写入；有有效租约说明发送先取得仲裁，本次不提交
+		if sending, err := tx.CommentSending(ctx, t.ID); err != nil {
+			return err
+		} else if sending {
+			return errSending
+		}
 		prev := t.Status
 		t.Status = StatusRejected
 		if err := tx.Update(ctx, t); err != nil {
 			return err
 		}
-		payload := map[string]any{"status": string(t.Status), "prev_status": string(prev), "note": reason}
+		// rejected_by 是驳回人姓名快照，用于 Issue 原因评论署名（未提供姓名时不署名，不写用户 ID）
+		payload := map[string]any{"status": string(t.Status), "prev_status": string(prev), "note": reason,
+			"rejected_by": strings.TrimSpace(p.Name)}
 		if t.IssueNumber != 0 {
 			payload["issue"], payload["repo"] = t.IssueNumber, t.Repo
 		}
@@ -199,4 +242,39 @@ func latestClose(ctx context.Context, tx Tx, id int64) (int, *TaskState, error) 
 		}
 		n, last = n+1, st
 	}
+}
+
+// ClaimCommentSend 是补充评论外发与驳回的仲裁点：在锁定工单的短事务中判定，返回 true 表示 worker 取得发送租约，
+// 可以在 hold 内发出这条评论及其附件（完成后调用 ReleaseCommentSend）；返回 false 表示不发。
+//   - 工单已驳回（驳回先提交）：不发，评论留在灵问，置 withheld_at 并记审计 comment.withheld（source=system，同一条只记一次，不发事件）；
+//   - 否则写入租约（数据库时间 now() + hold）后提交：此后驳回在同一把工单锁下看到有效租约，不会在本次发送结束（或租约过期）前提交。
+//
+// 租约只在事务内写入，HTTP 请求在事务之外发出，不持有数据库连接与行锁。
+func (s *Service) ClaimCommentSend(ctx context.Context, ticketID, commentID int64, hold time.Duration) (bool, error) {
+	ok := false
+	err := s.o.Store.InTx(ctx, func(tx Tx) error {
+		t, err := tx.LockByID(ctx, ticketID)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if t.Status == StatusRejected {
+			marked, err := tx.MarkCommentWithheld(ctx, ticketID, commentID)
+			if err != nil || !marked {
+				return err
+			}
+			return tx.AddHistory(ctx, History{TicketID: t.ID, Source: "system", Kind: "comment.withheld",
+				Payload: map[string]any{"comment": commentID, "issue": t.IssueNumber, "repo": t.Repo}})
+		}
+		ok, err = tx.ClaimCommentSend(ctx, ticketID, commentID, hold)
+		return err
+	})
+	return ok && err == nil, err
+}
+
+// ReleaseCommentSend 在本次发送（评论及其附件）结束后清除租约，驳回可以立即提交；释放失败时租约到期自然失效。
+func (s *Service) ReleaseCommentSend(ctx context.Context, ticketID, commentID int64) error {
+	return s.o.Store.InTx(ctx, func(tx Tx) error { return tx.ReleaseCommentSend(ctx, ticketID, commentID) })
 }

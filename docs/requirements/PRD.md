@@ -775,7 +775,7 @@ flowchart LR
 
 **业务规则**：
 - 原因必填，作为 `ticket.status` 事件正文通知提交人；审计 `ticket.rejected`；不发 `triage.resolved`
-- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭视为完成；Issue 返回 404（已删除、权限被收回、Issues 被禁用或单独拒权，无法区分）时任务 `failed`、原因可查、可人工重试；只 `PATCH state=closed`，不评论、不改标签、不动 PR 与其他 Issue
+- 关闭经 outbox（`close_issue`，幂等键按工单）异步执行；Issue 已关闭视为完成；Issue 返回 404（已删除、权限被收回、Issues 被禁用或单独拒权，无法区分）时任务 `failed`、原因可查、可人工重试；关闭前留一条驳回原因评论（只署后台人员姓名，去重，重试沿用原原因），只 `PATCH state=closed`，不改标签、不动 PR 与其他 Issue；失败原因脱敏；补充评论外发与驳回由工单锁下的发送租约仲裁（评论在途时驳回最多等 5 秒，之后 409），驳回后被拦下的评论记 `comment.withheld`（待办 #698）
 - 可重试错误按 outbox 退避重试，超过上限或不可重试时任务 `failed` 并保留原因，工单仍为 `rejected`；`TicketIssueClose` 查询进度，`RetryTicketIssueClose` 仅在 `failed` 时入队新一轮
 - 重复 / 并发驳回只生效一次；建单途中被驳回时，事后发现的 Issue 补记关联并关闭
 - 驳回后 Gitea 侧的关闭、重开、删除、标签、指派、里程碑、对账与 PR 合并只记审计，不改变工单；驳回前已排队的补充评论、标签移除与视角同步不再写 Gitea，建单途中被驳回的不再补传附件
