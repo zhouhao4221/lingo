@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -22,21 +23,57 @@ type giteaServer struct {
 	labels    []map[string]any
 	issues    []map[string]any
 	templates string
-	created   []map[string]any // POST /issues 的请求体
-	createErr int              // 非 0 时 POST /issues 返回该状态码
-	assets    []string         // 上传的附件：路径 + 文件名
-	comments  []string         // 机器人发出的评论正文
-	edits     []string         // 编辑后的 Issue / 评论正文
-	added     []int64          // POST issues/{n}/labels 追加的标签 id
+	created   []map[string]any  // POST /issues 的请求体
+	createErr int               // 非 0 时 POST /issues 返回该状态码
+	assets    []string          // 上传的附件：路径 + 文件名
+	comments  []string          // 机器人发出的评论正文
+	edits     []string          // 编辑后的 Issue / 评论正文
+	added     []int64           // POST issues/{n}/labels 追加的标签 id
+	closes    []string          // PATCH state=closed 的 Issue 路径
+	closeErr  int               // 非 0 时 PATCH state 返回该状态码
+	onCreate  func(body string) // 非空时在 POST /issues 建好 Issue、返回之前调用（持有 mu）
+	hidden    bool              // 为真时 demo/api 下的请求都返回 404（模拟机器人对仓库的权限被收回）
+	// entered 非空时，下一条非驳回原因的评论 POST 关闭 entered 后阻塞到 release 关闭（模拟请求在途；阻塞期间不持有 mu）
+	entered, release chan struct{}
+}
+
+// holdNextComment 让下一条补充评论的 POST 挂起，返回“已到达”与“放行”信号；用例结束时自动放行。
+func (g *giteaServer) holdNextComment(t *testing.T) (entered <-chan struct{}, release func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.entered, g.release = make(chan struct{}), make(chan struct{})
+	rel := g.release
+	var once sync.Once
+	release = func() { once.Do(func() { close(rel) }) }
+	t.Cleanup(release)
+	return g.entered, release
 }
 
 func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/comments") {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		g.mu.Lock()
+		entered, release := g.entered, g.release
+		if entered != nil && !strings.Contains(string(body), "lingo:reject=") {
+			g.entered = nil
+		} else {
+			entered = nil
+		}
+		g.mu.Unlock()
+		if entered != nil {
+			close(entered)
+			<-release
+		}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	p := strings.TrimPrefix(r.URL.Path, "/api/v1")
 	switch {
 	case p == "/user":
 		_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
+	case g.hidden && (p == "/repos/demo/api" || strings.HasPrefix(p, "/repos/demo/api/")):
+		http.NotFound(w, r)
 	case p == "/repos/demo/api/labels" && r.Method == "GET":
 		_ = json.NewEncoder(w).Encode(g.labels)
 	case p == "/repos/demo/api/labels" && r.Method == "POST":
@@ -60,6 +97,10 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		is := map[string]any{"id": 1000 + len(g.issues), "number": 40 + len(g.issues), "title": req["title"], "body": req["body"],
 			"state": "open", "user": map[string]any{"login": "lingo-bot"}}
 		g.issues = append(g.issues, is)
+		if g.onCreate != nil {
+			body, _ := req["body"].(string)
+			g.onCreate(body)
+		}
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(is)
 	case strings.Contains(p, "/labels/") && r.Method == "DELETE":
@@ -85,6 +126,22 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.HasPrefix(p, "/repos/demo/api/issues/") && r.Method == "PATCH":
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if st, ok := req["state"].(string); ok && !strings.Contains(p, "/comments/") {
+			if g.closeErr != 0 {
+				http.Error(w, `{"message":"forbidden"}`, g.closeErr)
+				return
+			}
+			g.closes = append(g.closes, p)
+			for _, is := range g.issues {
+				if "/repos/demo/api/issues/"+jsonNum(int64(is["number"].(int))) == p {
+					is["state"] = st
+					_ = json.NewEncoder(w).Encode(is)
+					return
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
 		body, _ := req["body"].(string)
 		g.edits = append(g.edits, body)
 		for _, is := range g.issues { // 编辑 Issue 正文后 GET 读到新正文
@@ -93,6 +150,13 @@ func (g *giteaServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "number": 40, "body": body})
+	case strings.HasSuffix(p, "/comments") && r.Method == "GET":
+		// 机器人发出的全部评论（驳回原因评论去重用；本模拟只有一个 Issue 会被评论）
+		out := make([]map[string]any, 0, len(g.comments))
+		for i, body := range g.comments {
+			out = append(out, map[string]any{"id": 501 + i, "body": body, "user": map[string]any{"login": "lingo-bot"}})
+		}
+		_ = json.NewEncoder(w).Encode(out)
 	case strings.HasSuffix(p, "/comments") && r.Method == "POST":
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)

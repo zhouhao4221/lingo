@@ -14,7 +14,8 @@ import (
 // 身份由 Config.Authenticate 解析，权限与数据隔离同 Go 方法；带 Origin 头的浏览器请求须与 Host 同源。
 // 工具：list_projects、list_ticket_types、create_ticket、get_ticket、list_my_tickets、reply_ticket、add_perspective、
 // list_perspectives、list_events、
-// list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、list_releases、get_release、get_llm_usage。
+// list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、reject_forwarded_ticket、get_issue_close、
+// retry_issue_close、list_releases、get_release、get_llm_usage。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵工（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
@@ -225,6 +226,33 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 					return nil, err
 				}
 				return l.RejectTicket(ctx, u, a.ID, a.Reason)
+			}),
+		tool("reject_forwarded_ticket", "驳回已转研发、尚未修复的工单（reviewer / admin），原因对提交人可见；保留工单、评论与历史，只关闭工单关联的主 Issue（异步、可重试）。",
+			`{"type":"object","required":["id","reason"],"properties":{"id":{"type":"integer"},"reason":{"type":"string"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ID     int64
+				Reason string
+			}) (any, error) {
+				if err := requireID(a.ID); err != nil {
+					return nil, err
+				}
+				return l.RejectForwardedTicket(ctx, u, a.ID, a.Reason)
+			}),
+		tool("get_issue_close", "查看驳回后关闭关联 Issue 的进度（reviewer / admin）：state 为 none / pending / done / failed。",
+			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct{ ID int64 }) (any, error) {
+				if err := requireID(a.ID); err != nil {
+					return nil, err
+				}
+				return l.TicketIssueClose(ctx, u, a.ID)
+			}),
+		tool("retry_issue_close", "关闭关联 Issue 失败（state=failed）后重新入队（reviewer / admin）；排队中或已完成时不重复入队。",
+			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct{ ID int64 }) (any, error) {
+				if err := requireID(a.ID); err != nil {
+					return nil, err
+				}
+				return l.RetryTicketIssueClose(ctx, u, a.ID)
 			}),
 		tool("list_releases", "列出项目（或其下某仓库）的版本记录，新的在前；before 为上一页最后一条的 id。",
 			`{"type":"object","properties":{"project":{"type":"string"},"repo":{"type":"string"},"before":{"type":"integer"},"limit":{"type":"integer"}}}`,

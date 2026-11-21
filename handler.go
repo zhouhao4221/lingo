@@ -16,7 +16,9 @@ import (
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
 // 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
-// 后台：POST /tickets/{id}/forward|answer|merge|reject、GET /triage、GET /triage/summary、
+// 后台：POST /tickets/{id}/forward|answer|merge|reject、POST /tickets/{id}/reject-forwarded（驳回已转研发工单）、
+// GET /tickets/{id}/issue-close、POST /tickets/{id}/issue-close/retry（关闭关联 Issue 的进度与重试）、
+// GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
 func (l *Lingo) Handler() http.Handler { return l.rest }
 
@@ -174,6 +176,29 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return Ticket{}, err
 		}
 		return l.RejectTicket(ctx(r), user(r), id, in.Reason)
+	})
+	triage("reject-forwarded", func(r *httpapi.Request, id int64) (Ticket, error) {
+		var in struct {
+			Reason string `json:"reason"`
+		}
+		if err := r.Decode(&in); err != nil {
+			return Ticket{}, err
+		}
+		return l.RejectForwardedTicket(ctx(r), user(r), id, in.Reason)
+	})
+	rt.Handle("GET /tickets/{id}/issue-close", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return l.TicketIssueClose(ctx(r), user(r), id)
+	})
+	rt.Handle("POST /tickets/{id}/issue-close/retry", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return l.RetryTicketIssueClose(ctx(r), user(r), id)
 	})
 	rt.Handle("GET /triage", func(r *httpapi.Request) (any, error) {
 		after, err := r.QueryInt("after")

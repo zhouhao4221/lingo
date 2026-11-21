@@ -36,6 +36,9 @@ import _ "github.com/jackc/pgx/v5/stdlib" // or any database/sql PostgreSQL driv
 
 if err := lingo.Migrate(ctx, db); err != nil { ... } // run in your release process
 
+// Read-only readiness check (creates nothing, writes nothing), e.g. to disable only the feedback entry:
+st, err := lingo.CheckMigrations(ctx, db) // err != nil: check failed, state unknown; err == nil && !st.Ready: not migrated (st.Pending / st.MissingTables …)
+
 l, err := lingo.New(lingo.Config{
 	DB:           db,       // *sql.DB (PostgreSQL)
 	LightModel:   light,    // optional: a cheap, fast lingo.Model that tidies tickets before issues are created
@@ -128,6 +131,7 @@ Notes:
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
 | `POST` / `GET /tickets/{id}/perspectives` | Requirement perspectives: add, list grouped by perspective (see above) |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
+| `POST /tickets/{id}/reject-forwarded`, `GET /tickets/{id}/issue-close`, `POST /tickets/{id}/issue-close/retry` | Reject a forwarded ticket (closes only its linked issue, async and retryable), close progress / retry (reviewer / admin) |
 | `GET /events?after=` | Event feed (same events as the `Notifier`) |
 | `GET /releases`, `GET /releases/{id}` | Releases with linked tickets and deployments |
 | `GET` / `PUT /settings/auto-forward` | Auto-forward switches (changes: admin) |
@@ -137,7 +141,7 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `list_releases`, `get_release`, `get_llm_usage`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`.
 
 ### Events
 

@@ -47,6 +47,8 @@ type ServiceOptions struct {
 	// 返回 ErrNotFound / ErrForbidden 等拒绝。为空时按 Visible 的可见范围。
 	AuthorizePerspective func(ctx context.Context, p auth.Principal, t *Ticket, write bool) error
 	Now                  func() time.Time
+	// SendWait 是转研发后驳回等待正在发送的补充评论结束的最长时间，默认 5 秒；负数表示不等待（直接返回 ErrConflict）。
+	SendWait time.Duration
 }
 
 // Service 是工单的提交、后台确认与查询；所有方法在领域层执行访问控制（PRD 3.2.0.6）。
@@ -64,6 +66,9 @@ func NewService(o ServiceOptions) (*Service, error) {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.SendWait == 0 {
+		o.SendWait = 5 * time.Second
 	}
 	if o.Queries == nil {
 		q, ok := o.Store.(QueryStore)
@@ -492,6 +497,21 @@ func (s *Service) IssueCreated(ctx context.Context, id int64, number int64, via 
 		if t.IssueNumber == number {
 			// Webhook 已按标记补记了同一个 Issue：正文里的补充评论仍要标记已转出，避免再单独发一遍
 			return tx.MarkCommentsForwarded(ctx, t.ID, commentIDs)
+		}
+		if t.IssueNumber == 0 && t.Status == StatusRejected {
+			// 建单途中工单被驳回：Issue 是为本工单建的，补记关联后入队关闭，避免 Gitea 中留下无人跟进的 Issue
+			t.IssueNumber = number
+			if err := tx.Update(ctx, t); err != nil {
+				return err
+			}
+			if err := tx.MarkCommentsForwarded(ctx, t.ID, commentIDs); err != nil {
+				return err
+			}
+			if err := tx.AddHistory(ctx, History{TicketID: t.ID, Source: "system", Kind: "issue.created",
+				Payload: map[string]any{"issue": number, "repo": t.Repo, "via": via, "rejected": true}}); err != nil {
+				return err
+			}
+			return enqueueClose(ctx, tx, t, 1)
 		}
 		if t.IssueNumber != 0 || t.Status != StatusSubmitted {
 			return nil
