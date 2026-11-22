@@ -25,7 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
-| v1.27 | 2026-11-22 | haiqing | 新增 `GiteaConfig.RejectRedirects`（默认关闭，行为与 v0.2.0 相同）：开启后灵工发往 Gitea 的全部认证请求（启动自检与全部业务路径）收到 301/302/303/307/308 一律不跟随、不向跳转目标发出任何请求，按不可重试的配置错误处理（待办 #701，GPCM REQ-049 依赖） |
+| v1.27 | 2026-11-22 | haiqing | 新增 `GiteaConfig.RejectRedirects`（默认关闭，行为与 v0.2.0 相同）：开启后灵工发往 Gitea 的全部认证请求（启动自检与全部业务路径）收到任何 3xx 一律不跟随、不向跳转目标发出任何请求，按不可重试的配置错误处理（待办 #701，GPCM REQ-049 依赖） |
 | v1.26 | 2026-11-21 | haiqing | 产品中文名由「灵问」改为「灵工」（英文名 Lingo 不变）；新增可由接入方配色的 Logo（`assets/logo/`） |
 | v1.25 | 2026-11-21 | haiqing | 新增转研发后驳回（REQ-002）：`RejectForwardedTicket` / `POST /tickets/{id}/reject-forwarded` / MCP `reject_forwarded_ticket`（reviewer / admin，原因必填），工单保留并改为 `rejected`，经 outbox 只关闭关联主 Issue（可重试、防重复），进度与重试 `TicketIssueClose` / `RetryTicketIssueClose`；驳回后 Gitea 回流不覆盖本地结论；新增只读迁移检查 `lingo.CheckMigrations` |
 | v1.24 | 2026-11-21 | haiqing | 新增需求多视角补充（REQ-001；视角标签 `<前缀>/视角/<视角名>`）：固定视角使用者 / 业务方 / 专家 / 决策者（`User.Perspective`，由 `Authenticate` 提供，与权限角色无关）；需求类工单可由各视角追加补充（转出前后均可、只追加），Issue 正文按视角分层渲染（标记区块，单向同步）并打固定视角标签；必填视角（`Config` 默认、`Project` 覆盖）与缺失标注；新增事件 `ticket.perspective_added`、`ticket.perspective_missing`；数据隔离新增两条例外：补充人与首段提交人姓名写入 Issue、视角补充的追加与查询由 `Config.AuthorizePerspective` 判定（未配置时同工单可见范围） |
@@ -882,7 +882,7 @@ flowchart LR
 | 模型安全 | 回答仅基于知识库；防提示词注入；不在回答中泄露其他用户数据 | P0 |
 | 业务数据权限 | 代用户调用 Tool，灵工预校验 `User.Scopes` + 业务侧在 `Call` 内二次校验；业务数据不入知识库；`write` 需确认；审计只存摘要 | P0 |
 | 数据安全 | Gitea token 与 Webhook 密钥经 `Config.Gitea` 传入 | P0 |
-| 出站重定向 | 默认沿用 Go 标准库：最多跟随 10 次，跨主机时去掉 `Authorization`，但同主机、子域与 https→http 降级跳转仍携带令牌。`GiteaConfig.RejectRedirects` 为真时，所有发往 Gitea 的请求（自检、建单、评论、标签、附件、关闭 Issue、Webhook 注册与测试投递、对账、版本同步、机器人账号）收到 301/302/303/307/308 均不跟随：不向跳转目标发出请求（目标收不到令牌与请求体），返回不可重试的配置错误，outbox 任务直接失败、不退避重试；错误信息只含方法、路径、状态码与跳转类别（same-origin / subdomain / scheme-downgrade / cross-origin），不含跳转地址；不修改 `http.DefaultClient` 等全局状态 | P0 |
+| 出站重定向 | 默认沿用 Go 标准库：最多跟随 10 次，跨主机时去掉 `Authorization`，但同主机、子域与 https→http 降级跳转仍携带令牌。`GiteaConfig.RejectRedirects` 为真时，所有发往 Gitea 的请求（自检、建单、评论、标签、附件、关闭 Issue、Webhook 注册与测试投递、对账、版本同步、机器人账号）收到任何 3xx（301/302/303/307/308 等）均不跟随：不向跳转目标发出请求（目标收不到令牌与请求体），返回不可重试的配置错误，outbox 任务直接失败、不退避重试；错误信息只含方法、路径、状态码与跳转类别（same-origin / subdomain / scheme-downgrade / cross-origin），不含跳转地址；不修改 `http.DefaultClient` 等全局状态 | P0 |
 | 集成安全 | Webhook 验签 + 按事件去重 | P0 |
 | 数据隔离 | 按 `user_id` 与 `User.Projects` 在领域层统一做访问控制，越权返回 404；store 查询强制带范围；个人信息不写入 Gitea（3.2.0.6） | P0 |
 | 附件安全 | 文件与下载权限由接入方的附件系统负责；lingo 只存引用、校验地址格式、不主动请求用户填写的地址；转出 Gitea 前由后台人员勾选 | P0 |
