@@ -214,7 +214,7 @@ func TestRejectRedirectsDoesNotMutateClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hc.CheckRedirect != nil || http.DefaultClient.CheckRedirect != nil {
+	if hc.CheckRedirect != nil || hc.Transport != nil || http.DefaultClient.CheckRedirect != nil || http.DefaultClient.Transport != nil {
 		t.Fatal("caller's client or http.DefaultClient was modified")
 	}
 	if c.hc == hc || c.hc.CheckRedirect == nil {

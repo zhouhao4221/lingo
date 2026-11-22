@@ -62,6 +62,9 @@ func New(o Options) (*Client, error) {
 	if o.RejectRedirects {
 		cp := *hc
 		cp.CheckRedirect = rejectRedirect
+		// Go 在调用 CheckRedirect 之前先解析 Location，解析失败时返回含原始 Location 的错误；
+		// 在 Transport 层拦下所有 3xx，http.Client 就不会解析或跟随 Location
+		cp.Transport = &rejectRedirectTransport{base: hc.Transport}
 		hc = &cp
 	}
 	ua := o.UserAgent
@@ -103,7 +106,7 @@ type RedirectError struct {
 	Method     string
 	Path       string // 发出请求的路径（含 /api/v1）
 	StatusCode int    // 301 / 302 / 303 / 307 / 308
-	Kind       string // same-origin | subdomain | scheme-downgrade | cross-origin | unknown（无 Location）
+	Kind       string // same-origin | subdomain | scheme-downgrade | cross-origin | unknown（Location 缺失或无法解析）
 }
 
 func (e *RedirectError) Error() string {
@@ -121,6 +124,28 @@ func rejectRedirect(req *http.Request, via []*http.Request) error {
 		e.StatusCode = req.Response.StatusCode
 	}
 	return e
+}
+
+// rejectRedirectTransport 把任何 3xx 响应转成 *RedirectError（关闭响应体），http.Client 看不到 3xx，
+// 也就不会解析 Location 或发出跳转请求。base 为空时用 http.DefaultTransport（只读取，不修改）。
+type rejectRedirectTransport struct{ base http.RoundTripper }
+
+func (t *rejectRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil || resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return resp, err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	kind := "unknown" // Location 缺失或无法解析：不回显原值
+	if loc, err := resp.Location(); err == nil {
+		kind = redirectKind(req.URL, loc)
+	}
+	return nil, &RedirectError{Method: req.Method, Path: req.URL.Path, StatusCode: resp.StatusCode, Kind: kind}
 }
 
 // redirectKind 给跳转分类，便于排查 BaseURL 配置。
