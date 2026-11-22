@@ -28,6 +28,9 @@ type Options struct {
 	Token      string       // 机器人账号访问令牌
 	HTTPClient *http.Client // 为空时使用带 DefaultTimeout 的默认客户端
 	UserAgent  string       // 为空时为 "lingo"
+	// RejectRedirects 为真时所有请求都不跟随 HTTP 重定向：不向跳转目标发出请求，返回 *RedirectError。
+	// 设置在 HTTPClient 的副本上，不修改传入的客户端或 http.DefaultClient。
+	RejectRedirects bool
 }
 
 // Client 是 Gitea API 客户端，可并发使用。
@@ -36,6 +39,8 @@ type Client struct {
 	token string
 	hc    *http.Client
 	ua    string
+	// noRedirect 对应 Options.RejectRedirects：Go 不自动跟随的 3xx（如流式请求体遇 307/308）也按 RedirectError 报告
+	noRedirect bool
 }
 
 // New 校验配置并创建客户端。
@@ -54,11 +59,19 @@ func New(o Options) (*Client, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: DefaultTimeout}
 	}
+	if o.RejectRedirects {
+		cp := *hc
+		cp.CheckRedirect = rejectRedirect
+		// Go 在调用 CheckRedirect 之前先解析 Location，解析失败时返回含原始 Location 的错误；
+		// 在 Transport 层拦下所有 3xx，http.Client 就不会解析或跟随 Location
+		cp.Transport = &rejectRedirectTransport{base: hc.Transport}
+		hc = &cp
+	}
 	ua := o.UserAgent
 	if ua == "" {
 		ua = "lingo"
 	}
-	return &Client{base: u.String() + "/api/v1", token: o.Token, hc: hc, ua: ua}, nil
+	return &Client{base: u.String() + "/api/v1", token: o.Token, hc: hc, ua: ua, noRedirect: o.RejectRedirects}, nil
 }
 
 // ErrNotFound 表示资源不存在（HTTP 404），可用 errors.Is 判断。
@@ -84,6 +97,71 @@ func (e *APIError) Is(target error) bool {
 	return target == ErrNotFound && e.StatusCode == http.StatusNotFound
 }
 
+// ErrRedirect 表示 Gitea 返回了重定向而客户端按 Options.RejectRedirects 拒绝跟随，可用 errors.Is 判断。
+var ErrRedirect = errors.New("gitea: redirect rejected")
+
+// RedirectError 是被拒绝跟随的重定向。跳转目标没有收到任何请求（也就没收到令牌）；属于配置错误，不重试。
+// 为免泄露，不记录跳转地址，只记录类别。
+type RedirectError struct {
+	Method     string
+	Path       string // 发出请求的路径（含 /api/v1）
+	StatusCode int    // 301 / 302 / 303 / 307 / 308
+	Kind       string // same-origin | subdomain | scheme-downgrade | cross-origin | unknown（Location 缺失或无法解析）
+}
+
+func (e *RedirectError) Error() string {
+	return fmt.Sprintf("gitea: %s %s: redirect rejected (HTTP %d, %s)", e.Method, e.Path, e.StatusCode, e.Kind)
+}
+
+// Is 让 errors.Is(err, ErrRedirect) 成立。
+func (e *RedirectError) Is(target error) bool { return target == ErrRedirect }
+
+// rejectRedirect 是 http.Client.CheckRedirect：在发出跳转请求之前调用，返回错误即不跟随。
+func rejectRedirect(req *http.Request, via []*http.Request) error {
+	prev := via[len(via)-1]
+	e := &RedirectError{Method: prev.Method, Path: prev.URL.Path, Kind: redirectKind(prev.URL, req.URL)}
+	if req.Response != nil {
+		e.StatusCode = req.Response.StatusCode
+	}
+	return e
+}
+
+// rejectRedirectTransport 把任何 3xx 响应转成 *RedirectError（关闭响应体），http.Client 看不到 3xx，
+// 也就不会解析 Location 或发出跳转请求。base 为空时用 http.DefaultTransport（只读取，不修改）。
+type rejectRedirectTransport struct{ base http.RoundTripper }
+
+func (t *rejectRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil || resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return resp, err
+	}
+	// 只关闭、不读取：读取会让慢速或停住的响应体拖到超时；关闭后连接不复用，代价可以接受
+	resp.Body.Close()
+	kind := "unknown" // Location 缺失或无法解析：不回显原值
+	if loc, err := resp.Location(); err == nil {
+		kind = redirectKind(req.URL, loc)
+	}
+	return nil, &RedirectError{Method: req.Method, Path: req.URL.Path, StatusCode: resp.StatusCode, Kind: kind}
+}
+
+// redirectKind 给跳转分类，便于排查 BaseURL 配置。
+func redirectKind(from, to *url.URL) string {
+	fh, th := strings.ToLower(from.Hostname()), strings.ToLower(to.Hostname())
+	switch {
+	case strings.EqualFold(from.Scheme, "https") && strings.EqualFold(to.Scheme, "http"):
+		return "scheme-downgrade"
+	case strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host):
+		return "same-origin"
+	case fh != th && (strings.HasSuffix(th, "."+fh) || strings.HasSuffix(fh, "."+th)):
+		return "subdomain"
+	}
+	return "cross-origin"
+}
+
 // DecodeError 表示请求已成功（2xx）但响应体无法解析。写操作此时多半已在 Gitea 生效，不应重试。
 type DecodeError struct {
 	Method, Path string
@@ -98,7 +176,7 @@ func (e *DecodeError) Unwrap() error { return e.Err }
 
 // IsRetryable 判断错误是否值得由 outbox 重试：
 //   - 429、5xx、连接失败、连接中断、超时：重试
-//   - 其余 4xx、证书错误、域名不存在、配置错误、2xx 响应解析失败（DecodeError）：不重试
+//   - 其余 4xx、证书错误、域名不存在、配置错误、被拒绝的重定向（RedirectError）、2xx 响应解析失败（DecodeError）：不重试
 //
 // 注意：连接中断或超时发生在请求已发出之后时，写操作可能已经生效。对非幂等写操作
 // （CreateIssue、CreateComment 等）重试前，调用方必须先按隐藏标记查重，见 PRD 3.2.2。
@@ -111,7 +189,7 @@ func IsRetryable(err error) bool {
 		return ae.StatusCode == http.StatusTooManyRequests || ae.StatusCode >= 500
 	}
 	var de *DecodeError
-	if errors.As(err, &de) || errors.Is(err, context.Canceled) {
+	if errors.As(err, &de) || errors.Is(err, ErrRedirect) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	// 证书问题与域名不存在属于配置错误，重试也不会成功
@@ -266,10 +344,23 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 func (c *Client) send(req *http.Request, out any) (*Response, error) {
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		// 拒绝的重定向不带 *url.Error 包装返回：后者含请求地址，脱敏说明只需要方法、路径与状态码
+		var re *RedirectError
+		if errors.As(err, &re) {
+			return nil, re
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 	r := parseResponse(resp)
+	if c.noRedirect && resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+		resp.Body.Close() // 不读取响应体，原因同 rejectRedirectTransport
+		kind := "unknown"
+		if loc, err := resp.Location(); err == nil {
+			kind = redirectKind(req.URL, loc)
+		}
+		return r, &RedirectError{Method: req.Method, Path: req.URL.Path, StatusCode: resp.StatusCode, Kind: kind}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return r, newAPIError(req, resp)
 	}

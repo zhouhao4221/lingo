@@ -122,6 +122,14 @@ type GiteaConfig struct {
 	// （token 另需 write:repository）；为假时由接入方手工配置。
 	AutoRegisterWebhook bool
 	WebhookURL          string // WebhookHandler 的外部可访问地址
+
+	// RejectRedirects 为真时，灵工发往 Gitea 的所有请求（启动自检与全部业务路径）都不跟随 HTTP 重定向：
+	// 收到任何 3xx（301/302/303/307/308 等）时不向跳转目标发出任何请求（目标收不到令牌），同主机、子域、跨域与
+	// https→http 降级一视同仁；该次调用按不可重试的配置错误失败（outbox 任务直接失败，SelfCheck 对应项为
+	// error，错误信息只含方法、路径、状态码与跳转类别，不含跳转地址）。为假（默认）时沿用 Go 标准库行为：
+	// 最多跟随 10 次，跨主机时去掉 Authorization，同主机与子域仍携带令牌。只作用于灵工自己的 HTTP 客户端，
+	// 不修改 http.DefaultClient 等全局状态。
+	RejectRedirects bool
 }
 
 // Message 是对话消息。
