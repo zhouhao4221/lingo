@@ -139,7 +139,7 @@ func (t *rejectRedirectTransport) RoundTrip(req *http.Request) (*http.Response, 
 	if err != nil || resp.StatusCode < 300 || resp.StatusCode > 399 {
 		return resp, err
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	// 只关闭、不读取：读取会让慢速或停住的响应体拖到超时；关闭后连接不复用，代价可以接受
 	resp.Body.Close()
 	kind := "unknown" // Location 缺失或无法解析：不回显原值
 	if loc, err := resp.Location(); err == nil {
@@ -354,7 +354,7 @@ func (c *Client) send(req *http.Request, out any) (*Response, error) {
 	defer resp.Body.Close()
 	r := parseResponse(resp)
 	if c.noRedirect && resp.StatusCode >= 300 && resp.StatusCode <= 399 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close() // 不读取响应体，原因同 rejectRedirectTransport
 		kind := "unknown"
 		if loc, err := resp.Location(); err == nil {
 			kind = redirectKind(req.URL, loc)
