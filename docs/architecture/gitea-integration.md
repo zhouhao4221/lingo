@@ -25,6 +25,7 @@
 - **分页**：`page` + `limit`，响应头带 `X-Total-Count` 和 `Link`；单页上限由实例 `[api] MAX_RESPONSE_ITEMS` 决定（默认 50）。
 - **幂等**：`POST /issues` 不支持幂等键。在正文中嵌入隐藏标记 `<!-- lingo:ticket=<id> -->`，outbox 重试前先用 `GET /repos/issues/search?q=lingo:ticket=<id>` 或按标签列出 Issue 查重，避免重复建单。
 - **错误处理**：404（仓库或 Issue 已删除）记为工单异常，不再重试；409/422 是参数问题，记录后告警；5xx / 超时由 outbox 退避重试。
+- **重定向**：所有请求共用 `internal/gitea.Client` 的一个 `http.Client`。默认（`GiteaConfig.RejectRedirects` 为假）按 Go 标准库跟随重定向：跨主机时去掉 `Authorization`，同主机、子域与 https→http 降级仍带令牌。`RejectRedirects` 为真时客户端设置 `CheckRedirect` 拒绝一切跟随（只作用于灵工自己的客户端副本，不动全局），返回 `*gitea.RedirectError`（`errors.Is(err, gitea.ErrRedirect)`，`IsRetryable` 为假）；自检对应项为 error，`close_issue` 的脱敏说明为「Gitea 返回了重定向（HTTP 30x），已按配置拒绝跟随」。Gitea 本身不会对 API 发 3xx，出现即说明 `BaseURL` 配置有误（少了子路径、http/https 写错）或中间有代理改写，应修正地址而非放开跳转。
 
 ## 3. 初始化：仓库、标签、Webhook
 
