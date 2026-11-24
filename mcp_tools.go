@@ -18,7 +18,7 @@ import (
 // list_perspectives、list_events、
 // list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、reject_forwarded_ticket、get_issue_close、
 // retry_issue_close、list_releases、get_release、get_llm_usage、list_visible_tickets；
-// 知识问答：ask、list_conversations、list_conversation_messages、confirm_action、cancel_action；知识库：search_knowledge。
+// 知识问答：ask、list_conversations、list_conversation_messages、confirm_action、cancel_action、rate_message；知识库：search_knowledge。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵工（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
@@ -142,16 +142,23 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 			}) (any, error) {
 				return list(l.ListVisibleTickets(ctx, u, VisibleTicketFilter{Project: a.Project, Status: a.Status, BeforeID: a.Before, Limit: a.Limit}))
 			}),
-		tool("reply_ticket", "在工单上留言，对提交人可见：提交人补充说明、后台人员答复，或研发 Agent 回复提交人（同步到 Gitea Issue 并通知提交人）。",
-			`{"type":"object","required":["id","body"],"properties":{"id":{"type":"integer"},"body":{"type":"string"}}}`,
+		tool("reply_ticket", "在工单上留言，对提交人可见：提交人补充说明、后台人员答复，或研发 Agent 回复提交人（同步到 Gitea Issue 并通知提交人）。后台人员（reviewer / admin）可把 add_to_knowledge 设为 true，同时把这条留言加入知识库（直接生效，所有用户可检索；knowledge_question / knowledge_answer 为改写后的通用问答，省略时取工单标题正文与留言原文）。",
+			`{"type":"object","required":["id","body"],"properties":{"id":{"type":"integer"},"body":{"type":"string"},"add_to_knowledge":{"type":"boolean"},"knowledge_question":{"type":"string"},"knowledge_answer":{"type":"string"}}}`,
 			func(ctx context.Context, u User, a struct {
-				ID   int64
-				Body string
+				ID                int64
+				Body              string
+				AddToKnowledge    bool   `json:"add_to_knowledge"`
+				KnowledgeQuestion string `json:"knowledge_question"`
+				KnowledgeAnswer   string `json:"knowledge_answer"`
 			}) (any, error) {
 				if err := requireID(a.ID); err != nil {
 					return nil, err
 				}
-				return l.AddTicketComment(ctx, u, a.ID, a.Body, nil)
+				in := CommentInput{Body: a.Body}
+				if a.AddToKnowledge {
+					in.Knowledge = &KnowledgeDraft{Question: a.KnowledgeQuestion, Answer: a.KnowledgeAnswer}
+				}
+				return l.AddTicketCommentWith(ctx, u, a.ID, in)
 			}),
 		tool("add_perspective", "以调用者的视角（使用者 / 业务方 / 专家 / 决策者，由身份决定）给需求工单追加一段补充，只追加不可修改；已转出时同步到 Issue 的视角区块。",
 			`{"type":"object","required":["id","content"],"properties":{"id":{"type":"integer"},"content":{"type":"string"}}}`,
@@ -224,6 +231,26 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 					in.Knowledge = &KnowledgeDraft{Question: a.KnowledgeQuestion, Answer: a.KnowledgeAnswer}
 				}
 				return l.AnswerTicketWith(ctx, u, a.ID, in)
+			}),
+		tool("rate_message", "对 ask 的回答反馈有帮助（helpful=true）或没帮助（false），以最后一次为准；知识类回答被标为有帮助时进入知识库待审核。",
+			`{"type":"object","required":["conversation_id","message_id","helpful"],"properties":{"conversation_id":{"type":"integer"},"message_id":{"type":"integer"},"helpful":{"type":"boolean"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ConversationID int64 `json:"conversation_id"`
+				MessageID      int64 `json:"message_id"`
+				Helpful        bool  `json:"helpful"`
+			}) (any, error) {
+				if err := requireID(a.ConversationID); err != nil {
+					return nil, err
+				}
+				if err := requireID(a.MessageID); err != nil {
+					return nil, err
+				}
+				if err := l.RateMessage(ctx, u, a.ConversationID, a.MessageID, a.Helpful); err != nil {
+					return nil, err
+				}
+				return struct {
+					OK bool `json:"ok"`
+				}{true}, nil
 			}),
 		tool("search_knowledge", "检索知识库：按问题或关键词返回已生效的知识条目（问题、答案、来源），按相关度排序；project 可限定项目，limit 最多 20。",
 			`{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"project":{"type":"string"},"limit":{"type":"integer"}}}`,

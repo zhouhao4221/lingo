@@ -18,10 +18,24 @@ import (
 const (
 	StatusActive   = "active"
 	StatusDisabled = "disabled"
+	StatusPending  = "pending"  // 待审核（REQ-007：模型抽取、用户认可的回答）
+	StatusRejected = "rejected" // 审核驳回
 
-	SourceManual       = "manual"        // reviewer / admin 手动新建
-	SourceTicketAnswer = "ticket_answer" // 后台直接答复工单时勾选入库
+	SourceManual            = "manual"             // reviewer / admin 手动新建
+	SourceTicketAnswer      = "ticket_answer"      // 后台直接答复工单时勾选入库
+	SourceTicketExtract     = "ticket_extract"     // 结案工单由模型抽取（待审核）
+	SourceAssistantFeedback = "assistant_feedback" // 知识类回答被标为"有帮助"（待审核）
+	SourceTicketComment     = "ticket_comment"     // 后台对外评论时勾选入库
 )
+
+// DuplicateRatio 是"可能重复"的阈值：新条目的检索词中与已生效条目重合的比例不低于它时标记。未答上的提问归并用同一阈值。
+const DuplicateRatio = 0.6
+
+// MinMatchRatio 是检索时的最低重合比例（相对提问与条目中词数较少的一方）。
+const MinMatchRatio = 0.2
+
+// MissRetention 是未答上提问的保留期。
+const MissRetention = 90 * 24 * time.Hour
 
 // 长度上限（字符）。
 const (
@@ -53,6 +67,9 @@ type Entry struct {
 	UpdatedBy      string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	DuplicateOf    int64 // 入库时检出的可能重复条目，0 表示无
+	HelpfulCount   int64
+	UnhelpfulCount int64
 }
 
 // Hit 是一条检索结果。
@@ -87,14 +104,17 @@ const (
 
 // NewEntry 是入库的一条，由 store 写入（Tokens 已切好）。
 type NewEntry struct {
-	ProjectKey     string
-	Repo           string
-	Question       string
-	Answer         string
-	Source         string
-	SourceTicketID int64
-	Tokens         []string
-	By             string
+	ProjectKey      string
+	Repo            string
+	Question        string
+	Answer          string
+	Source          string
+	SourceTicketID  int64
+	SourceMessageID int64  // 来源 d 的助手消息
+	Status          string // 为空表示 StatusActive
+	DuplicateOf     int64
+	Tokens          []string
+	By              string
 }
 
 // Pending 是待生成向量的条目。
@@ -117,12 +137,27 @@ type Store interface {
 	// UpdateKnowledge 改写问题、答案与仓库，并清空向量（待重新生成）。
 	UpdateKnowledge(ctx context.Context, id int64, d Draft, tokens []string, by string) error
 	SetKnowledgeStatus(ctx context.Context, id int64, status, by string) error
+	// TransitionKnowledge 把状态为 from 的条目改为 to；d 非空时同时改写问题、答案与仓库（清空向量）。条目不存在返回
+	// ticket.ErrNotFound，状态不是 from 返回 ticket.ErrConflict。
+	TransitionKnowledge(ctx context.Context, id int64, from, to string, d *Draft, tokens []string, by string) error
+	// SimilarKnowledge 返回项目内已生效条目中与 tokens 重合比例（重合词数 / len(tokens)）最高的一条及其比例。
+	SimilarKnowledge(ctx context.Context, project string, tokens []string) (int64, float64, error)
+	// RecordKnowledgeMiss 记录项目内未答上的提问：90 天内同项目有重合比例不低于 ratio 的记录时次数加一，否则新增。
+	RecordKnowledgeMiss(ctx context.Context, project, question string, tokens []string, ratio float64, since time.Time) error
+	ListKnowledgeMisses(ctx context.Context, q MissQuery) ([]Miss, error)
+	PurgeKnowledgeMisses(ctx context.Context, before time.Time) (int, error)
+	// ClaimKnowledgeExtractions 登记新结案的工单并领取一批待抽取的工单（加租约）。
+	ClaimKnowledgeExtractions(ctx context.Context, limit int, lease time.Duration) ([]int64, error)
+	// FinishKnowledgeExtraction 记录抽取结果：done / skipped 结束；失败时 attempts 加一，达到 maxAttempts 记 failed，
+	// 否则 retryAt 后再领取。
+	FinishKnowledgeExtraction(ctx context.Context, ticketID int64, status, errMsg string, maxAttempts int, retryAt time.Time) error
 	DeleteKnowledge(ctx context.Context, id int64) error
-	// DisableKnowledgeByTicket 停用项目 projects 内来源为该工单的条目，返回停用条数。
+	// DisableKnowledgeByTicket 停用项目 projects 内来源为该工单的已生效条目、驳回其待审核候选，返回处理条数。
 	DisableKnowledgeByTicket(ctx context.Context, ticketID int64, projects []string, by string) (int, error)
 	ListKnowledge(ctx context.Context, q ListQuery) ([]*Entry, error)
-	// SearchKnowledgeTokens 返回已生效、在 projects（及 project，非空时）内、与 tokens 有重合的条目，按重合度降序。
-	SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, limit int) ([]Hit, error)
+	// SearchKnowledgeTokens 返回已生效、在 projects（及 project，非空时）内的条目：重合词数不少于 len(tokens) 与条目词数
+	// 中较小者的 minRatio（向上取整，至少 1），按重合度降序。
+	SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int) ([]Hit, error)
 	// SearchKnowledgeWords 关键词兜底：问题或答案包含任一片段（不区分大小写）。
 	SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int) ([]Hit, error)
 	// KnowledgeEmbeddings 返回 ids 中向量模型为 model 的条目向量。
@@ -133,6 +168,49 @@ type Store interface {
 	// SaveKnowledgeEmbedding 保存向量；条目在领取后被编辑过（updated_at 变化）时不保存。
 	SaveKnowledgeEmbedding(ctx context.Context, id int64, updatedAt time.Time, vec []float32, model string) error
 }
+
+// Miss 是一条未答上的提问。
+type Miss struct {
+	ID       int64
+	Question string
+	Hits     int
+	FirstAt  time.Time
+	LastAt   time.Time
+}
+
+// MissQuery 是未答上提问列表的条件。
+type MissQuery struct {
+	Projects []string // 由 Service 按调用者填写
+	Project  string
+	Since    time.Time
+	Offset   int
+	Limit    int
+}
+
+// ExtractInput 是交给模型抽取知识的工单内容（不含提交人身份）。
+type ExtractInput struct {
+	Type         string // bug | feature
+	Title        string
+	Body         string
+	Comments     []string // 对外评论（时间顺序）
+	FixedVersion string
+	Closed       bool // 已关闭未修复
+}
+
+// Extracted 是抽取结果；Skip 表示没有可复用的知识。
+type Extracted struct {
+	Skip     bool
+	Question string
+	Answer   string
+}
+
+// Extractor 从结案工单抽取一条问答（模型调用）。
+type Extractor interface {
+	ExtractKnowledge(ctx context.Context, in ExtractInput) (*Extracted, error)
+}
+
+// TicketSource 读取工单与对外评论（不鉴权，供抽取使用）。
+type TicketSource func(ctx context.Context, id int64) (*ticket.Ticket, []ticket.Comment, error)
 
 // Embedder 生成向量；Name 返回模型标识（未知时为空，以维度代替）。
 type Embedder interface {
@@ -145,6 +223,11 @@ type Options struct {
 	Store Store
 	// Embedder 返回当前的向量模型，nil 表示不可用（只用切词检索）。
 	Embedder func() Embedder
+	// Extractor 返回当前的抽取模型，nil 表示不抽取（REQ-007）。
+	Extractor func() Extractor
+	// Tickets 读取工单与对外评论，抽取时使用。
+	Tickets TicketSource
+	Now     func() time.Time
 }
 
 // Service 是知识库。
@@ -157,6 +240,12 @@ func New(o Options) (*Service, error) {
 	}
 	if o.Embedder == nil {
 		o.Embedder = func() Embedder { return nil }
+	}
+	if o.Extractor == nil {
+		o.Extractor = func() Extractor { return nil }
+	}
+	if o.Now == nil {
+		o.Now = time.Now
 	}
 	return &Service{o: o}, nil
 }
@@ -243,14 +332,18 @@ func (s *Service) Update(ctx context.Context, p auth.Principal, id int64, d Draf
 
 // SetStatus 停用或恢复条目（reviewer / admin）。
 func (s *Service) SetStatus(ctx context.Context, p auth.Principal, id int64, active bool) (*Entry, error) {
-	if _, err := s.get(ctx, p, id); err != nil {
+	e, err := s.get(ctx, p, id)
+	if err != nil {
 		return nil, err
 	}
-	st := StatusDisabled
+	from, to := StatusActive, StatusDisabled
 	if active {
-		st = StatusActive
+		from, to = StatusDisabled, StatusActive
 	}
-	if err := s.o.Store.SetKnowledgeStatus(ctx, id, st, p.ID); err != nil {
+	if e.Status == to {
+		return e, nil // 幂等：已是目标状态
+	}
+	if err := s.o.Store.TransitionKnowledge(ctx, id, from, to, nil, nil, p.ID); err != nil {
 		return nil, err
 	}
 	return s.o.Store.GetKnowledge(ctx, id)
@@ -281,7 +374,7 @@ func (s *Service) List(ctx context.Context, p auth.Principal, q ListQuery) ([]*E
 		return nil, fmt.Errorf("%w: knowledge maintenance requires reviewer or admin", ticket.ErrForbidden)
 	}
 	switch q.Status {
-	case "", StatusActive, StatusDisabled:
+	case "", StatusActive, StatusDisabled, StatusPending, StatusRejected:
 	default:
 		return nil, fmt.Errorf("%w: status %q", ticket.ErrInvalid, q.Status)
 	}
@@ -340,7 +433,9 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, project, query s
 	if len(toks) == 0 {
 		return nil, nil
 	}
-	hits, err := s.o.Store.SearchKnowledgeTokens(ctx, p.Projects, project, toks, rerankPool)
+	// 重合词数至少为提问与条目中词数较少一方的 MinMatchRatio：只因"怎么""为什么"等常用词重合的条目不算相关，长问题
+	// 也能找到短条目
+	hits, err := s.o.Store.SearchKnowledgeTokens(ctx, p.Projects, project, toks, MinMatchRatio, rerankPool)
 	if err != nil {
 		return nil, err
 	}

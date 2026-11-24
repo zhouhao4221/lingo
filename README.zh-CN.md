@@ -8,7 +8,7 @@
 
 灵工只提供公开 API（Go 方法、REST Handler、MCP Server、Gitea Webhook Handler），无租户、无前端：登录、用户管理、界面与部署由接入方负责。
 
-> **状态：** 工单流程已端到端实现；知识问答（工单与版本问答）与知识库一期（后台答复入库、检索作答）已实现，知识库的模型抽取与审核尚未实现。首个正式版本发布前 API 仍可能调整。
+> **状态：** 工单流程已端到端实现；知识问答（工单与版本问答）与知识库（后台答复与评论入库、结案工单抽取、回答反馈、审核、检索作答）已实现。首个正式版本发布前 API 仍可能调整。
 
 ## 功能
 
@@ -178,7 +178,14 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 - **维护**（reviewer / admin，限 `User.Projects`）：`ListKnowledge`（可按引用次数排序）、`UpdateKnowledge`、`DisableKnowledge` / `EnableKnowledge`、`DeleteKnowledge`、`DisableKnowledgeByTicket`（提交人要求删除个人数据时，按来源工单停用派生的条目）。
 - **检索**（所有角色）：`SearchKnowledge`（REST `GET /knowledge/search`、MCP `search_knowledge`）。不需要数据库扩展：中文按二元切词、用 GIN 数组索引按重合度排序，没有命中时按关键词包含匹配兜底。
 - **向量（可选）**：主模型的 `Embed` 可用时，`Run` 在后台为条目生成向量（新建、编辑后，或换了向量模型），检索时对前 50 条按相似度重排；模型实现 `lingo.EmbeddingModelNamer` 时按模型名区分向量（内置适配器已实现，DeepSeek 与未配置 `EmbeddingModel` 的 OpenAI 适配器不生成向量），否则按维度区分。查询时多一次 `Embed` 调用，出错时只用切词检索。
-- 用量：作答记为 `knowledge_answer`，生成向量记为 `knowledge_embed`（只记次数）。需要迁移 `0005_knowledge.sql`。
+- **自动增长与审核**（REQ-007）：
+  - 后台在工单上发表对外评论时也可勾选入库（`AddTicketCommentWith`，REST `POST /tickets/{id}/comments` 带 `knowledge`，MCP `reply_ticket` 的 `add_to_knowledge`），直接生效。
+  - Bug / 需求工单首次进入已发布、已上线或已关闭（未修复）后，`Run` 用轻量模型抽取一条问答，**待审核**；每张工单最多抽取一次，未配置模型时不抽取。**升级到本版本时已结案的工单不抽取**。
+  - 用户对回答反馈有帮助 / 没帮助（`RateMessage`，REST `POST /conversations/{id}/messages/{mid}/feedback`，MCP `rate_message`）：回答引用的条目累加次数；知识类问题的回答第一次被标为有帮助时，提问与回答（去掉工单号、知识编号并脱敏）作为**待审核**候选入库。
+  - 审核（reviewer / admin）：`ListKnowledge`（`Status: KnowledgePending`）列出待审核条目，`ApproveKnowledge`（可带编辑后的内容）/ `RejectKnowledge`；入库时与已生效条目重合比例不低于 60% 的标出 `duplicate_of`，只提示不合并。待审核、已驳回的条目不参与检索与回答。
+  - 未答上的问题：知识类问题没有命中时，在提问人可访问的项目里各记录一条脱敏后的提问，近 90 天同项目的同类提问归并计数，`ListUnansweredQuestions`（REST `GET /knowledge/unanswered`）按次数列出，供补充知识。
+- 检索只返回重合词数不少于提问与条目中词数较少一方 20% 的条目，避免只因“怎么”“为什么”等常用词命中无关内容。
+- 用量：作答记为 `knowledge_answer`，生成向量记为 `knowledge_embed`（只记次数），抽取记为 `knowledge_extract`。需要迁移 `0005_knowledge.sql`、`0006_knowledge_review.sql`。
 
 ### 连接配置（存数据库）
 
@@ -199,7 +206,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 |---|---|
 | `GET /projects`、`GET /ticket-types` | 项目与仓库；工单类型及 Issue 模板表单字段 |
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
-| `GET /knowledge/search?q=&project=&limit=`；`GET` / `POST /knowledge`、`PUT` / `DELETE /knowledge/{id}`、`POST /knowledge/{id}/disable\|enable`、`POST /knowledge/disable-by-ticket` | 知识库：检索（所有角色）；维护（reviewer / admin） |
+| `GET /knowledge/search?q=&project=&limit=`；`GET` / `POST /knowledge`、`PUT` / `DELETE /knowledge/{id}`、`POST /knowledge/{id}/disable\|enable`、`POST /knowledge/disable-by-ticket`、`POST /knowledge/{id}/approve\|reject`、`GET /knowledge/unanswered` | 知识库：检索（所有角色）；维护与审核（reviewer / admin） |
 | `GET /tickets/visible?project=&status=&before=` | 可查看的工单：本人的 + `TicketAudience` 放宽可见的同事的（只读） |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
@@ -209,7 +216,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 | `GET` / `PUT /settings/auto-forward` | 自动转出开关（修改需 admin） |
 | `GET /usage?from=&to=` | 模型 token 用量，按天、用途、模型汇总，含前缀缓存命中率（admin） |
 | `POST` / `GET /conversations`、`DELETE /conversations/{id}` | 知识问答会话：新建、列表（按最近活动，`before` 为上一页的 `cursor`）、删除 |
-| `GET` / `POST /conversations/{id}/messages`、`POST /conversations/{id}/messages/{mid}/retry` | 历史消息；提问（`stream` 为真时 SSE）；重试失败的回答 |
+| `GET` / `POST /conversations/{id}/messages`、`POST /conversations/{id}/messages/{mid}/retry`、`POST /conversations/{id}/messages/{mid}/feedback` | 历史消息；提问（`stream` 为真时 SSE）；重试失败的回答；回答反馈 |
 | `POST /conversations/{id}/actions/{aid}/confirm\|cancel` | 确认 / 取消待确认操作（如留言） |
 | `GET` / `PUT /settings/connections`、`POST /settings/connections/test` | 连接配置（模型与 Gitea）：查看（密钥为掩码）、按字段修改、连通测试（权限见 `Config.AuthorizeSettings`） |
 
@@ -217,7 +224,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`、`search_knowledge`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`、`rate_message`、`search_knowledge`。
 
 ### 事件
 

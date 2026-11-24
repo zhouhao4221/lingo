@@ -122,7 +122,8 @@ func TestAssistantStreamClientDisconnect(t *testing.T) {
 func TestAssistantMigrationIncremental(t *testing.T) {
 	db := testDB(t, true)
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `DROP TABLE lingo_assistant_actions, lingo_assistant_messages, lingo_assistant_conversations;
+	// CASCADE：0006 起知识库与反馈表引用助手消息（只删外键，不删这些表）
+	if _, err := db.ExecContext(ctx, `DROP TABLE lingo_assistant_actions, lingo_assistant_messages, lingo_assistant_conversations CASCADE;
 		DROP SEQUENCE lingo_assistant_activity_seq; DELETE FROM lingo_schema_migrations WHERE name LIKE '0003_%'`); err != nil {
 		t.Fatal(err)
 	}

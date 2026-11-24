@@ -178,6 +178,36 @@ func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, bo
 	return c, nil
 }
 
+// AddCommentWith 同 AddComment，另在同一事务内、评论写入后调用 after（如后台评论时勾选入库知识，REQ-007）；after 返回
+// 错误时整体回滚。
+func (s *Service) AddCommentWith(ctx context.Context, p auth.Principal, id int64, body string, attachments []Attachment,
+	after func(ctx context.Context, tx Tx, t *Ticket, c *Comment) error) (*Comment, error) {
+	body = strings.TrimSpace(body)
+	attachments, err := CleanAttachments(attachments)
+	if err != nil {
+		return nil, err
+	}
+	if body == "" && len(attachments) == 0 {
+		return nil, fmt.Errorf("%w: comment is empty", ErrInvalid)
+	}
+	var c *Comment
+	err = s.o.Store.InTx(ctx, func(tx Tx) error {
+		var err error
+		if c, err = s.addComment(ctx, tx, p, id, body, attachments); err != nil || after == nil {
+			return err
+		}
+		t, err := tx.LockByID(ctx, id) // 已在 addComment 中锁定，同一事务内再取一次工单
+		if err != nil {
+			return err
+		}
+		return after(ctx, tx, t, c)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // AddCommentTx 在调用方的事务 tx 中执行 AddComment（校验、写入、同步与通知相同），供需要与其他写入同事务提交的
 // 领域使用（如知识问答确认留言）。
 func (s *Service) AddCommentTx(ctx context.Context, tx Tx, p auth.Principal, id int64, body string, attachments []Attachment) (*Comment, error) {

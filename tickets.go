@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/zhouhao4221/lingo/internal/knowledge"
+	"github.com/zhouhao4221/lingo/internal/textutil"
 	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
@@ -210,6 +212,52 @@ func (l *Lingo) AddTicketComment(ctx context.Context, u User, id int64, body str
 	if err != nil {
 		return Comment{}, publicErr(err)
 	}
+	return publicComments([]ticket.Comment{*c})[0], nil
+}
+
+// CommentInput 是 AddTicketCommentWith 的输入：Knowledge 非 nil 时把这条评论加入知识库（仅 reviewer / admin，直接生效）。
+// Knowledge 的问题与答案为空时分别取工单标题与正文、评论原文；建议改写为通用的问题与答案。
+type CommentInput struct {
+	Body        string
+	Attachments []Attachment
+	Knowledge   *KnowledgeDraft
+}
+
+// AddTicketCommentWith 同 AddTicketComment，另可在同一事务内把评论加入知识库（REQ-007）。非 reviewer / admin 要求入库时
+// 返回 ErrForbidden；知识内容不合法时返回 ErrInvalidInput，评论也不发表。
+func (l *Lingo) AddTicketCommentWith(ctx context.Context, u User, id int64, in CommentInput) (Comment, error) {
+	if in.Knowledge == nil {
+		return l.AddTicketComment(ctx, u, id, in.Body, in.Attachments)
+	}
+	p := l.principal(u)
+	if !p.Staff() {
+		return Comment{}, fmt.Errorf("%w: only reviewers and admins can add comments to the knowledge base", ErrForbidden)
+	}
+	kd := *in.Knowledge
+	c, err := l.tickets.AddCommentWith(ctx, p, id, in.Body, internalAttachments(in.Attachments),
+		func(ctx context.Context, tx ticket.Tx, t *ticket.Ticket, c *ticket.Comment) error {
+			w, ok := tx.(knowledge.Writer)
+			if !ok {
+				return errors.New("lingo: store does not support knowledge")
+			}
+			d := knowledge.Draft{ProjectKey: t.ProjectKey, Repo: kd.Repo, Question: strings.TrimSpace(kd.Question), Answer: strings.TrimSpace(kd.Answer)}
+			if d.Question == "" {
+				d.Question = textutil.ClipEllipsis(knowledge.Scrub(oneLineText(t.Title+"："+t.Body)), knowledge.MaxQuestionRunes)
+			}
+			if d.Answer == "" {
+				d.Answer = textutil.ClipEllipsis(knowledge.Scrub(c.Body), knowledge.MaxAnswerRunes)
+			}
+			d, err := knowledge.Prepare(d)
+			if err != nil {
+				return err
+			}
+			_, err = w.InsertKnowledge(ctx, knowledge.NewFromComment(d, t.ID, p.ID))
+			return err
+		})
+	if err != nil {
+		return Comment{}, publicErr(err)
+	}
+	l.kickEmbed()
 	return publicComments([]ticket.Comment{*c})[0], nil
 }
 
