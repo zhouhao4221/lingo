@@ -3,6 +3,7 @@ package lingo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -296,7 +297,8 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				}
 				m, err := l.SendMessage(ctx, u, id, MessageInput{Content: a.Question, TimeZone: a.TimeZone})
 				if err != nil {
-					if created { // 提问没有保存（参数不合法等）：删掉刚建的空会话
+					if created && (errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrNoModel)) {
+						// 提问在保存前就被拒（参数不合法等）：删掉刚建的空会话；其他错误时提问可能已经保存，保留会话
 						_ = l.DeleteConversation(context.WithoutCancel(ctx), u, id)
 					}
 					return nil, err

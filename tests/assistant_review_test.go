@@ -70,7 +70,7 @@ func TestAssistantButtonsWaitForTurn(t *testing.T) {
 	<-done
 }
 
-// 失败回答之后插入了按钮的结果消息，仍能重试。
+// 失败回答之后插入了按钮的结果消息（这里是取消按钮），仍能重试。
 func TestAssistantRetryAfterButtonMessage(t *testing.T) {
 	m := &scriptModel{}
 	l, db := newAssistantLingo(t, m)
@@ -84,8 +84,8 @@ func TestAssistantRetryAfterButtonMessage(t *testing.T) {
 	if err != nil || failed.Status != "failed" {
 		t.Fatalf("failed = %+v %v", failed, err)
 	}
-	if r, err := l.ConfirmPendingAction(ctx, alice, conv.ID, p.ID); err != nil || r.Message == nil {
-		t.Fatalf("button confirm: %+v %v", r, err)
+	if r, err := l.CancelPendingAction(ctx, alice, conv.ID, p.ID); err != nil || r.Message == nil { // 按钮插入一条结果消息
+		t.Fatalf("button cancel: %+v %v", r, err)
 	}
 	m.intents = []string{`{"intent":"release_list"}`}
 	if got, err := l.RetryMessage(ctx, alice, conv.ID, failed.ID, ""); err != nil || got.Status != "done" {
@@ -299,6 +299,64 @@ func TestAssistantMCPAskInvalidLeavesNoConversation(t *testing.T) {
 	}
 	if cs, _ := l.ListConversations(context.Background(), alice, 0, 0); len(cs) != 0 {
 		t.Errorf("conversations = %d", len(cs))
+	}
+}
+
+// 第四轮审查：失败那轮之后点旧的确认按钮，操作同样作废。
+func TestAssistantButtonAfterInterveningMessage(t *testing.T) {
+	m := &scriptModel{}
+	l, db := newAssistantLingo(t, m)
+	ctx := context.Background()
+	id := seedTicketRow(t, db, "u1", "", "api", "bug", "登录页白屏", "in_progress", 12)
+	conv, _ := l.CreateConversation(ctx, alice, "")
+	m.intents = []string{fmt.Sprintf(`{"intent":"comment","ticket_ids":[%d],"comment_body":"复现环境是 Chrome 120"}`, id)}
+	p := send(t, l, alice, conv.ID, fmt.Sprintf("在 #%d 留言：复现环境是 Chrome 120", id)).PendingAction
+	m.fail = 1
+	if f, _ := l.SendMessage(ctx, alice, conv.ID, lingo.MessageInput{Content: "#5 怎么样"}); f.Status != "failed" {
+		t.Fatalf("want failed turn, got %+v", f)
+	}
+	if _, err := l.ConfirmPendingAction(ctx, alice, conv.ID, p.ID); !errors.Is(err, lingo.ErrConflict) {
+		t.Errorf("button after intervening message: %v", err)
+	}
+	var st string
+	if err := db.QueryRow(`SELECT status FROM lingo_assistant_actions WHERE id = $1`, p.ID).Scan(&st); err != nil || st != "cancelled" {
+		t.Errorf("action status = %q %v", st, err)
+	}
+	if cs, _ := l.ListTicketComments(ctx, alice, id); len(cs) != 0 {
+		t.Errorf("comments = %d", len(cs))
+	}
+}
+
+// 第四轮审查：长留言（超过 2000 字）完整写入，不截断。
+func TestAssistantLongCommentNotTruncated(t *testing.T) {
+	m := &scriptModel{}
+	l, db := newAssistantLingo(t, m)
+	ctx := context.Background()
+	id := seedTicketRow(t, db, "u1", "", "api", "bug", "登录页白屏", "in_progress", 12)
+	conv, _ := l.CreateConversation(ctx, alice, "")
+	body := strings.Repeat("日志", 1500) // 3000 字
+	m.intents = []string{fmt.Sprintf(`{"intent":"comment","ticket_ids":[%d],"comment_body":%q}`, id, body)}
+	p := send(t, l, alice, conv.ID, fmt.Sprintf("在 #%d 留言：%s", id, body)).PendingAction
+	if p == nil {
+		t.Fatal("no pending action")
+	}
+	if _, err := l.ConfirmPendingAction(ctx, alice, conv.ID, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ := l.ListTicketComments(ctx, alice, id)
+	if len(cs) != 1 || cs[0].Body != body {
+		t.Errorf("comment length = %d", len([]rune(cs[0].Body)))
+	}
+}
+
+// 第四轮审查：不可访问的项目按问题类型回复。
+func TestAssistantUnknownProjectByIntent(t *testing.T) {
+	m := &scriptModel{}
+	l, _ := newAssistantLingo(t, m)
+	conv, _ := l.CreateConversation(context.Background(), alice, "")
+	m.intents = []string{`{"intent":"release_list","project":"secret"}`}
+	if got := send(t, l, alice, conv.ID, "secret 项目最近发了什么版本"); !strings.Contains(got.Content, "发版记录") {
+		t.Errorf("content = %q", got.Content)
 	}
 }
 

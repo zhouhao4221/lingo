@@ -176,7 +176,7 @@ func parseIntent(out string, projects []assistant.ProjectInfo) *assistant.Intent
 		return &assistant.Intent{Kind: assistant.IntentClarify}
 	}
 	in := &assistant.Intent{Kind: r.Intent, Mine: r.Mine, UnknownProject: r.UnknownProject,
-		CommentBody: textutil.Clip(strings.TrimSpace(r.CommentBody), 2000),
+		CommentBody: textutil.Clip(strings.TrimSpace(r.CommentBody), assistant.MaxContentRunes), // 不超过提问上限，不会截断原文
 		Clarify:     textutil.Clip(oneLine(r.Clarify), 200), Title: textutil.Clip(oneLine(r.Title), 30)}
 	for _, id := range r.TicketIDs {
 		if id > 0 && !slices.Contains(in.TicketIDs, id) && len(in.TicketIDs) < assistant.MaxTickets {

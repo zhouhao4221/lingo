@@ -455,7 +455,7 @@ func (l *Lingo) CancelPendingAction(ctx, u, conversationID, actionID) (ActionRes
   - `event: message`，data 为完整的 ConversationMessage，恰好一次，客户端以它为准覆盖前面拼出的内容
   - `event: error`，data 为 `{"code","message"}`
 - **开流时机**：收到第一个片段时才写响应头，所以前置错误仍返回 JSON 和对应状态码
-- **客户端断开**：取消模型调用，消息记为 `failed`（error 为 `canceled`），并释放租约；收尾用 `context.WithoutCancel`，超时 5 秒
+- **客户端断开**：取消模型调用，消息记为 `failed`（error 为 `canceled`），并释放租约；收尾用 `context.WithoutCancel`，超时 10 秒；收尾失败时兜底另开 10 秒
 - **错误码**：`ErrNoModel` → 501 `model_not_configured`，MCP 共用同一套映射
 
 **MCP（整段返回）**：`ask`（question、conversation_id 可空、time_zone）、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`
@@ -484,7 +484,7 @@ func (l *Lingo) CancelPendingAction(ctx, u, conversationID, actionID) (ActionRes
 
 **一轮提问与待确认操作**
 
-- **一轮的流程**（整轮超时 2 分钟，租约 150 秒）：
+- **一轮的流程**（整轮超时 2 分钟，租约 200 秒 = 回答时限 + 80 秒，覆盖超时时仍在进行的一次 SSE 写入与收尾）：
   1. 事务内抢租约，写入用户消息，并把已过期的操作置为 expired
   2. 存在待确认操作时先做确认分类：confirm → 执行；cancel 或其他 → 作废，其他意图继续往下处理
   3. 意图解析 → 查询 → 组织回答

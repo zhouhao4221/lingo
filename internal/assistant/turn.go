@@ -175,13 +175,13 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	if err != nil {
 		msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations = StatusFailed, errKind(ctx, err), "", "", Citations{}
 		if ferr := s.finish(fctx, p, conv, msg, nil); ferr != nil {
-			return s.salvage(fctx, conv, msg, origID, ferr)
+			return s.salvage(ctx, conv, msg, origID, ferr)
 		}
 		return msg, nil
 	}
 	msg.Status, msg.Error = StatusDone, ""
 	if err := s.finish(fctx, p, conv, msg, r); err != nil {
-		return s.salvage(fctx, conv, msg, origID, err)
+		return s.salvage(ctx, conv, msg, origID, err)
 	}
 	if onDelta != nil && !r.streamed {
 		onDelta(msg.Content)
@@ -190,7 +190,10 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 }
 
 // salvage 在落库失败时尽量记下失败的回答并释放租约，避免会话在租约过期前一直被占用；都失败时返回原错误。
+// ctx 是请求的上下文：兜底另开超时，不沿用落库那次可能已经超时的上下文。
 func (s *Service) salvage(ctx context.Context, conv *Conversation, msg *Message, origID int64, cause error) (*Message, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	msg.ID = origID
 	msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations, msg.Action = StatusFailed, ErrKindInternal, "", "", Citations{}, nil
 	err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
@@ -261,7 +264,7 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 		err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
 			var res *execResult
 			var err error
-			if a, res, err = s.executeTx(ctx, tx, p, conv.ID, r.execute.ID, msg); err != nil {
+			if a, res, err = s.executeTx(ctx, tx, p, conv.ID, r.execute.ID, msg.ReplyTo, msg); err != nil {
 				return err
 			}
 			if res == nil && msg.Outcome == "" && a.Status == ActionExecuted {
@@ -361,7 +364,14 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 
 func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired bool) (*reply, error) {
 	if in.UnknownProject || (in.Project != "" && !s.accessible(tc.p, in.Project)) {
-		return &reply{content: textNotFound, outcome: OutcomeNotFound}, nil
+		// 提到的项目不可访问：只影响按项目查询的意图，按问题类型说明
+		switch in.Kind {
+		case IntentTicketFind, IntentTicketFix, IntentTicketSummary:
+			return &reply{content: textNotFound, outcome: OutcomeNotFound}, nil
+		case IntentReleaseList:
+			return &reply{content: textNoRelease, outcome: OutcomeNotFound}, nil
+		}
+		in.Project = ""
 	}
 	switch in.Kind {
 	case IntentTicketFind, IntentTicketFix:

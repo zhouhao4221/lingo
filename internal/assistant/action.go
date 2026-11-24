@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
@@ -73,12 +74,28 @@ func rejectText(a *Action, err error) string {
 // executeTx 在事务中锁定并执行操作 id，结果写入 msg（未落库）。执行器在保存点内运行：被拒（无权限、工单状态
 // 不允许）时回滚到保存点，在同一事务中把操作置为 failed 并写入说明，不需要另开事务（期间租约不会被别人取得）。
 // 操作已不在等待中（已取消、已过期、已失败）时返回 ticket.ErrConflict 与该操作。
-func (s *Service) executeTx(ctx context.Context, tx Tx, p auth.Principal, convID, id int64, msg *Message) (*Action, *execResult, error) {
+// beforeID 是确认所依据的用户消息（按钮确认时为 math.MaxInt64）：操作提出之后、它之前还有别的用户消息时，说明用户已经
+// 转而问了别的，操作作废（规则同 liveAction）。
+func (s *Service) executeTx(ctx context.Context, tx Tx, p auth.Principal, convID, id, beforeID int64, msg *Message) (*Action, *execResult, error) {
 	a, err := tx.LockAction(ctx, convID, id)
 	if err != nil {
 		return nil, nil, err
 	}
 	now := s.o.Now()
+	if a.Status == ActionPending {
+		between, err := tx.UserMessageBetween(ctx, convID, a.MessageID, beforeID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if between {
+			a.Status, a.ResolvedAt = ActionCancelled, &now
+			if err := tx.ResolveAction(ctx, a); err != nil {
+				return nil, nil, err
+			}
+			msg.Content, msg.Outcome = notPendingText(a), OutcomeActionCancelled
+			return a, nil, nil
+		}
+	}
 	switch {
 	case a.Status == ActionExecuted:
 		return a, nil, nil // 已执行：幂等
@@ -142,7 +159,7 @@ func (s *Service) Confirm(ctx context.Context, p auth.Principal, convID, actionI
 	var out *ActionResult
 	var expired bool
 	err := s.buttonTx(ctx, p, convID, func(tx Tx) error {
-		a, res, err := s.executeTx(ctx, tx, p, convID, actionID, msg)
+		a, res, err := s.executeTx(ctx, tx, p, convID, actionID, math.MaxInt64, msg)
 		if err != nil {
 			return err
 		}
@@ -150,8 +167,8 @@ func (s *Service) Confirm(ctx context.Context, p auth.Principal, convID, actionI
 			out = &ActionResult{Action: a}
 			return nil
 		}
-		if expired = msg.Outcome == OutcomeActionExpired; expired {
-			out = &ActionResult{Action: a} // 过期：只落库状态，不追加消息
+		if expired = msg.Outcome == OutcomeActionExpired || msg.Outcome == OutcomeActionCancelled; expired {
+			out = &ActionResult{Action: a} // 已过期或已作废：只落库状态，不追加消息
 			return nil
 		}
 		if err := s.appendMessage(ctx, tx, msg); err != nil {
@@ -167,7 +184,7 @@ func (s *Service) Confirm(ctx context.Context, p auth.Principal, convID, actionI
 		return nil, err
 	}
 	if expired {
-		return out, fmt.Errorf("%w: action expired", ticket.ErrConflict)
+		return out, fmt.Errorf("%w: action is %s", ticket.ErrConflict, out.Action.Status)
 	}
 	return out, nil
 }
