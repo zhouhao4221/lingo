@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/cache"
@@ -84,7 +85,7 @@ type RepoConfig struct {
 
 // ProcessTasks 领取并执行一批 Gitea 写操作任务，返回领取到的条数；未配置时返回 0。
 func (w *Worker) ProcessTasks(ctx context.Context) (int, error) {
-	if w.o.Tasks == nil {
+	if w.o.Tasks == nil || !w.ready() {
 		return 0, nil
 	}
 	claimed := time.Now()
@@ -116,6 +117,7 @@ func (w *Worker) handleTask(ctx context.Context, t store.Task) {
 	tctx, cancel := w.taskContext(ctx)
 	err := w.runTask(context.WithValue(tctx, parentCtxKey{}, ctx), t)
 	cancel()
+	err = deferUnconfigured(w.o.Now(), err)
 	fctx, fcancel := finishContext(ctx)
 	defer fcancel()
 	log := w.log.With("task", t.OutboxID, "op", t.Op, "ticket", t.TicketID, "attempt", t.Attempts, "failures", t.Failures)
@@ -386,7 +388,11 @@ func (c *draftCache) drop(id int64) {
 // 未配置模型、剩余任务时间不足、退出中或整理失败时返回原工单与空串（按原内容建单，不影响建单）。
 // keepTitle 为真时不改标题。
 func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.IssueTemplate, keepTitle bool) (*ticket.Ticket, string) {
-	if w.o.Drafter == nil {
+	drafter := w.o.Drafter
+	if w.o.DrafterFor != nil {
+		drafter = w.o.DrafterFor()
+	}
+	if drafter == nil {
 		return t, ""
 	}
 	if d, ok := w.drafts.get(t); ok {
@@ -417,7 +423,7 @@ func (w *Worker) draftIssue(ctx context.Context, t *ticket.Ticket, tmpl *gitea.I
 		defer stop()
 	}
 	start := time.Now()
-	d, usage, err := w.o.Drafter.DraftIssue(dctx, in)
+	d, usage, err := drafter.DraftIssue(dctx, in)
 	if !errors.Is(err, llm.ErrNotCalled) { // 没调用到模型（如提示词构造失败）不计用量
 		w.recordUsage(ctx, "draft_issue", t.ID, usage, err == nil, time.Since(start))
 	}
@@ -960,7 +966,9 @@ const maxIssueTitle = 255
 type labelCache struct {
 	once  sync.Once
 	c     *cache.Cache[string, map[string]int64]
-	locks sync.Map // 仓库 → *sync.Mutex：同一仓库的“列出再创建”串行，避免并发建出同名标签
+	gen   atomic.Uint64 // reset 时递增：进行中的查询结果属于旧连接，不写入缓存
+	genMu sync.Mutex    // 代次检查与写入、reset 互斥
+	locks sync.Map      // 仓库 → *sync.Mutex：同一仓库的“列出再创建”串行，避免并发建出同名标签
 }
 
 func (c *labelCache) lock(key string) func() {
@@ -983,13 +991,30 @@ func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, lab
 			return id, true, nil
 		}
 	}
+	gen := c.gen.Load()
 	ids, _, err := gitea.EnsureLabels(ctx, g, owner, name, nil)
 	if err != nil {
 		return 0, false, giteaErr("list labels", err)
 	}
-	c.cache().Put(key, ids)
+	c.put(gen, key, ids)
 	id, ok := ids[strings.ToLower(label)]
 	return id, ok, nil
+}
+
+func (c *labelCache) reset() {
+	c.genMu.Lock()
+	defer c.genMu.Unlock()
+	c.gen.Add(1)
+	c.cache().DeleteFunc(func(string) bool { return true })
+}
+
+// put 写入缓存；查询期间连接已更换（代次变化）时丢弃。
+func (c *labelCache) put(gen uint64, key string, ids map[string]int64) {
+	c.genMu.Lock()
+	defer c.genMu.Unlock()
+	if c.gen.Load() == gen {
+		c.cache().Put(key, ids)
+	}
 }
 
 func (c *labelCache) forget(owner, name string) {
@@ -1010,11 +1035,12 @@ func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name stri
 		}
 	}
 	if !ok {
+		gen := c.gen.Load()
 		var err error
 		if ids, _, err = gitea.EnsureLabels(ctx, g, owner, name, want); err != nil {
 			return nil, giteaErr("ensure labels", err)
 		}
-		c.cache().Put(key, ids)
+		c.put(gen, key, ids)
 	}
 	out := make([]int64, 0, len(want))
 	for _, l := range want {

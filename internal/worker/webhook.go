@@ -19,6 +19,9 @@ const botRetry = 30 * time.Second
 
 // ProcessWebhooks 领取并处理一批 Webhook 投递，返回领取到的条数。
 func (w *Worker) ProcessWebhooks(ctx context.Context) (int, error) {
+	if !w.ready() {
+		return 0, nil
+	}
 	claimed := time.Now()
 	ds, err := w.o.Deliveries.ClaimDeliveries(ctx, w.o.BatchSize, w.o.Lease)
 	if err != nil {
@@ -49,6 +52,7 @@ func (w *Worker) handleDelivery(ctx context.Context, d store.Delivery) {
 	tctx, cancel := w.taskContext(ctx)
 	err := w.processDelivery(tctx, d)
 	cancel()
+	err = deferUnconfigured(w.o.Now(), err)
 	fctx, fcancel := finishContext(ctx)
 	defer fcancel()
 	log := w.log.With("delivery", d.DeliveryID, "kind", d.Kind, "attempt", d.Attempts, "failures", d.Failures)
@@ -166,7 +170,7 @@ func (w *Worker) applyIssue(ctx context.Context, ev *webhook.Event, received tim
 		case errors.Is(err, gitea.ErrNotFound):
 			// Issue 已删除或仓库不可访问；载荷里的旧快照不再可信
 			change, cur = ticket.IssueDeleted, ticket.IssueState{}
-		case err != nil && gitea.IsRetryable(err):
+		case err != nil && (gitea.IsRetryable(err) || errors.Is(err, gitea.ErrNotConfigured)):
 			return fmt.Errorf("get issue %s#%d: %w", ev.Repo, ev.IssueNumber, err)
 		case err != nil:
 			w.log.Warn("get issue failed, using webhook payload", "repo", ev.Repo, "issue", ev.IssueNumber, "err", err)

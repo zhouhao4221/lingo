@@ -93,7 +93,9 @@ func TestWebhookHandlerWithoutSecretRejects(t *testing.T) {
 	}
 }
 
-func TestNewRejectsAutoRegisterWithoutSecret(t *testing.T) {
+// 自动注册所需的 WebhookSecret 可以存在数据库中（REQ-005），New 不再要求代码中同时给出；缺失时由自检报告、
+// 经接口保存时拒绝（见 settings_test.go）。
+func TestNewAllowsAutoRegisterSecretFromDatabase(t *testing.T) {
 	db := testDB(t, false)
 	_, err := lingo.New(lingo.Config{
 		DB:           db,
@@ -102,7 +104,7 @@ func TestNewRejectsAutoRegisterWithoutSecret(t *testing.T) {
 		Projects:     []lingo.Project{{Key: "demo"}},
 		Authenticate: func(*http.Request) (lingo.User, error) { return lingo.User{}, nil },
 	})
-	if err == nil || !strings.Contains(err.Error(), "WebhookSecret") {
+	if err != nil {
 		t.Errorf("err = %v", err)
 	}
 }

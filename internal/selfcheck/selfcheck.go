@@ -69,6 +69,9 @@ type Options struct {
 	WebhookURL    string
 	WebhookSecret string
 	AutoRegister  bool
+	// PreviousWebhookURLs 是之前用过的回调地址（运行时修改过 WebhookURL）：AutoRegister 时，指向这些地址的灵工
+	// Webhook 改为指向 WebhookURL，不会留下重复的 Hook。
+	PreviousWebhookURLs []string
 	// PingWait 是测试投递后等待接收端确认的时间，默认 10 秒。
 	PingWait time.Duration
 	Now      func() time.Time
@@ -214,6 +217,21 @@ func checkWebhook(ctx context.Context, o Options, owner, name string, actions bo
 	if err != nil {
 		add(repo, "webhook", Warn, "cannot list webhooks (token needs write:repository): %v", err)
 		return false
+	}
+	if h == nil && o.AutoRegister {
+		// 回调地址改过：把指向旧地址的 Hook 改到新地址（下面的 AutoRegister 分支写回地址、密钥与事件）
+		for _, prev := range o.PreviousWebhookURLs {
+			if prev == "" || prev == o.WebhookURL {
+				continue
+			}
+			if h, err = o.Gitea.FindHook(ctx, owner, name, prev); err != nil {
+				add(repo, "webhook", Warn, "cannot list webhooks (token needs write:repository): %v", err)
+				return false
+			}
+			if h != nil {
+				break
+			}
+		}
 	}
 	missing := func(h *gitea.Hook) []string {
 		var m []string

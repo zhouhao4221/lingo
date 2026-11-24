@@ -379,7 +379,7 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 		gs = &groundedStream{ids: ids, out: tc.onDelta}
 		onDelta = gs.write
 	}
-	out, err := s.o.Brain.Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, onDelta)
+	out, err := s.brainOf(ctx).Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, onDelta)
 	if err != nil {
 		return nil, modelError{err}
 	}

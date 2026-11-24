@@ -153,6 +153,19 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 
 最后恰好一个 `message` 事件，以它的 `content` 为准；开始输出后出错发送 `event: error`（`{"code","message"}`）；开始输出前的错误（如 404、409、501）仍是普通 JSON 错误响应。模型出错时助手消息的 `status` 为 `failed`，可调用 retry 重试。用 `fetch` 读取流（`EventSource` 不支持 POST）。
 
+### 连接配置（存数据库）
+
+模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册 Webhook、拒绝重定向）可以不写在代码里，存入数据库，由有权限的人在接入方的配置页里修改，**不用重启**：
+
+- `ConnectionSettings` / `UpdateConnectionSettings` / `TestConnectionSettings`（REST `GET` / `PUT /settings/connections`、`POST /settings/connections/test`），不提供 MCP。权限由 `Config.AuthorizeSettings` 决定，不配置时只允许 admin。
+- **优先级**：代码中 `Config` 给了值的项优先，查看时来源为 `config`，修改返回 409；没给的读数据库。模型按槽位判断（`Config.Model` / `LightModel` 设置了就整体以代码为准）；布尔项代码中为 `true` 才锁定。`LabelPrefix`、`ReplyMode` 只能在代码中配置。
+- **生效**：保存后当前实例立即生效，其他实例 30 秒内生效（`Run` 定时检查，只挂载 Handler 的进程在收到请求时检查）；进行中的请求使用开始时的配置。
+- **密钥明文存储**：数据库中的 `lingo_settings` 表保存明文密钥，能读取该表（含备份、只读副本）的人都能拿到密钥，请收紧数据库账号与备份的访问。接口只返回掩码（如 `sk-****abcd`），日志只记修改人与字段名。
+- **改地址须重填密钥**：Gitea 或模型的地址换了主机，必须同时提交令牌 / API Key，避免把已保存的密钥发往新地址。换成另一个 Gitea 实例会使已有工单的 Issue 关联失效，队列中的任务与对账还可能操作到新实例上同编号的无关 Issue，不要这样做（只用于同一实例换域名或协议）。
+- **未配置状态**：没有 Gitea 地址或令牌时也能启动：Webhook 返回 503，建单等任务暂不执行（不计失败），自检只报 `config` 警告；配置好后自动恢复。未配置期间 Gitea 推送失败的 Webhook 不会重投，由定时对账补齐；关闭对账（`ReconcileInterval < 0`）时补不回。
+- **改 Webhook 密钥**：灵工立即按新密钥验签。开启自动注册时会补跑一次自检，把新密钥同步到 Gitea；未开启或 `SkipSelfCheck` 时需在 Gitea 中手动同步。
+- 数据库里的模型只支持内置的 OpenAI 兼容接口（`openai`）与 DeepSeek（`deepseek`），不含向量模型；自定义的 `lingo.Model` 仍通过 `Config` 传入。需要执行迁移 0004。
+
 ### REST 接口
 
 | 接口 | 说明 |
@@ -169,6 +182,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 | `POST` / `GET /conversations`、`DELETE /conversations/{id}` | 知识问答会话：新建、列表（按最近活动，`before` 为上一页的 `cursor`）、删除 |
 | `GET` / `POST /conversations/{id}/messages`、`POST /conversations/{id}/messages/{mid}/retry` | 历史消息；提问（`stream` 为真时 SSE）；重试失败的回答 |
 | `POST /conversations/{id}/actions/{aid}/confirm\|cancel` | 确认 / 取消待确认操作（如留言） |
+| `GET` / `PUT /settings/connections`、`POST /settings/connections/test` | 连接配置（模型与 Gitea）：查看（密钥为掩码）、按字段修改、连通测试（权限见 `Config.AuthorizeSettings`） |
 
 写操作须使用 `Content-Type: application/json`（防 CSRF）；错误响应为 `{"error":{"code","message"}}`。
 

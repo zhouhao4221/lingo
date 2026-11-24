@@ -108,6 +108,11 @@ const (
 )
 
 // GiteaConfig 是 Gitea 连接配置；要求 Gitea ≥ 1.22。
+//
+// BaseURL、Token、WebhookSecret、AutoRegisterWebhook、WebhookURL、RejectRedirects 都可以不在代码中配置，改为存入数据库，
+// 经 UpdateConnectionSettings（REST PUT /settings/connections）修改、无需重启即生效；代码中给了值的项优先，且不能经接口
+// 修改（布尔项为 true 时以代码为准，为 false 时读数据库）。地址或令牌都没有时灵工以"未配置"状态运行：Webhook 返回 503，
+// 建单等 Gitea 任务暂不执行（不计失败），配置后自动恢复。LabelPrefix 与 ReplyMode 只能在代码中配置。
 type GiteaConfig struct {
 	BaseURL       string
 	Token         string // 机器人账号 token，最小 scope：write:issue、read:repository、read:user
@@ -118,8 +123,9 @@ type GiteaConfig struct {
 	LabelPrefix string
 	ReplyMode   ReplyMode // 默认 ReplyMarked
 
-	// AutoRegisterWebhook 为真时，Run 启动时在各仓库查找或创建指向 WebhookURL 的 Webhook
-	// （token 另需 write:repository）；为假时由接入方手工配置。
+	// AutoRegisterWebhook 为真时，Run 启动时（以及连接配置变化后）在各仓库查找或创建指向 WebhookURL 的 Webhook
+	// （token 另需 write:repository）；为假时由接入方手工配置。WebhookURL 与 WebhookSecret 可以来自代码或数据库，
+	// 生效后缺任何一个时自检不自动注册并报告错误（不会把空密钥写进 Gitea），经接口保存 Gitea 配置时会被拒绝。
 	AutoRegisterWebhook bool
 	WebhookURL          string // WebhookHandler 的外部可访问地址
 
@@ -280,7 +286,7 @@ type Attachment struct {
 // CheckResult 是一项启动自检结果；Repo 为空表示实例级检查。Level 为 ok / warn（功能受限）/ error（该仓库无法对接）。
 type CheckResult struct {
 	Repo    string `json:"repo,omitempty"`
-	Item    string `json:"item"` // version | attachments | repo | permission | labels | webhook | delivery | templates | workflow
+	Item    string `json:"item"` // config | version | attachments | repo | permission | labels | webhook | delivery | templates | workflow
 	Level   string `json:"level"`
 	Message string `json:"message"`
 }

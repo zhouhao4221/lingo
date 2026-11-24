@@ -1,6 +1,9 @@
 // Command server 是最小接入示例：在业务项目的 HTTP 服务中挂载 lingo。
 //
-// 运行：LINGO_DATABASE_URL=... LINGO_GITEA_URL=... LINGO_GITEA_TOKEN=... LINGO_WEBHOOK_SECRET=... go run ./examples/server
+// 运行：LINGO_DATABASE_URL=... go run ./examples/server
+//
+// 只配数据库也能启动：Gitea 与模型的连接配置可以之后由 admin 经 PUT /lingo/settings/connections 写入数据库（无需重启）。
+// 也可以用环境变量 LINGO_GITEA_URL、LINGO_GITEA_TOKEN、LINGO_WEBHOOK_SECRET 等在代码中配置，代码配置的项优先且只读。
 //
 // lingo 不引入数据库驱动：实际项目中加一行驱动的空白导入，如 _ "github.com/jackc/pgx/v5/stdlib"（驱动名 "pgx"）。
 // 身份解析、通知渠道、模型均由接入方实现，下面用最简单的写法示意。
@@ -62,6 +65,13 @@ func main() {
 			AutoForward: map[lingo.TicketType]bool{lingo.TicketBug: true}, // Bug 自动转出，其余待后台确认
 		}},
 		Authenticate: authenticate,
+		// 连接配置（可选）：谁能查看与修改模型、Gitea 的连接配置。不配置时只允许 admin。
+		AuthorizeSettings: func(ctx context.Context, u lingo.User, write bool) error {
+			if u.Role == lingo.RoleAdmin {
+				return nil
+			}
+			return lingo.ErrForbidden
+		},
 		// 需求视角（可选）：谁能给哪条需求补充 / 查看视角补充。不配置时同工单可见范围（external 只能是本人的需求）；
 		// 这里放行有视角的人（业务方、专家、决策者）参与项目内全部需求。
 		AuthorizePerspective: func(ctx context.Context, u lingo.User, t lingo.Ticket, write bool) error {

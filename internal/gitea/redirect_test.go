@@ -217,15 +217,15 @@ func TestRejectRedirectsDoesNotMutateClients(t *testing.T) {
 	if hc.CheckRedirect != nil || hc.Transport != nil || http.DefaultClient.CheckRedirect != nil || http.DefaultClient.Transport != nil {
 		t.Fatal("caller's client or http.DefaultClient was modified")
 	}
-	if c.hc == hc || c.hc.CheckRedirect == nil {
+	if c.cfg.Load().hc == hc || c.cfg.Load().hc.CheckRedirect == nil {
 		t.Fatal("RejectRedirects not applied to a private copy")
 	}
 	d, _ := New(Options{BaseURL: "https://g.example", Token: fakeToken, RejectRedirects: true})
-	if d.hc.Timeout != DefaultTimeout || d.hc.CheckRedirect == nil {
-		t.Errorf("default client: timeout=%v checkRedirect=%v", d.hc.Timeout, d.hc.CheckRedirect != nil)
+	if d.cfg.Load().hc.Timeout != DefaultTimeout || d.cfg.Load().hc.CheckRedirect == nil {
+		t.Errorf("default client: timeout=%v checkRedirect=%v", d.cfg.Load().hc.Timeout, d.cfg.Load().hc.CheckRedirect != nil)
 	}
 	e, _ := New(Options{BaseURL: "https://g.example", Token: fakeToken})
-	if e.hc.CheckRedirect != nil || e.hc.Timeout != DefaultTimeout {
+	if e.cfg.Load().hc.CheckRedirect != nil || e.cfg.Load().hc.Timeout != DefaultTimeout {
 		t.Error("default (RejectRedirects=false) client changed")
 	}
 }

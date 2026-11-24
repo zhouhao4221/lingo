@@ -247,8 +247,8 @@ func publicActionResult(r *assistant.ActionResult) ActionResult {
 	return out
 }
 
-// newAssistant 装配知识问答：意图解析与确认判断用 LightModel（为空用 Model），组织回答用 Model；
-// 未配置 Model 时发送返回 ErrNoModel。
+// newAssistant 装配知识问答：意图解析与确认判断用 LightModel（为空用 Model），组织回答用 Model（代码配置或数据库中的
+// 连接配置）；未配置主模型时发送返回 ErrNoModel。
 func (l *Lingo) newAssistant() (*assistant.Service, error) {
 	o := assistant.Options{
 		Store:       l.store,
@@ -281,13 +281,7 @@ func (l *Lingo) newAssistant() (*assistant.Service, error) {
 			return ""
 		},
 	}
-	if main := l.cfg.Model; !isNil(main) {
-		light := l.cfg.LightModel
-		if isNil(light) {
-			light = main
-		}
-		o.Brain = &llm.Assistant{Light: chatOf(light), Main: chatOf(main), MainStream: streamOf(main), Record: l.recordUsage}
-	}
+	o.BrainFor = l.brainFor // 每轮提问取当前的模型（连接配置可在运行时修改）
 	s, err := assistant.New(o)
 	if err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)

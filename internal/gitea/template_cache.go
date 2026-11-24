@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/cache"
@@ -21,6 +22,8 @@ type TemplateCache struct {
 
 	once sync.Once
 	c    *cache.Cache[string, cachedTemplates]
+	gen  atomic.Uint64 // Reset 时递增：进行中的读取结果属于旧连接，不写入缓存
+	mu   sync.Mutex    // 代次检查与写入、Reset 互斥
 }
 
 type cachedTemplates struct {
@@ -48,7 +51,13 @@ func (c *TemplateCache) Get(ctx context.Context, g TemplateLister, owner, name s
 	if e, ok := c.cache().Get(key); ok {
 		return e.ts, e.err
 	}
+	gen := c.gen.Load()
 	ts, err := g.ListIssueTemplates(ctx, owner, name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen.Load() != gen {
+		return ts, err // 期间连接已更换（Reset）：结果属于旧连接，不写入缓存
+	}
 	switch {
 	case err != nil && ctx.Err() != nil:
 		return nil, err // 调用方取消，不是仓库的问题，不缓存
@@ -58,6 +67,14 @@ func (c *TemplateCache) Get(ctx context.Context, g TemplateLister, owner, name s
 		c.cache().Put(key, cachedTemplates{ts: ts})
 	}
 	return ts, err
+}
+
+// Reset 丢弃全部缓存并作废进行中的读取（Gitea 连接更换后调用）。
+func (c *TemplateCache) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gen.Add(1)
+	c.cache().DeleteFunc(func(string) bool { return true })
 }
 
 // Forget 丢弃仓库的缓存。

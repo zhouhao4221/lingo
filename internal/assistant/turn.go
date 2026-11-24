@@ -35,9 +35,11 @@ func (s *Service) Send(ctx context.Context, p auth.Principal, convID int64, cont
 	if err != nil {
 		return nil, err
 	}
-	if s.o.Brain == nil {
+	brain := s.brain()
+	if brain == nil {
 		return nil, ErrNoModel
 	}
+	ctx = context.WithValue(ctx, brainKey{}, brain) // 本轮使用开始时的模型
 	var conv *Conversation
 	var act *Action
 	var expired bool
@@ -68,9 +70,11 @@ func (s *Service) Retry(ctx context.Context, p auth.Principal, convID, messageID
 	if err != nil {
 		return nil, err
 	}
-	if s.o.Brain == nil {
+	brain := s.brain()
+	if brain == nil {
 		return nil, ErrNoModel
 	}
+	ctx = context.WithValue(ctx, brainKey{}, brain) // 本轮使用开始时的模型
 	var conv *Conversation
 	var act *Action
 	var expired bool
@@ -101,6 +105,24 @@ func (s *Service) Retry(ctx context.Context, p auth.Principal, convID, messageID
 		return nil, err
 	}
 	return s.run(ctx, p, conv, user, act, expired, loc, failed, onDelta)
+}
+
+type brainKey struct{}
+
+// brain 返回当前的模型调用（BrainFor 优先）。
+func (s *Service) brain() Brain {
+	if s.o.BrainFor != nil {
+		return s.o.BrainFor()
+	}
+	return s.o.Brain
+}
+
+// brainOf 返回本轮开始时取定的模型调用。
+func (s *Service) brainOf(ctx context.Context) Brain {
+	if b, ok := ctx.Value(brainKey{}).(Brain); ok {
+		return b
+	}
+	return s.brain()
 }
 
 // claim 校验会话归属并取得生成租约；他人的或已删除的会话返回 ErrNotFound，租约未过期返回 ErrConflict。
@@ -317,7 +339,7 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	loc *time.Location, onDelta func(string)) (*reply, error) {
 	var cancelled *Action
 	if act != nil {
-		d, err := s.o.Brain.Confirm(ctx, ConfirmInput{Summary: act.Summary, Message: user.Content})
+		d, err := s.brainOf(ctx).Confirm(ctx, ConfirmInput{Summary: act.Summary, Message: user.Content})
 		if err != nil {
 			return nil, modelError{err}
 		}
@@ -334,7 +356,7 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 		return nil, err
 	}
 	tc := &turnCtx{p: p, loc: loc, now: s.o.Now(), history: hist, question: user.Content, onDelta: onDelta}
-	in, err := s.o.Brain.Intent(ctx, IntentInput{Today: today(tc.now, loc), Projects: s.o.Projects(p), History: hist,
+	in, err := s.brainOf(ctx).Intent(ctx, IntentInput{Today: today(tc.now, loc), Projects: s.o.Projects(p), History: hist,
 		Question: user.Content, NeedTitle: conv.Title == ""})
 	if err != nil {
 		return nil, modelError{err}
