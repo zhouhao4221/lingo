@@ -204,9 +204,11 @@ func (s *Service) findTickets(ctx context.Context, tc *turnCtx, in *Intent) (*re
 	var cites Citations
 	for _, t := range ts {
 		ft := s.factOf(t, tc.loc, detailBodyRunes)
-		cs, err := s.o.Tickets.Comments(ctx, tc.p, t.ID)
-		if err != nil {
-			return nil, err
+		var cs []ticket.Comment
+		if len(ts) == 1 { // 只在回答单张工单时带上最近的评论（见 README 中送给模型的内容）
+			if cs, err = s.o.Tickets.Comments(ctx, tc.p, t.ID); err != nil {
+				return nil, err
+			}
 		}
 		if n := len(cs); n > detailComments {
 			cs = cs[n-detailComments:]
@@ -369,7 +371,8 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 	if err != nil {
 		return nil, err
 	}
-	ids := factIDs(f)
+	// 允许的工单号：本轮数据中的，加上提问与历史引用中出现过的（如"没有找到 #13""和之前的 #5 一样"）
+	ids := append(factIDs(f), tc.knownIDs()...)
 	var gs *groundedStream
 	var onDelta func(string)
 	if tc.onDelta != nil {
@@ -396,6 +399,22 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 		r.streamed = true // 已推送了一部分：以最终消息为准
 	}
 	return r, nil
+}
+
+// knownIDs 是提问中写到的工单号与历史回答引用过的工单号。
+func (tc *turnCtx) knownIDs() []int64 {
+	var ids []int64
+	for _, m := range ticketNumRe.FindAllStringSubmatch(tc.question, -1) {
+		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	for _, h := range tc.history {
+		for _, t := range h.Tickets {
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids
 }
 
 func factIDs(f facts) []int64 {

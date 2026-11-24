@@ -92,6 +92,8 @@ type Conversation struct {
 	Seq          int64 // 最近活动序号：列表按它倒序，也是分页游标
 	LastActiveAt time.Time
 	CreatedAt    time.Time
+	// Lease 是本次取得的生成租约（ClaimTurn 回填），释放时只清除自己持有的租约
+	Lease time.Time
 }
 
 // Message 是会话中的一条消息。
@@ -176,10 +178,11 @@ type Store interface {
 // Tx 是事务内的问答操作，同时具备工单操作（确认留言与会话写入同事务提交）。
 type Tx interface {
 	ticket.Tx
-	// ClaimTurn 为会话写入生成租约（数据库时间 now() + hold），租约未过期时 ok 为假；会话不存在时返回 ticket.ErrNotFound。
+	// ClaimTurn 为会话写入生成租约（数据库时间 now() + hold），回填 conv.Lease；租约未过期时 ok 为假；会话不存在时
+	// 返回 ticket.ErrNotFound。
 	ClaimTurn(ctx context.Context, userID string, id int64, hold time.Duration) (conv *Conversation, ok bool, err error)
-	// ReleaseTurn 清除生成租约。
-	ReleaseTurn(ctx context.Context, id int64) error
+	// ReleaseTurn 清除生成租约，只在租约仍是 lease（自己持有的那个）时清除：超时后被别人取得的租约不受影响。
+	ReleaseTurn(ctx context.Context, id int64, lease time.Time) error
 	// Touch 刷新最近活动（取新的活动序号）；会话标题为空且 title 非空时写入标题。
 	Touch(ctx context.Context, id int64, title string) error
 	InsertMessage(ctx context.Context, m *Message) error

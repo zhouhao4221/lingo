@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
@@ -113,27 +114,35 @@ func (c *OpenAI) ChatUsage(ctx context.Context, messages []Message) (string, Usa
 	for _, m := range messages {
 		req.Messages = append(req.Messages, msg{m.Role, m.Content})
 	}
-	var resp struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-		Usage *struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			PromptTokensDetails *struct {
-				CachedTokens int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"` // DeepSeek
-		} `json:"usage"`
-	}
+	var resp completion
 	u := Usage{Model: c.o.Model}
 	if err := c.post(ctx, "/chat/completions", req, &resp); err != nil {
 		return "", u, err
 	}
+	return resp.result(u)
+}
+
+// completion 是 /chat/completions 的非流式响应。
+type completion struct {
+	Model   string `json:"model"`
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"` // DeepSeek
+	} `json:"usage"`
+}
+
+// result 取第一个候选的文本与用量（u 为已知的默认值）。
+func (resp *completion) result(u Usage) (string, Usage, error) {
 	if resp.Model != "" {
 		u.Model = resp.Model
 	}
@@ -205,6 +214,22 @@ func (c *OpenAI) ChatStream(ctx context.Context, messages []Message, onDelta fun
 		return "", u, err
 	}
 	defer resp.Body.Close()
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "" && mt != "text/event-stream" {
+		// 网关或兼容服务忽略了 stream，返回普通响应：按整段回答处理
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		if err != nil {
+			return "", u, fmt.Errorf("llm: read response: %w", err)
+		}
+		var cr completion
+		if err := json.Unmarshal(data, &cr); err != nil {
+			return "", u, fmt.Errorf("llm: decode response: %w", err)
+		}
+		out, u, err := cr.result(u)
+		if err == nil && onDelta != nil {
+			onDelta(out)
+		}
+		return out, u, err
+	}
 	var out strings.Builder
 	finish, done := "", false
 	sc := bufio.NewScanner(resp.Body)

@@ -146,6 +146,7 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	if msg == nil {
 		msg = &Message{ConversationID: conv.ID, Role: RoleAssistant, ReplyTo: user.ID}
 	}
+	origID := msg.ID // 重试时为原消息 ID；落库事务回滚后，InsertMessage 回填的 ID 已失效
 	tctx, cancel := context.WithTimeout(ctx, turnTimeout)
 	r, err := s.respond(tctx, p, conv, user, act, expired, loc, onDelta)
 	cancel()
@@ -155,13 +156,13 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	if err != nil {
 		msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations = StatusFailed, errKind(ctx, err), "", "", Citations{}
 		if ferr := s.finish(fctx, p, conv, msg, nil); ferr != nil {
-			return s.salvage(fctx, conv, msg, ferr)
+			return s.salvage(fctx, conv, msg, origID, ferr)
 		}
 		return msg, nil
 	}
 	msg.Status, msg.Error = StatusDone, ""
 	if err := s.finish(fctx, p, conv, msg, r); err != nil {
-		return s.salvage(fctx, conv, msg, err)
+		return s.salvage(fctx, conv, msg, origID, err)
 	}
 	if onDelta != nil && !r.streamed {
 		onDelta(msg.Content)
@@ -170,16 +171,17 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 }
 
 // salvage 在落库失败时尽量记下失败的回答并释放租约，避免会话在租约过期前一直被占用；都失败时返回原错误。
-func (s *Service) salvage(ctx context.Context, conv *Conversation, msg *Message, cause error) (*Message, error) {
+func (s *Service) salvage(ctx context.Context, conv *Conversation, msg *Message, origID int64, cause error) (*Message, error) {
+	msg.ID = origID
 	msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations, msg.Action = StatusFailed, ErrKindInternal, "", "", Citations{}, nil
 	err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
 		if err := s.saveMessage(ctx, tx, conv, msg, ""); err != nil {
 			return err
 		}
-		return tx.ReleaseTurn(ctx, conv.ID)
+		return tx.ReleaseTurn(ctx, conv.ID, conv.Lease)
 	})
 	if err != nil {
-		_ = s.o.Store.InAssistantTx(ctx, func(tx Tx) error { return tx.ReleaseTurn(ctx, conv.ID) })
+		_ = s.o.Store.InAssistantTx(ctx, func(tx Tx) error { return tx.ReleaseTurn(ctx, conv.ID, conv.Lease) })
 		return nil, cause
 	}
 	return msg, nil
@@ -220,7 +222,7 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 		if err := s.saveMessage(ctx, tx, conv, msg, title); err != nil {
 			return err
 		}
-		return tx.ReleaseTurn(ctx, conv.ID)
+		return tx.ReleaseTurn(ctx, conv.ID, conv.Lease)
 	}
 	if r == nil {
 		return s.o.Store.InAssistantTx(ctx, save)
@@ -267,6 +269,9 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 			if a != nil {
 				now := s.o.Now()
 				a.Status, a.ResolvedAt = ActionCancelled, &now
+				if !now.Before(a.ExpiresAt) {
+					a.Status = ActionExpired // 回答期间已经过期
+				}
 				if err := tx.ResolveAction(ctx, a); err != nil {
 					return err
 				}

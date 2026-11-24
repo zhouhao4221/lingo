@@ -245,13 +245,14 @@ func (s *Service) Cancel(ctx context.Context, p auth.Principal, convID, actionID
 // 避免按钮插入的消息与正在生成的回答交错；租约在同一事务内释放。他人的会话返回 ticket.ErrNotFound。
 func (s *Service) buttonTx(ctx context.Context, p auth.Principal, convID int64, fn func(Tx) error) error {
 	return s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
-		if _, err := s.claim(ctx, tx, p, convID); err != nil {
+		conv, err := s.claim(ctx, tx, p, convID)
+		if err != nil {
 			return err
 		}
 		if err := fn(tx); err != nil {
 			return err
 		}
-		return tx.ReleaseTurn(ctx, convID)
+		return tx.ReleaseTurn(ctx, convID, conv.Lease)
 	})
 }
 

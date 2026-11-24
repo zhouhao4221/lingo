@@ -88,6 +88,20 @@ func TestOpenAIChatStreamIncomplete(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatStreamPlainJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json") // 忽略了 stream
+		_, _ = w.Write([]byte(`{"model":"m-2","choices":[{"message":{"content":"整段"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+	c, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m"})
+	var parts []string
+	out, u, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, func(d string) { parts = append(parts, d) })
+	if err != nil || out != "整段" || len(parts) != 1 || u.Model != "m-2" || u.Input != 3 {
+		t.Errorf("plain = %q %v %+v %v", out, parts, u, err)
+	}
+}
+
 func TestOpenAIChatStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

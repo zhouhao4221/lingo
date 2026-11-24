@@ -155,12 +155,17 @@ func (s *Store) RecentDone(ctx context.Context, conversationID, beforeID int64, 
 }
 
 func (x assistantTx) ClaimTurn(ctx context.Context, userID string, id int64, hold time.Duration) (*assistant.Conversation, bool, error) {
-	c, err := scanConversation(x.tx.QueryRowContext(ctx, `UPDATE lingo_assistant_conversations
+	var c assistant.Conversation
+	err := x.tx.QueryRowContext(ctx, `UPDATE lingo_assistant_conversations
 		SET turn_until = now() + ($3::float8) * interval '1 millisecond'
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND (turn_until IS NULL OR turn_until < now())
-		RETURNING `+conversationColumns, id, userID, hold.Milliseconds()))
-	if !errors.Is(err, ticket.ErrNotFound) {
-		return c, err == nil, err
+		RETURNING `+conversationColumns+`, turn_until`, id, userID, hold.Milliseconds()).Scan(
+		&c.ID, &c.UserID, &c.Title, &c.Seq, &c.LastActiveAt, &c.CreatedAt, &c.Lease)
+	switch {
+	case err == nil:
+		return &c, true, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return nil, false, fmt.Errorf("store: claim turn %d: %w", id, err)
 	}
 	var exists bool
 	if err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM lingo_assistant_conversations
@@ -173,8 +178,9 @@ func (x assistantTx) ClaimTurn(ctx context.Context, userID string, id int64, hol
 	return nil, false, nil
 }
 
-func (x assistantTx) ReleaseTurn(ctx context.Context, id int64) error {
-	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_assistant_conversations SET turn_until = NULL WHERE id = $1", id); err != nil {
+func (x assistantTx) ReleaseTurn(ctx context.Context, id int64, lease time.Time) error {
+	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_assistant_conversations SET turn_until = NULL WHERE id = $1 AND turn_until = $2",
+		id, lease); err != nil {
 		return fmt.Errorf("store: release turn %d: %w", id, err)
 	}
 	return nil

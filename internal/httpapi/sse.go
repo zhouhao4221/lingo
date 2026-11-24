@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// sseWriteTimeout 是单次 SSE 写入的期限。
+const sseWriteTimeout = 30 * time.Second
+
 // Streamed 表示处理器已经自行写出响应（如 SSE），Router 不再编码结果。
 type Streamed struct{}
 
@@ -39,11 +42,13 @@ func (s *SSE) Send(event string, data any) error {
 		h := s.w.Header()
 		h.Set("Content-Type", "text/event-stream; charset=utf-8")
 		h.Set("Cache-Control", "no-cache")
-		h.Set("X-Accel-Buffering", "no")       // 关闭 nginx 等反向代理的缓冲
-		_ = s.rc.SetWriteDeadline(time.Time{}) // 流式回答可能超过服务器的写超时；不支持时忽略
+		h.Set("X-Accel-Buffering", "no") // 关闭 nginx 等反向代理的缓冲
 		s.w.WriteHeader(http.StatusOK)
 		s.started = true
 	}
+	// 每次写之前设滚动的写期限：流式回答可能超过服务器的 WriteTimeout，但客户端不读时不能让写一直阻塞
+	// （否则请求与会话租约一直被占用）；不支持时忽略
+	_ = s.rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b); err != nil {
 		return err
 	}

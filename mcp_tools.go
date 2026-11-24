@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/mcp"
@@ -279,11 +280,14 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				ConversationID int64  `json:"conversation_id"`
 				TimeZone       string `json:"time_zone"`
 			}) (any, error) {
-				if a.Question == "" {
+				if strings.TrimSpace(a.Question) == "" {
 					return nil, &mcp.ArgError{Msg: "question is required"}
 				}
 				id := a.ConversationID
 				if id == 0 {
+					if isNil(l.cfg.Model) { // 先校验，避免失败的调用留下空会话
+						return nil, ErrNoModel
+					}
 					c, err := l.CreateConversation(ctx, u, "")
 					if err != nil {
 						return nil, err
