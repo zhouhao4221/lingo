@@ -531,6 +531,7 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 		}
 	}
 	if len(hits) == 0 && len(ts) == 0 {
+		_ = s.o.Knowledge.Miss(ctx, tc.p, in.Project, tc.question) // 未答上统计（REQ-007）：失败不影响回答
 		return &reply{content: textNoKnowledge, outcome: OutcomeNotFound}, nil
 	}
 	readable, err := s.readableSources(ctx, tc.p, hits)

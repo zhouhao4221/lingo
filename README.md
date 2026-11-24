@@ -8,7 +8,7 @@ Lingo is an embeddable Go library that connects end users with an AI development
 
 Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a Gitea webhook handler). It has no multi-tenancy and no frontend: login, user management, UI and deployment stay with the host application.
 
-> **Status:** the ticket workflow is implemented end to end. Knowledge Q&A (questions about tickets and releases) and the first phase of the knowledge base (entries saved when answering tickets, searched to answer questions) are implemented; model extraction and review are not yet. The API may still change before the first tagged release.
+> **Status:** the ticket workflow is implemented end to end. Knowledge Q&A (questions about tickets and releases) and the knowledge base (entries from answers and comments, extraction from closed tickets, answer feedback, review, search) are implemented. The API may still change before the first tagged release.
 
 ## Features
 
@@ -170,7 +170,14 @@ How-to questions ("why is the exported report empty", "how do I set up SSO") are
 - **Maintenance** (reviewers / admins, within `User.Projects`): `ListKnowledge` (sortable by cite count), `UpdateKnowledge`, `DisableKnowledge` / `EnableKnowledge`, `DeleteKnowledge`, `DisableKnowledgeByTicket` (disables entries derived from a ticket, e.g. when its submitter asks for their data to be removed).
 - **Search** (all roles): `SearchKnowledge` (REST `GET /knowledge/search`, MCP `search_knowledge`). No database extension needed: Chinese text is split into bigrams and ranked by overlap with a GIN array index, with substring matching as a fallback.
 - **Vectors (optional)**: when the main model's `Embed` works, `Run` generates vectors in the background (for new or edited entries, or after the embedding model changes), and search re-ranks the top 50 by similarity. Vectors are told apart by model name when the model implements `lingo.EmbeddingModelNamer` (the built-in adapters do; DeepSeek and an OpenAI adapter without `EmbeddingModel` produce none), otherwise by dimension. Each search then makes one extra `Embed` call and falls back to bigram ranking on error.
-- Usage: answers are recorded as `knowledge_answer`, embeddings as `knowledge_embed` (call counts only). Requires migration `0005_knowledge.sql`.
+- **Growth and review** (REQ-007):
+  - Reviewers and admins can also add a public ticket comment to the knowledge base (`AddTicketCommentWith`, REST `POST /tickets/{id}/comments` with `knowledge`, MCP `reply_ticket` with `add_to_knowledge`); it goes live at once.
+  - When a bug or feature ticket first becomes released, deployed or closed (not fixed), `Run` uses the light model to extract one Q&A as **pending review**. Each ticket is extracted at most once, and nothing is extracted without a model. **Tickets already closed when you upgrade to this version are not extracted.**
+  - Users rate answers as helpful or not (`RateMessage`, REST `POST /conversations/{id}/messages/{mid}/feedback`, MCP `rate_message`). Cited entries get the counts. The first time an answer to a how-to question is rated helpful, the question and answer (with ticket and knowledge numbers removed, scrubbed) become a **pending** candidate.
+  - Review (reviewers / admins): list pending entries with `ListKnowledge` (`Status: KnowledgePending`), then `ApproveKnowledge` (optionally with edits) or `RejectKnowledge`. New entries overlapping an active one by 60% or more carry `duplicate_of`, as a hint only. Pending and rejected entries are never searched or used in answers.
+  - Unanswered questions: how-to questions with no match are recorded (scrubbed), similar ones within 90 days are merged and counted, and `ListUnansweredQuestions` (REST `GET /knowledge/unanswered`) lists them by count so you know what to add.
+- Search only returns entries matching at least 20% of the query terms, so common words such as "怎么" alone do not pull in unrelated entries.
+- Usage: answers are recorded as `knowledge_answer`, embeddings as `knowledge_embed` (call counts only), extraction as `knowledge_extract`. Requires migrations `0005_knowledge.sql` and `0006_knowledge_review.sql`.
 
 ### Connection settings (stored in the database)
 
@@ -191,7 +198,7 @@ Model and Gitea connection settings (addresses, tokens / API keys, webhook secre
 |---|---|
 | `GET /projects`, `GET /ticket-types` | Projects and repositories; ticket types with issue-template form fields |
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
-| `GET /knowledge/search?q=&project=&limit=`; `GET` / `POST /knowledge`, `PUT` / `DELETE /knowledge/{id}`, `POST /knowledge/{id}/disable\|enable`, `POST /knowledge/disable-by-ticket` | Knowledge base: search (all roles); maintenance (reviewers / admins) |
+| `GET /knowledge/search?q=&project=&limit=`; `GET` / `POST /knowledge`, `PUT` / `DELETE /knowledge/{id}`, `POST /knowledge/{id}/disable\|enable`, `POST /knowledge/disable-by-ticket`, `POST /knowledge/{id}/approve\|reject`, `GET /knowledge/unanswered` | Knowledge base: search (all roles); maintenance and review (reviewers / admins) |
 | `GET /tickets/visible?project=&status=&before=` | Tickets the caller can view: their own plus teammates' via `TicketAudience` (read-only) |
 | `POST` / `GET /tickets/{id}/perspectives` | Requirement perspectives: add, list grouped by perspective (see above) |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
@@ -201,7 +208,7 @@ Model and Gitea connection settings (addresses, tokens / API keys, webhook secre
 | `GET` / `PUT /settings/auto-forward` | Auto-forward switches (changes: admin) |
 | `GET /usage?from=&to=` | Model token usage by day, purpose and model, with prompt-cache hit rate (admin) |
 | `POST` / `GET /conversations`, `DELETE /conversations/{id}` | Q&A conversations: create, list (by recent activity; pass the previous page's `cursor` as `before`), delete |
-| `GET` / `POST /conversations/{id}/messages`, `POST /conversations/{id}/messages/{mid}/retry` | History; ask (SSE when `stream` is true); retry a failed answer |
+| `GET` / `POST /conversations/{id}/messages`, `POST /conversations/{id}/messages/{mid}/retry`, `POST /conversations/{id}/messages/{mid}/feedback` | History; ask (SSE when `stream` is true); retry a failed answer; rate an answer |
 | `POST /conversations/{id}/actions/{aid}/confirm\|cancel` | Confirm / cancel a pending action (such as a comment) |
 | `GET` / `PUT /settings/connections`, `POST /settings/connections/test` | Connection settings (model and Gitea): view (secrets masked), update by field, test (access per `Config.AuthorizeSettings`) |
 
@@ -209,7 +216,7 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`, `search_knowledge`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`, `rate_message`, `search_knowledge`.
 
 ### Events
 

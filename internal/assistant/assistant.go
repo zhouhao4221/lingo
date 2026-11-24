@@ -135,6 +135,10 @@ type Knowledge interface {
 	Search(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]knowledge.Hit, error)
 	ByIDs(ctx context.Context, ids []int64) ([]*knowledge.Entry, error)
 	Cite(ctx context.Context, ids []int64) error
+	// Feedback 给条目累加有帮助 / 没帮助次数；Suggest 以待审核状态入库回答候选；Miss 记录未答上的提问（REQ-007）。
+	Feedback(ctx context.Context, ids []int64, helpful, unhelpful int) error
+	Suggest(ctx context.Context, d knowledge.Draft, messageID int64) error
+	Miss(ctx context.Context, p auth.Principal, project, question string) error
 }
 
 // TicketRef 是引用的工单。
@@ -206,6 +210,8 @@ type Tx interface {
 	InsertMessage(ctx context.Context, m *Message) error
 	// UpdateMessage 保存助手消息的内容、状态、错误、意图、结果与引用。
 	UpdateMessage(ctx context.Context, m *Message) error
+	// SetFeedback 写入（覆盖）助手消息的反馈，返回之前的反馈（没有时为 nil）。
+	SetFeedback(ctx context.Context, messageID int64, userID string, helpful bool) (*bool, error)
 	// GetMessage 读取会话中的消息；不存在返回 ticket.ErrNotFound。
 	GetMessage(ctx context.Context, conversationID, id int64) (*Message, error)
 	// LastUserMessageID 返回会话最后一条用户消息的 ID（没有时为 0）。

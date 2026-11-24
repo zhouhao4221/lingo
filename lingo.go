@@ -186,7 +186,8 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, err
 	}
 	l.embedKick = make(chan struct{}, 1)
-	if l.knowledge, err = knowledge.New(knowledge.Options{Store: l.store, Embedder: l.knowledgeEmbedder}); err != nil {
+	if l.knowledge, err = knowledge.New(knowledge.Options{Store: l.store, Embedder: l.knowledgeEmbedder,
+		Extractor: l.knowledgeExtractor, Tickets: l.knowledgeTicket}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	if l.assistant, err = l.newAssistant(); err != nil {

@@ -3,7 +3,7 @@
 | 字段 | 内容 |
 |-----|------|
 | 产品名称 | 灵工 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
-| 文档版本 | v1.31 |
+| 文档版本 | v1.32 |
 | 创建日期 | 2026-11-13 |
 | 最后更新 | 2026-11-22 |
 | 文档负责人 | haiqing |
@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.32 | 2026-11-25 | haiqing | 知识库二期（REQ-007）：迁移 0006 放宽条目状态（新增待审核 / 已驳回）与来源（工单抽取、回答反馈、工单评论），新增回答反馈、抽取记录、未答上记录三张表；Bug / 需求工单首次进入已发布 / 已上线 / 已关闭后由轻量模型抽取问答（待审核，每张一次，升级前已结案的不抽取）；`RateMessage` 回答反馈（有帮助 / 没帮助次数，知识类回答首次有帮助时入候选）；`AddTicketCommentWith` 后台评论勾选入库；`ApproveKnowledge` / `RejectKnowledge` 审核，入库时标出可能重复；`ListUnansweredQuestions` 未答上统计（90 天）；检索至少命中 20% 检索词 |
 | v1.31 | 2026-11-24 | haiqing | 知识库一期（REQ-006）：新增 `lingo_knowledge`（迁移 0005）；后台直接答复工单时可勾选加入知识库（`AnswerTicketWith`，默认不入库，可改写，入库即生效），reviewer / admin 手动新建与维护（编辑、停用 / 恢复、删除、按来源工单停用、按引用次数列出）；检索（`SearchKnowledge`、REST `/knowledge/search`、MCP `search_knowledge`）用中文二元切词 + GIN 数组索引，`Model.Embed` 可用时后台生成向量并重排前 50 条（可选接口 `EmbeddingModelNamer` 区分向量模型）；知识问答新增知识类意图，检索知识条目与同类工单作答并附 `citations.knowledge`，来源工单按查看权限返回；版本说明不入知识库（沿用版本问答）；模型抽取、回答反馈与审核见 REQ-007 |
 | v1.30 | 2026-11-24 | haiqing | 同事可见（REQ-004）：新增 `Config.TicketAudience`，按提交人放宽 external 的只读可见范围（不超出 `User.Projects`）；新增 `ListVisibleTickets`（REST `GET /tickets/visible`、MCP `list_visible_tickets`）与 `Ticket.Mine`；知识问答的查找、汇总与版本关联工单跟随放宽，同事工单带提交人姓名；写操作、附件、事件流、Notifier 与需求视角不跟随；历史会话的引用按当前范围重新判断；无迁移 |
 | v1.29 | 2026-11-24 | haiqing | 连接配置存入数据库（REQ-005）：模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册、拒绝重定向）可明文存入 `lingo_settings`（迁移 0004），经 `ConnectionSettings` / `UpdateConnectionSettings` / `TestConnectionSettings`（REST `/settings/connections`）查看、按字段修改与连通测试，权限由新增的 `Config.AuthorizeSettings` 决定（默认仅 admin）；代码配置优先；保存后当前实例立即生效、其他实例 30 秒内生效；`New` 不再要求 Gitea 地址与令牌，缺失时以未配置状态运行（Webhook 503、Gitea 任务暂缓不计失败）；改地址须同时重填密钥；LabelPrefix、ReplyMode 仍只在代码中配置 |
@@ -850,12 +851,14 @@ flowchart LR
 
 #### 3.2.5 知识库
 
-**功能描述**：知识库是问答 Agent 的知识来源。一期（REQ-006，已实现）：后台直接答复工单时可勾选入库、reviewer / admin 手动新建与维护，问答检索作答。二期（REQ-007，规划中）：结案工单由模型抽取、用户认可的回答进入候选，经审核后生效；统计未答上的问题。版本相关问题沿用版本问答，版本说明不入知识库。
+**功能描述**：知识库是问答 Agent 的知识来源。一期（REQ-006）：后台直接答复工单时可勾选入库、reviewer / admin 手动新建与维护，问答检索作答。二期（REQ-007）：后台评论可勾选入库；结案工单由模型抽取、用户认可的回答进入候选，经审核后生效；统计未答上的问题。版本相关问题沿用版本问答，版本说明不入知识库。
 
 **业务规则**：
 - 知识库条目按项目（`project_id`）归属，可关联到仓库；检索与维护限 `User.Projects`
 - 入库须主动勾选（答复时默认不入库），入库即生效；后台人员负责把内容改写为通用问答，邮箱与手机号自动替换为占位
-- 模型抽取与用户认可的条目（二期）须审核后才参与回答
+- 模型抽取与用户认可的条目须审核后才参与回答；入库时与已生效条目重合比例不低于 60% 的标为可能重复（只提示）
+- 结案工单（Bug / 需求首次进入已发布、已上线或已关闭）每张最多抽取一次，升级到二期时已结案的不抽取
+- 回答反馈：只能对本人会话的助手消息；只有知识类回答被标为有帮助才进入候选；未答上只统计知识类无命中，保留 90 天
 - 检索：中文二元切词 + GIN 数组索引按重合度排序（不需要数据库扩展），关键词包含匹配兜底；`Model.Embed` 可用时后台生成向量，对前 50 条重排，按向量模型标识区分新旧向量
 - 回答附知识引用；来源工单只对能查看它的调用者返回；历史引用按条目当前状态重新判断
 
@@ -929,7 +932,10 @@ flowchart LR
 | lingo_assistant_conversations | 问答会话（0003），只有创建者可见，软删除 | user_id, title, activity_seq(最近活动序号，列表排序与游标), last_active_at, turn_until(生成租约), deleted_at |
 | lingo_assistant_messages | 问答消息（0003） | conversation_id, role(user/assistant), content, status(done/failed), error, reply_to, intent, outcome(统计用), citations(jsonb：引用快照) |
 | lingo_settings | 连接配置（0004），每类一行，明文 | category(model/gitea), content(jsonb), version, updated_by, updated_at |
-| lingo_knowledge | 知识条目（0005） | project_id, repo_id, question, answer, source(manual/ticket_answer), source_ticket_id, status(active/disabled), cite_count, search_tokens(text[]), embedding(real[]), embed_model |
+| lingo_knowledge | 知识条目（0005，0006 扩展） | project_id, repo_id, question, answer, source(manual/ticket_answer/ticket_extract/assistant_feedback/ticket_comment), source_ticket_id, source_message_id, status(active/disabled/pending/rejected), duplicate_of, cite_count, helpful_count, unhelpful_count, search_tokens(text[]), embedding(real[]), embed_model |
+| lingo_assistant_feedback | 回答反馈（0006） | message_id, user_id, helpful |
+| lingo_knowledge_extractions | 结案工单抽取记录（0006） | ticket_id, status(pending/done/failed/skipped), attempts, locked_until |
+| lingo_knowledge_misses | 未答上的提问（0006） | projects(text[]), question, tokens(text[]), hits, first_at, last_at |
 | lingo_assistant_actions | 待确认操作（0003），通用结构，每个会话最多一个 pending | conversation_id, message_id, user_id, kind(ticket_comment), payload, summary, status(pending/executed/cancelled/expired/failed), result, expires_at |
 
 知识库、需求评审、业务数据请求审计与多仓库拆单的表在对应功能实现时经新迁移加入。
@@ -1113,7 +1119,7 @@ flowchart LR
 | REQ-004 | 工单可见性回调 | 工单 | 已完成 | 2026-11-24 | 2026-11-24 |
 | REQ-005 | 模型与 Gitea 配置存入数据库 | 系统配置 | 已完成 | 2026-11-24 | 2026-11-24 |
 | REQ-006 | 知识库一期：后台答复入库与检索作答 | 知识问答 | 已完成 | 2026-11-24 | 2026-11-25 |
-| REQ-007 | 知识库二期：工单抽取、回答反馈与审核 | 知识问答 | 评审通过 | 2026-11-24 | - |
+| REQ-007 | 知识库二期：工单抽取、回答反馈与审核 | 知识问答 | 测试中 | 2026-11-24 | - |
 
 ---
 

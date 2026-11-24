@@ -230,6 +230,24 @@ func (x assistantTx) GetMessage(ctx context.Context, conversationID, id int64) (
 		WHERE m.id = $1 AND m.conversation_id = $2`, id, conversationID))
 }
 
+// SetFeedback 实现 assistant.Tx：写入（覆盖）反馈，返回之前的值。
+func (x assistantTx) SetFeedback(ctx context.Context, messageID int64, userID string, helpful bool) (*bool, error) {
+	var prev sql.NullBool
+	if err := x.tx.QueryRowContext(ctx, "SELECT helpful FROM lingo_assistant_feedback WHERE message_id = $1 FOR UPDATE",
+		messageID).Scan(&prev); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if _, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_assistant_feedback (message_id, user_id, helpful) VALUES ($1, $2, $3)
+		ON CONFLICT (message_id) DO UPDATE SET helpful = EXCLUDED.helpful, user_id = EXCLUDED.user_id, updated_at = now()`,
+		messageID, userID, helpful); err != nil {
+		return nil, fmt.Errorf("store: set feedback: %w", err)
+	}
+	if !prev.Valid {
+		return nil, nil
+	}
+	return &prev.Bool, nil
+}
+
 func (x assistantTx) LastUserMessageID(ctx context.Context, conversationID int64) (int64, error) {
 	var id int64
 	if err := x.tx.QueryRowContext(ctx, `SELECT COALESCE(max(id), 0) FROM lingo_assistant_messages

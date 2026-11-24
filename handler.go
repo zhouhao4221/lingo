@@ -3,6 +3,7 @@ package lingo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/zhouhao4221/lingo/internal/httpapi"
@@ -25,7 +26,9 @@ import (
 //
 // 知识库（REQ-006）：GET /knowledge/search?q=&project=&limit=（所有角色）；GET /knowledge、POST /knowledge、
 // PUT / DELETE /knowledge/{id}、POST /knowledge/{id}/disable|enable、POST /knowledge/disable-by-ticket（reviewer / admin）；
-// POST /tickets/{id}/answer 可带 {"knowledge":{"question","answer"}} 把答复加入知识库。
+// POST /tickets/{id}/answer 与 POST /tickets/{id}/comments 可带 {"knowledge":{"question","answer"}} 把答复 / 评论加入知识库；
+// 审核：POST /knowledge/{id}/approve（可带编辑后的内容）|reject；GET /knowledge/unanswered（REQ-007）。
+// 回答反馈：POST /conversations/{id}/messages/{mid}/feedback（{"helpful":true}）。
 // 知识问答（会话只有本人可见）：POST /conversations、GET /conversations、DELETE /conversations/{id}、
 // GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream"}）、
 // POST /conversations/{id}/messages/{mid}/retry、POST /conversations/{id}/actions/{aid}/confirm|cancel。
@@ -115,13 +118,14 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		var in struct {
-			Body        string       `json:"body"`
-			Attachments []Attachment `json:"attachments"`
+			Body        string          `json:"body"`
+			Attachments []Attachment    `json:"attachments"`
+			Knowledge   *KnowledgeDraft `json:"knowledge"` // 非空时加入知识库（reviewer / admin，REQ-007）
 		}
 		if err := r.Decode(&in); err != nil {
 			return nil, err
 		}
-		c, err := l.AddTicketComment(ctx(r), user(r), id, in.Body, in.Attachments)
+		c, err := l.AddTicketCommentWith(ctx(r), user(r), id, CommentInput{Body: in.Body, Attachments: in.Attachments, Knowledge: in.Knowledge})
 		if err != nil {
 			return nil, err
 		}
@@ -350,6 +354,41 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		}
 		return httpapi.Created{Value: e}, nil
 	})
+	rt.Handle("GET /knowledge/unanswered", func(r *httpapi.Request) (any, error) {
+		since, err := r.QueryTime("since")
+		if err != nil {
+			return nil, err
+		}
+		offset, err := r.QueryInt("offset")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		qs, err := l.ListUnansweredQuestions(ctx(r), user(r), UnansweredFilter{Project: r.Query("project"), Since: since,
+			Offset: int(offset), Limit: int(limit)})
+		return list(qs, err)
+	})
+	rt.Handle("POST /knowledge/{id}/approve", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		var in *KnowledgeDraft
+		if err := r.DecodeOptional(&in); err != nil {
+			return nil, err
+		}
+		return l.ApproveKnowledge(ctx(r), user(r), id, in)
+	})
+	rt.Handle("POST /knowledge/{id}/reject", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return l.RejectKnowledge(ctx(r), user(r), id)
+	})
 	rt.Handle("POST /knowledge/disable-by-ticket", func(r *httpapi.Request) (any, error) {
 		var in struct {
 			TicketID int64 `json:"ticket_id"`
@@ -452,6 +491,26 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		return reply(r, in.Stream, func(onDelta func(string)) (ConversationMessage, error) {
 			return l.SendMessageStream(ctx(r), user(r), id, MessageInput{Content: in.Content, TimeZone: in.TimeZone}, onDelta)
 		})
+	})
+	rt.Handle("POST /conversations/{id}/messages/{mid}/feedback", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		mid, err := r.PathID("mid")
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Helpful *bool `json:"helpful"`
+		}
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		if in.Helpful == nil {
+			return nil, fmt.Errorf("%w: helpful is required", ErrInvalidInput)
+		}
+		return nil, l.RateMessage(ctx(r), user(r), id, mid, *in.Helpful)
 	})
 	rt.Handle("POST /conversations/{id}/messages/{mid}/retry", func(r *httpapi.Request) (any, error) {
 		id, err := r.PathID("id")

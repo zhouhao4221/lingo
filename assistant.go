@@ -138,6 +138,13 @@ func (l *Lingo) ListConversationMessages(ctx context.Context, u User, conversati
 	return out, nil
 }
 
+// RateMessage 记录 u 对本人会话中一条助手消息的反馈（helpful：有帮助 / 没帮助，以最后一次为准）。回答引用的知识条目
+// 累加有帮助 / 没帮助次数；知识类问题的回答第一次被标为有帮助时，以提问与回答入库一条待审核的知识候选（REQ-007）。
+// 他人的会话或消息返回 ErrNotFound；用户消息或失败的回答返回 ErrInvalidInput。
+func (l *Lingo) RateMessage(ctx context.Context, u User, conversationID, messageID int64, helpful bool) error {
+	return assistantErr(l.assistant.Rate(ctx, l.principal(u), conversationID, messageID, helpful))
+}
+
 // DeleteConversation 删除 u 的会话，删除后不再可见。
 func (l *Lingo) DeleteConversation(ctx context.Context, u User, conversationID int64) error {
 	return assistantErr(l.assistant.Delete(ctx, l.principal(u), conversationID))

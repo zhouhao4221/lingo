@@ -17,9 +17,14 @@ import (
 const (
 	KnowledgeActive   = knowledge.StatusActive
 	KnowledgeDisabled = knowledge.StatusDisabled
+	KnowledgePending  = knowledge.StatusPending  // 待审核（REQ-007）
+	KnowledgeRejected = knowledge.StatusRejected // 审核驳回
 
-	KnowledgeSourceManual       = knowledge.SourceManual       // reviewer / admin 手动新建
-	KnowledgeSourceTicketAnswer = knowledge.SourceTicketAnswer // 后台直接答复工单时勾选入库
+	KnowledgeSourceManual            = knowledge.SourceManual            // reviewer / admin 手动新建
+	KnowledgeSourceTicketAnswer      = knowledge.SourceTicketAnswer      // 后台直接答复工单时勾选入库
+	KnowledgeSourceTicketExtract     = knowledge.SourceTicketExtract     // 结案工单由模型抽取（待审核）
+	KnowledgeSourceAssistantFeedback = knowledge.SourceAssistantFeedback // 知识类回答被标为"有帮助"（待审核）
+	KnowledgeSourceTicketComment     = knowledge.SourceTicketComment     // 后台对外评论时勾选入库
 )
 
 // KnowledgeEntry 是一条知识。SourceTicketID 只在调用者能查看来源工单时填写；CreatedBy / UpdatedBy 只在维护接口返回。
@@ -38,6 +43,27 @@ type KnowledgeEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	Score          float64   `json:"score,omitempty"` // 检索得分（只在检索结果中）
+	// 以下只在维护接口返回：可能重复的已生效条目（入库时检出）、引用该条目的回答被标为有帮助 / 没帮助的次数
+	DuplicateOf    int64 `json:"duplicate_of,omitempty"`
+	HelpfulCount   int64 `json:"helpful_count"`
+	UnhelpfulCount int64 `json:"unhelpful_count"`
+}
+
+// UnansweredQuestion 是知识类问题没有命中的提问（脱敏），近 90 天内同类提问归并计数。
+type UnansweredQuestion struct {
+	ID       int64     `json:"id"`
+	Question string    `json:"question"`
+	Hits     int       `json:"hits"`
+	FirstAt  time.Time `json:"first_at"`
+	LastAt   time.Time `json:"last_at"`
+}
+
+// UnansweredFilter 是 ListUnansweredQuestions 的条件。
+type UnansweredFilter struct {
+	Project string
+	Since   time.Time // 零值或早于 90 天前时为 90 天前
+	Offset  int
+	Limit   int // 0 时默认 50，最多 200
 }
 
 // KnowledgeDraft 是新建或编辑知识条目的内容。问题最多 500 字、答案最多 10000 字；邮箱与手机号入库前替换为占位。
@@ -75,6 +101,7 @@ func publicKnowledge(e *knowledge.Entry, full bool) KnowledgeEntry {
 		Status: e.Status, CiteCount: e.CiteCount, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt}
 	if full {
 		out.SourceTicketID, out.CreatedBy, out.UpdatedBy = e.SourceTicketID, e.CreatedBy, e.UpdatedBy
+		out.DuplicateOf, out.HelpfulCount, out.UnhelpfulCount = e.DuplicateOf, e.HelpfulCount, e.UnhelpfulCount
 	}
 	return out
 }
@@ -159,6 +186,35 @@ func (l *Lingo) DisableKnowledge(ctx context.Context, u User, id int64) (Knowled
 // EnableKnowledge 恢复已停用的知识条目（仅 reviewer / admin）。
 func (l *Lingo) EnableKnowledge(ctx context.Context, u User, id int64) (KnowledgeEntry, error) {
 	return l.knowledgeResult(l.knowledge.SetStatus(ctx, l.principal(u), id, true))
+}
+
+// ApproveKnowledge 审核通过待审核的知识条目（仅 reviewer / admin）；d 非空时以编辑后的问题、答案与仓库通过。
+// 条目不是待审核状态时返回 ErrConflict。
+func (l *Lingo) ApproveKnowledge(ctx context.Context, u User, id int64, d *KnowledgeDraft) (KnowledgeEntry, error) {
+	var kd *knowledge.Draft
+	if d != nil {
+		kd = &knowledge.Draft{Repo: d.Repo, Question: d.Question, Answer: d.Answer}
+	}
+	return l.knowledgeResult(l.knowledge.Approve(ctx, l.principal(u), id, kd))
+}
+
+// RejectKnowledge 驳回待审核的知识条目（仅 reviewer / admin），驳回的不参与检索；不是待审核状态时返回 ErrConflict。
+func (l *Lingo) RejectKnowledge(ctx context.Context, u User, id int64) (KnowledgeEntry, error) {
+	return l.knowledgeResult(l.knowledge.Reject(ctx, l.principal(u), id))
+}
+
+// ListUnansweredQuestions 列出 u 项目内近 90 天知识类问题没有命中的提问（仅 reviewer / admin），次数多的在前。
+func (l *Lingo) ListUnansweredQuestions(ctx context.Context, u User, f UnansweredFilter) ([]UnansweredQuestion, error) {
+	ms, err := l.knowledge.ListMisses(ctx, l.principal(u), knowledge.MissQuery{Project: f.Project, Since: f.Since, Offset: f.Offset,
+		Limit: f.Limit})
+	if err != nil {
+		return nil, publicErr(err)
+	}
+	out := make([]UnansweredQuestion, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, UnansweredQuestion{ID: m.ID, Question: m.Question, Hits: m.Hits, FirstAt: m.FirstAt, LastAt: m.LastAt})
+	}
+	return out, nil
 }
 
 // DeleteKnowledge 删除知识条目（仅 reviewer / admin）。
@@ -270,11 +326,55 @@ func (l *Lingo) kickEmbed() {
 	}
 }
 
-// embedKnowledge 是 Run 中的向量生成循环：每 30 秒（或条目新建、编辑后）为待生成向量的条目生成向量，直到没有待处理的。
+// knowledgeExtractor 是当前的抽取模型（LightModel，未配置时为 Model）；都没有时为 nil（不抽取）。
+func (l *Lingo) knowledgeExtractor() knowledge.Extractor {
+	c := l.conn()
+	if c == nil {
+		return nil
+	}
+	m := c.light
+	if isNil(m) {
+		m = c.main
+	}
+	if isNil(m) {
+		return nil
+	}
+	return &llm.Extractor{Chat: chatOf(m), Record: func(ctx context.Context, u llm.Usage, ok bool) {
+		l.recordUsage(ctx, llm.KindKnowledgeExtract, u, ok, 0)
+	}}
+}
+
+// knowledgeTicket 读取工单与对外评论（不鉴权，供抽取使用）。
+func (l *Lingo) knowledgeTicket(ctx context.Context, id int64) (*ticket.Ticket, []ticket.Comment, error) {
+	t, err := l.store.Get(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	cs, err := l.store.Comments(ctx, id, true)
+	return t, cs, err
+}
+
+// embedKnowledge 是 Run 中的知识库后台循环：每 30 秒（或条目新建、编辑后）为待生成向量的条目生成向量，为新结案的
+// 工单抽取知识（REQ-007），并清理超过保留期的未答上记录。
 func (l *Lingo) embedKnowledge(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
+		for i := 0; i < 10 && ctx.Err() == nil; i++ {
+			n, err := l.knowledge.ExtractPending(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					l.log.Warn("lingo: extract knowledge failed", "err", err)
+				}
+				break
+			}
+			if n == 0 {
+				break
+			}
+		}
+		if _, err := l.knowledge.PurgeMisses(ctx); err != nil && ctx.Err() == nil {
+			l.log.Warn("lingo: purge unanswered questions failed", "err", err)
+		}
 		for i := 0; i < 20 && ctx.Err() == nil; i++ { // 每轮最多 20 批，避免长时间占用
 			n, err := l.knowledge.EmbedPending(ctx)
 			if err != nil {
