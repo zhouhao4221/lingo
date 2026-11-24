@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,6 +66,25 @@ func TestAssistantConfirmAndAnswer(t *testing.T) {
 	}
 	if len(kinds) != 3 || kinds[2] != KindAssistantAnswer {
 		t.Errorf("usage kinds = %v", kinds)
+	}
+}
+
+func TestDecodeFirstResetsBetweenCandidates(t *testing.T) {
+	in := parseIntent(`示例 {"mine":true,"ticket_ids":[1],"intent":5} 实际 {"intent":"ticket_find"}`, testProjects)
+	if in.Kind != assistant.IntentTicketFind || in.Mine || len(in.TicketIDs) != 0 {
+		t.Errorf("leaked fields: %+v", in)
+	}
+}
+
+func TestOpenAIChatStreamIncomplete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"半截"}}]}` + "\n\n")) // 没有 finish_reason 与 [DONE] 就断开
+	}))
+	defer srv.Close()
+	c, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m"})
+	if _, _, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, func(string) {}); !errors.Is(err, ErrStreamIncomplete) {
+		t.Errorf("err = %v, want ErrStreamIncomplete", err)
 	}
 }
 

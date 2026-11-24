@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
@@ -121,10 +123,16 @@ type factRelTicket struct {
 
 func fmtTime(t time.Time, loc *time.Location) string { return t.In(loc).Format("2006-01-02 15:04") }
 
+// issueRefRe 匹配文本中的 "#数字"：工单正文、评论与版本说明里的通常是 Gitea Issue / PR 编号，不是灵工工单号。
+var issueRefRe = regexp.MustCompile(`#(\d+)`)
+
+// plainRefs 把文本中的 "#N" 改写为 "Issue N"，交给模型的数据里 "#N" 只表示灵工工单号（见 grounded）。
+func plainRefs(s string) string { return issueRefRe.ReplaceAllString(s, "Issue $1") }
+
 func (s *Service) factOf(t *ticket.Ticket, loc *time.Location, bodyRunes int) factTicket {
-	f := factTicket{ID: t.ID, Project: t.ProjectKey, Repo: t.Repo, Type: typeName(t.Type), Title: oneLine(t.Title),
+	f := factTicket{ID: t.ID, Project: t.ProjectKey, Repo: t.Repo, Type: typeName(t.Type), Title: plainRefs(oneLine(t.Title)),
 		Status: statusName(string(t.Status)), CreatedAt: fmtTime(t.CreatedAt, loc), UpdatedAt: fmtTime(t.UpdatedAt, loc),
-		FixedVersion: t.FixedTag, Milestone: t.Milestone, Summary: textutil.ClipEllipsis(t.Body, bodyRunes)}
+		FixedVersion: t.FixedTag, Milestone: t.Milestone, Summary: plainRefs(textutil.ClipEllipsis(t.Body, bodyRunes))}
 	if t.DeployedAt != nil {
 		f.DeployedAt = fmtTime(*t.DeployedAt, loc)
 	}
@@ -208,7 +216,7 @@ func (s *Service) findTickets(ctx context.Context, tc *turnCtx, in *Intent) (*re
 			if from == "" {
 				from = "研发"
 			}
-			ft.Comments = append(ft.Comments, factComment{From: from, At: fmtTime(c.At, tc.loc), Body: textutil.ClipEllipsis(c.Body, commentRunes)})
+			ft.Comments = append(ft.Comments, factComment{From: from, At: fmtTime(c.At, tc.loc), Body: plainRefs(textutil.ClipEllipsis(c.Body, commentRunes))})
 		}
 		f.Tickets = append(f.Tickets, ft)
 		cites.Tickets = append(cites.Tickets, s.ticketRef(t))
@@ -310,6 +318,8 @@ func (s *Service) listReleases(ctx context.Context, tc *turnCtx, in *Intent) (*r
 		}
 		rs, total = append(rs, got...), total+n
 	}
+	// 各项目的候选合在一起按发布时间取最新的（项目多于 10 个时每个项目只取 1 个，不能按配置顺序截断）
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].PublishedAt.After(rs[j].PublishedAt) })
 	if len(rs) > MaxReleases {
 		rs = rs[:MaxReleases]
 	}
@@ -327,8 +337,8 @@ func (s *Service) listReleases(ctx context.Context, tc *turnCtx, in *Intent) (*r
 		}
 		details = append(details, d)
 		project := s.o.ProjectOfRepo(r.Repo)
-		fr := factRelease{Project: project, Repo: r.Repo, Tag: r.Tag, Name: r.Name, PublishedAt: fmtTime(r.PublishedAt, tc.loc),
-			Prerelease: r.Prerelease, Notes: textutil.ClipEllipsis(r.Body, releaseNoteRunes)}
+		fr := factRelease{Project: project, Repo: r.Repo, Tag: r.Tag, Name: plainRefs(r.Name), PublishedAt: fmtTime(r.PublishedAt, tc.loc),
+			Prerelease: r.Prerelease, Notes: plainRefs(textutil.ClipEllipsis(r.Body, releaseNoteRunes))}
 		for _, dp := range d.Deployments {
 			fr.Deployments = append(fr.Deployments, factDeployment{Env: dp.Env, At: fmtTime(dp.At, tc.loc)})
 		}
@@ -336,7 +346,7 @@ func (s *Service) listReleases(ctx context.Context, tc *turnCtx, in *Intent) (*r
 			if len(fr.Tickets) >= MaxTickets {
 				break
 			}
-			fr.Tickets = append(fr.Tickets, factRelTicket{ID: t.ID, Title: oneLine(t.Title), Status: statusName(string(t.Status))})
+			fr.Tickets = append(fr.Tickets, factRelTicket{ID: t.ID, Title: plainRefs(oneLine(t.Title)), Status: statusName(string(t.Status))})
 			if !seen[t.ID] {
 				seen[t.ID] = true
 				cites.Tickets = append(cites.Tickets, s.ticketRef(t))
@@ -352,24 +362,43 @@ func (s *Service) listReleases(ctx context.Context, tc *turnCtx, in *Intent) (*r
 
 var ticketNumRe = regexp.MustCompile(`#(\d+)`)
 
-// answer 让模型依据事实组织回答。回答中出现事实之外的工单号（编造）时丢弃模型输出，改用 fallback 的确定性回答。
+// answer 让模型依据事实组织回答。回答中出现事实之外的工单号（编造）时丢弃模型输出，改用 fallback 的确定性回答；
+// 流式输出经 groundedStream 过滤，编造的工单号不会推给用户（之后的片段也不再推送，以最终消息为准）。
 func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citations, fallback func() string) (*reply, error) {
 	data, err := json.Marshal(f)
 	if err != nil {
 		return nil, err
 	}
-	out, err := s.o.Brain.Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, tc.onDelta)
+	ids := factIDs(f)
+	var gs *groundedStream
+	var onDelta func(string)
+	if tc.onDelta != nil {
+		gs = &groundedStream{ids: ids, out: tc.onDelta}
+		onDelta = gs.write
+	}
+	out, err := s.o.Brain.Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, onDelta)
 	if err != nil {
 		return nil, err
 	}
-	if !grounded(out, f) {
+	ok := grounded(out, ids)
+	if !ok {
 		out = fallback()
 	}
-	return &reply{content: out, outcome: OutcomeAnswered, cites: cites}, nil
+	r := &reply{content: out, outcome: OutcomeAnswered, cites: cites}
+	switch {
+	case gs == nil:
+	case ok && !gs.bad:
+		gs.flush()
+		r.streamed = true
+	case gs.sent == 0:
+		r.streamed = false // 还没推送过：由 run 整段推送确定性回答
+	default:
+		r.streamed = true // 已推送了一部分：以最终消息为准
+	}
+	return r, nil
 }
 
-// grounded 报告回答中出现的 "#数字" 都是事实中的工单。
-func grounded(out string, f facts) bool {
+func factIDs(f facts) []int64 {
 	var ids []int64
 	for _, t := range f.Tickets {
 		ids = append(ids, t.ID)
@@ -379,6 +408,11 @@ func grounded(out string, f facts) bool {
 			ids = append(ids, t.ID)
 		}
 	}
+	return ids
+}
+
+// grounded 报告回答中出现的 "#数字" 都是事实中的工单。
+func grounded(out string, ids []int64) bool {
 	for _, m := range ticketNumRe.FindAllStringSubmatch(out, -1) {
 		n, err := strconv.ParseInt(m[1], 10, 64)
 		if err != nil || !slices.Contains(ids, n) {
@@ -386,4 +420,41 @@ func grounded(out string, f facts) bool {
 		}
 	}
 	return true
+}
+
+// groundedStream 转发模型的流式片段：末尾可能还没写完的 "#数字" 先扣住，完整的工单号在事实之外时停止转发。
+type groundedStream struct {
+	ids  []int64
+	out  func(string)
+	buf  strings.Builder
+	sent int // 已转发的字节数
+	bad  bool
+}
+
+func (g *groundedStream) write(d string) {
+	if g.bad {
+		return
+	}
+	g.buf.WriteString(d)
+	s := g.buf.String()
+	safe := len(s)
+	if i := strings.LastIndexByte(s, '#'); i >= 0 && strings.Trim(s[i+1:], "0123456789") == "" {
+		safe = i // "#" 后面可能还有数字没到
+	}
+	if !grounded(s[:safe], g.ids) {
+		g.bad = true
+		return
+	}
+	if safe > g.sent {
+		g.out(s[g.sent:safe])
+		g.sent = safe
+	}
+}
+
+// flush 转发扣住的末尾（整段回答已确认无编造）。
+func (g *groundedStream) flush() {
+	if s := g.buf.String(); !g.bad && len(s) > g.sent {
+		g.out(s[g.sent:])
+		g.sent = len(s)
+	}
 }

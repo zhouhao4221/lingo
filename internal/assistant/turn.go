@@ -83,12 +83,13 @@ func (s *Service) Retry(ctx context.Context, p auth.Principal, convID, messageID
 		if failed, err = tx.GetMessage(ctx, convID, messageID); err != nil {
 			return err
 		}
-		last, err := tx.LastMessageID(ctx, convID)
+		last, err := tx.LastUserMessageID(ctx, convID)
 		if err != nil {
 			return err
 		}
-		if failed.Role != RoleAssistant || failed.Status != StatusFailed || last != failed.ID || failed.ReplyTo == 0 {
-			return fmt.Errorf("%w: only the last failed message can be retried", ticket.ErrConflict)
+		// 只重试最近一次提问的失败回答（之后可能插入了按钮的结果消息，不影响）
+		if failed.Role != RoleAssistant || failed.Status != StatusFailed || failed.ReplyTo == 0 || last != failed.ReplyTo {
+			return fmt.Errorf("%w: only the failed answer to the latest question can be retried", ticket.ErrConflict)
 		}
 		if user, err = tx.GetMessage(ctx, convID, failed.ReplyTo); err != nil {
 			return err
@@ -154,13 +155,13 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	if err != nil {
 		msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations = StatusFailed, errKind(ctx, err), "", "", Citations{}
 		if ferr := s.finish(fctx, p, conv, msg, nil); ferr != nil {
-			return nil, ferr
+			return s.salvage(fctx, conv, msg, ferr)
 		}
 		return msg, nil
 	}
 	msg.Status, msg.Error = StatusDone, ""
 	if err := s.finish(fctx, p, conv, msg, r); err != nil {
-		return nil, err
+		return s.salvage(fctx, conv, msg, err)
 	}
 	if onDelta != nil && !r.streamed {
 		onDelta(msg.Content)
@@ -168,33 +169,55 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	return msg, nil
 }
 
+// salvage 在落库失败时尽量记下失败的回答并释放租约，避免会话在租约过期前一直被占用；都失败时返回原错误。
+func (s *Service) salvage(ctx context.Context, conv *Conversation, msg *Message, cause error) (*Message, error) {
+	msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations, msg.Action = StatusFailed, ErrKindInternal, "", "", Citations{}, nil
+	err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
+		if err := s.saveMessage(ctx, tx, conv, msg, ""); err != nil {
+			return err
+		}
+		return tx.ReleaseTurn(ctx, conv.ID)
+	})
+	if err != nil {
+		_ = s.o.Store.InAssistantTx(ctx, func(tx Tx) error { return tx.ReleaseTurn(ctx, conv.ID) })
+		return nil, cause
+	}
+	return msg, nil
+}
+
 func errKind(ctx context.Context, err error) string {
+	var timeout interface{ Timeout() bool }
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
 		return ErrKindCanceled
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
 		return ErrKindTimeout
 	}
 	return ErrKindModel
 }
 
+// saveMessage 写入（或原地更新）助手消息并刷新会话的最近活动；title 非空且会话还没有标题时写入标题。
+func (s *Service) saveMessage(ctx context.Context, tx Tx, conv *Conversation, msg *Message, title string) error {
+	var err error
+	if msg.ID == 0 {
+		err = tx.InsertMessage(ctx, msg)
+	} else {
+		err = tx.UpdateMessage(ctx, msg)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Touch(ctx, conv.ID, title)
+}
+
 // finish 落库助手消息、处理操作（作废、提出、执行）、刷新会话并释放租约。r 为空表示本轮失败（不动操作）。
 func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversation, msg *Message, r *reply) error {
 	save := func(tx Tx) error {
-		var err error
-		if msg.ID == 0 {
-			err = tx.InsertMessage(ctx, msg)
-		} else {
-			err = tx.UpdateMessage(ctx, msg)
-		}
-		if err != nil {
-			return err
-		}
 		title := ""
 		if r != nil && conv.Title == "" {
 			title = r.title
 		}
-		if err := tx.Touch(ctx, conv.ID, title); err != nil {
+		if err := s.saveMessage(ctx, tx, conv, msg, title); err != nil {
 			return err
 		}
 		return tx.ReleaseTurn(ctx, conv.ID)
@@ -204,26 +227,35 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 	}
 	msg.Intent, msg.Outcome, msg.Content, msg.Citations = r.intent, r.outcome, r.content, r.cites
 	if r.execute != nil {
+		var a *Action
 		err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
-			a, res, err := s.executeTx(ctx, tx, p, conv.ID, r.execute.ID, msg)
-			if err != nil {
+			var res *execResult
+			var err error
+			if a, res, err = s.executeTx(ctx, tx, p, conv.ID, r.execute.ID, msg); err != nil {
 				return err
 			}
 			if res == nil && msg.Outcome == "" && a.Status == ActionExecuted {
-				msg.Content, msg.Outcome = "这个操作已经执行过了。", OutcomeNoAction
+				msg.Content, msg.Outcome = notPendingText(a), OutcomeNoAction
 			}
 			return save(tx)
 		})
 		var rej errRejected
-		if !errors.As(err, &rej) {
-			return err
+		if errors.As(err, &rej) {
+			a = nil
+			err = s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
+				var err error
+				if a, err = s.failTx(ctx, tx, conv.ID, r.execute.ID, rej.err, msg); err != nil {
+					return err
+				}
+				return save(tx)
+			})
 		}
-		return s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
-			if _, err := s.failTx(ctx, tx, conv.ID, r.execute.ID, rej.err, msg); err != nil {
-				return err
-			}
-			return save(tx)
-		})
+		if errors.Is(err, ticket.ErrConflict) {
+			// 执行前操作已不在等待中（如同时点了取消按钮）：如实说明，照常落库并释放租约
+			msg.Content, msg.Outcome, msg.Citations = notPendingText(a), OutcomeNoAction, Citations{}
+			return s.o.Store.InAssistantTx(ctx, save)
+		}
+		return err
 	}
 	return s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
 		if r.cancel != nil || r.propose != nil {
@@ -282,6 +314,15 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	if err != nil {
 		return nil, err
 	}
+	if cancelled != nil {
+		// 确认判断没认出来（如输出不合格），但意图解析认为是确认 / 取消：按用户的意思处理仍在等待的操作
+		switch in.Kind {
+		case IntentConfirm:
+			return &reply{execute: cancelled, intent: IntentConfirm}, nil
+		case IntentCancel:
+			return &reply{cancel: cancelled, intent: IntentCancel, content: textCancelled, outcome: OutcomeActionCancelled}, nil
+		}
+	}
 	r, err := s.dispatch(ctx, tc, in, expired)
 	if err != nil {
 		return nil, err
@@ -293,7 +334,6 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	if cancelled != nil && r.cancel == nil {
 		r.cancel = cancelled
 	}
-	r.streamed = r.outcome == OutcomeAnswered // 模型回答已经逐片段回调过
 	return r, nil
 }
 

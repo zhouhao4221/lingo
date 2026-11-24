@@ -1,6 +1,10 @@
 package assistant
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,9 +43,58 @@ func TestTimeRange(t *testing.T) {
 	}
 }
 
+func TestGroundedStreamHoldsInventedNumbers(t *testing.T) {
+	var out strings.Builder
+	g := &groundedStream{ids: []int64{12}, out: func(s string) { out.WriteString(s) }}
+	for _, d := range []string{"#1", "2 已修复，", "另有 #", "9", "9 也修了"} {
+		g.write(d)
+	}
+	if got := out.String(); got != "#12 已修复，另有 " || !g.bad {
+		t.Errorf("forwarded %q, bad=%v", got, g.bad)
+	}
+	out.Reset()
+	g = &groundedStream{ids: []int64{12}, out: func(s string) { out.WriteString(s) }}
+	g.write("见 #")
+	g.write("12")
+	g.flush()
+	if out.String() != "见 #12" {
+		t.Errorf("flush = %q", out.String())
+	}
+	if got := plainRefs("修复登录 (#45)、demo/api#7"); got != "修复登录 (Issue 45)、demo/apiIssue 7" {
+		t.Errorf("plainRefs = %q", got)
+	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "Client.Timeout exceeded while reading body" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+func TestErrKind(t *testing.T) {
+	ctx := context.Background()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	for _, c := range []struct {
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{ctx, fmt.Errorf("llm: read stream: %w", timeoutErr{}), ErrKindTimeout},
+		{ctx, context.DeadlineExceeded, ErrKindTimeout},
+		{canceled, errors.New("x"), ErrKindCanceled},
+		{ctx, errors.New("model down"), ErrKindModel},
+	} {
+		if got := errKind(c.ctx, c.err); got != c.want {
+			t.Errorf("errKind(%v) = %s, want %s", c.err, got, c.want)
+		}
+	}
+}
+
 func TestGroundedAndMentions(t *testing.T) {
 	f := facts{Tickets: []factTicket{{ID: 12}}, Releases: []factRelease{{Tickets: []factRelTicket{{ID: 15}}}}}
-	if !grounded("#12 已修复，#15 随版本发布", f) || grounded("#12 和 #99", f) || !grounded("没有编号", f) {
+	ids := factIDs(f)
+	if !grounded("#12 已修复，#15 随版本发布", ids) || grounded("#12 和 #99", ids) || !grounded("没有编号", ids) {
 		t.Error("grounded")
 	}
 	for q, want := range map[string]bool{"在 #12 留言": true, "12号工单": true, "#123 留言": false, "v1.12.0": false, "112": false} {

@@ -47,6 +47,8 @@ const maxRetryWait = 30 * time.Second
 var (
 	ErrTruncated    = errors.New("llm: response truncated (finish_reason=length)")
 	ErrEmptyContent = errors.New("llm: response has no text content")
+	// ErrStreamIncomplete 表示流式回答没有收到结束标记（[DONE] 或 finish_reason）就断开了。
+	ErrStreamIncomplete = errors.New("llm: stream ended before completion")
 )
 
 // NewOpenAI 校验配置并创建客户端。
@@ -204,7 +206,7 @@ func (c *OpenAI) ChatStream(ctx context.Context, messages []Message, onDelta fun
 	}
 	defer resp.Body.Close()
 	var out strings.Builder
-	finish := ""
+	finish, done := "", false
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
 	for sc.Scan() {
@@ -215,6 +217,7 @@ func (c *OpenAI) ChatStream(ctx context.Context, messages []Message, onDelta fun
 		}
 		data = strings.TrimSpace(data)
 		if data == "[DONE]" {
+			done = true
 			break
 		}
 		var chunk struct {
@@ -269,6 +272,9 @@ func (c *OpenAI) ChatStream(ctx context.Context, messages []Message, onDelta fun
 	switch {
 	case finish == "length":
 		return out.String(), u, ErrTruncated
+	case !done && finish == "":
+		// 没有收到结束标记就断开（代理或上游中途关闭连接）：回答不完整
+		return out.String(), u, ErrStreamIncomplete
 	case strings.TrimSpace(out.String()) == "":
 		return "", u, ErrEmptyContent
 	}

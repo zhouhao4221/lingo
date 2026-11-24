@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -280,16 +281,20 @@ func (a *Assistant) Answer(ctx context.Context, in assistant.AnswerInput, onDelt
 }
 
 // decodeFirst 从模型输出中找出第一个能解码到 v 且 ok() 为真的 JSON 对象（模型可能在 JSON 前后加说明或代码围栏）。
+// v 须为指向结构体的指针；每次尝试前清零，解码失败的对象不会留下字段。
 func decodeFirst(out string, v any, ok func() bool) bool {
+	rv := reflect.ValueOf(v).Elem()
 	for i := strings.IndexByte(out, '{'); i >= 0; {
+		rv.SetZero()
 		if err := json.NewDecoder(strings.NewReader(out[i:])).Decode(v); err == nil && ok() {
 			return true
 		}
 		next := strings.IndexByte(out[i+1:], '{')
 		if next < 0 {
-			return false
+			break
 		}
 		i += 1 + next
 	}
+	rv.SetZero()
 	return false
 }

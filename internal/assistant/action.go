@@ -146,13 +146,10 @@ func (s *Service) Confirm(ctx context.Context, p auth.Principal, convID, actionI
 	if err := caller(p); err != nil {
 		return nil, err
 	}
-	if _, err := s.o.Store.GetConversation(ctx, p.ID, convID); err != nil {
-		return nil, err
-	}
 	msg := &Message{ConversationID: convID, Role: RoleAssistant, Status: StatusDone, Intent: IntentConfirm}
 	var out *ActionResult
 	var expired bool
-	err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
+	err := s.buttonTx(ctx, p, convID, func(tx Tx) error {
 		a, res, err := s.executeTx(ctx, tx, p, convID, actionID, msg)
 		if err != nil {
 			return err
@@ -176,7 +173,7 @@ func (s *Service) Confirm(ctx context.Context, p auth.Principal, convID, actionI
 	})
 	var rej errRejected
 	if errors.As(err, &rej) {
-		err = s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
+		err = s.buttonTx(ctx, p, convID, func(tx Tx) error {
 			a, err := s.failTx(ctx, tx, convID, actionID, rej.err, msg)
 			if err != nil {
 				return err
@@ -202,11 +199,8 @@ func (s *Service) Cancel(ctx context.Context, p auth.Principal, convID, actionID
 	if err := caller(p); err != nil {
 		return nil, err
 	}
-	if _, err := s.o.Store.GetConversation(ctx, p.ID, convID); err != nil {
-		return nil, err
-	}
 	var out *ActionResult
-	err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
+	err := s.buttonTx(ctx, p, convID, func(tx Tx) error {
 		a, err := tx.LockAction(ctx, convID, actionID)
 		if err != nil {
 			return err
@@ -245,6 +239,36 @@ func (s *Service) Cancel(ctx context.Context, p auth.Principal, convID, actionID
 		return out, fmt.Errorf("%w: action expired", ticket.ErrConflict)
 	}
 	return out, nil
+}
+
+// buttonTx 在事务中执行确认 / 取消按钮：与一轮提问互斥（取得生成租约，提问还在处理时返回 ticket.ErrConflict），
+// 避免按钮插入的消息与正在生成的回答交错；租约在同一事务内释放。他人的会话返回 ticket.ErrNotFound。
+func (s *Service) buttonTx(ctx context.Context, p auth.Principal, convID int64, fn func(Tx) error) error {
+	return s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
+		if _, err := s.claim(ctx, tx, p, convID); err != nil {
+			return err
+		}
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.ReleaseTurn(ctx, convID)
+	})
+}
+
+// notPendingText 是执行时发现操作已不在等待中（如同时点了取消按钮）的说明。
+func notPendingText(a *Action) string {
+	if a == nil {
+		return textNoAction
+	}
+	switch a.Status {
+	case ActionExecuted:
+		return "这个操作已经执行过了。"
+	case ActionCancelled:
+		return "这个操作已经取消，没有执行。"
+	case ActionExpired:
+		return textExpired
+	}
+	return "这个操作没有执行成功，需要的话请重新发起。"
 }
 
 // appendMessage 写入助手消息并刷新会话的最近活动。

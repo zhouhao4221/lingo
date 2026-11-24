@@ -223,9 +223,10 @@ func (x assistantTx) GetMessage(ctx context.Context, conversationID, id int64) (
 		WHERE m.id = $1 AND m.conversation_id = $2`, id, conversationID))
 }
 
-func (x assistantTx) LastMessageID(ctx context.Context, conversationID int64) (int64, error) {
+func (x assistantTx) LastUserMessageID(ctx context.Context, conversationID int64) (int64, error) {
 	var id int64
-	if err := x.tx.QueryRowContext(ctx, `SELECT COALESCE(max(id), 0) FROM lingo_assistant_messages WHERE conversation_id = $1`,
+	if err := x.tx.QueryRowContext(ctx, `SELECT COALESCE(max(id), 0) FROM lingo_assistant_messages
+		WHERE conversation_id = $1 AND role = 'user'`,
 		conversationID).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: last message: %w", err)
 	}

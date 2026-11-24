@@ -33,7 +33,7 @@ type ConversationMessage struct {
 	Role           string `json:"role"` // user | assistant
 	Content        string `json:"content"`
 	Status         string `json:"status"` // done | failed（模型出错，可用 RetryMessage 重试）
-	// Error 是失败类别：model_error | timeout | canceled
+	// Error 是失败类别：model_error | timeout | canceled | internal_error
 	Error         string         `json:"error,omitempty"`
 	ReplyTo       int64          `json:"reply_to,omitempty"` // 助手消息所回答的用户消息
 	Citations     Citations      `json:"citations"`
@@ -155,7 +155,7 @@ func (l *Lingo) SendMessageStream(ctx context.Context, u User, conversationID in
 	return publicMessage(m), nil
 }
 
-// RetryMessage 重新回答失败的助手消息（须是会话的最后一条），原地更新该消息；timeZone 同 MessageInput.TimeZone。
+// RetryMessage 重新回答失败的助手消息（须是最近一次提问的回答），原地更新该消息；timeZone 同 MessageInput.TimeZone。
 func (l *Lingo) RetryMessage(ctx context.Context, u User, conversationID, messageID int64, timeZone string) (ConversationMessage, error) {
 	return l.RetryMessageStream(ctx, u, conversationID, messageID, timeZone, nil)
 }
@@ -174,7 +174,7 @@ func (l *Lingo) RetryMessageStream(ctx context.Context, u User, conversationID, 
 
 // ConfirmPendingAction 确认执行待确认操作（确认按钮），成功时向会话追加结果消息。确认时再次校验权限，留言与
 // AddTicketComment 行为一致；被拒（无权限、工单状态不允许）时操作置为 failed 并追加说明。对已执行的操作重复确认
-// 返回原结果、不重复执行；已取消、过期或失败的返回 ErrConflict。
+// 返回原结果、不重复执行；已取消、过期或失败的返回 ErrConflict。会话中的提问还在回答时也返回 ErrConflict（稍后重试）。
 func (l *Lingo) ConfirmPendingAction(ctx context.Context, u User, conversationID, actionID int64) (ActionResult, error) {
 	if err := l.ensureProjects(ctx); err != nil {
 		return ActionResult{}, err
@@ -186,7 +186,8 @@ func (l *Lingo) ConfirmPendingAction(ctx context.Context, u User, conversationID
 	return publicActionResult(r), nil
 }
 
-// CancelPendingAction 取消待确认操作（取消按钮），向会话追加说明；重复取消幂等，已执行、过期或失败的返回 ErrConflict。
+// CancelPendingAction 取消待确认操作（取消按钮），向会话追加说明；重复取消幂等，已执行、过期或失败的返回 ErrConflict；
+// 会话中的提问还在回答时也返回 ErrConflict。
 func (l *Lingo) CancelPendingAction(ctx context.Context, u User, conversationID, actionID int64) (ActionResult, error) {
 	r, err := l.assistant.Cancel(ctx, l.principal(u), conversationID, actionID)
 	if err != nil {

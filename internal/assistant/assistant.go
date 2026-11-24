@@ -28,6 +28,7 @@ const (
 	ErrKindModel    = "model_error"
 	ErrKindTimeout  = "timeout"
 	ErrKindCanceled = "canceled"
+	ErrKindInternal = "internal_error" // 落库等内部错误
 )
 
 // 待确认操作的种类与状态。
@@ -186,8 +187,8 @@ type Tx interface {
 	UpdateMessage(ctx context.Context, m *Message) error
 	// GetMessage 读取会话中的消息；不存在返回 ticket.ErrNotFound。
 	GetMessage(ctx context.Context, conversationID, id int64) (*Message, error)
-	// LastMessageID 返回会话最后一条消息的 ID（没有时为 0）。
-	LastMessageID(ctx context.Context, conversationID int64) (int64, error)
+	// LastUserMessageID 返回会话最后一条用户消息的 ID（没有时为 0）。
+	LastUserMessageID(ctx context.Context, conversationID int64) (int64, error)
 	// PendingAction 锁定并返回会话中状态为 pending 的操作；没有时返回 nil。
 	PendingAction(ctx context.Context, conversationID int64) (*Action, error)
 	// LockAction 锁定并返回会话中的操作；不存在返回 ticket.ErrNotFound。

@@ -25,6 +25,10 @@ type scriptModel struct {
 	fail      int // 非 0 时接下来这么多次调用返回错误
 	prompts   []string
 	stream    bool
+	// onDecision 非空时在确认判断返回前调用（不持锁），模拟判断期间的并发操作
+	onDecision func()
+	// gate 非空时意图解析先关闭 entered、再等 gate 关闭（不持锁），模拟回答进行中
+	gate, entered chan struct{}
 }
 
 func (m *scriptModel) Chat(_ context.Context, ms []lingo.Message) (string, error) {
@@ -37,6 +41,21 @@ func (m *scriptModel) Chat(_ context.Context, ms []lingo.Message) (string, error
 		return "", errors.New("model down")
 	}
 	sys := ms[0].Content
+	if strings.Contains(sys, "意图解析器") && m.gate != nil {
+		gate, entered := m.gate, m.entered
+		m.gate = nil
+		m.mu.Unlock()
+		close(entered)
+		<-gate
+		m.mu.Lock()
+	}
+	if strings.Contains(sys, "待确认操作的态度") && m.onDecision != nil {
+		f := m.onDecision
+		m.onDecision = nil
+		m.mu.Unlock()
+		f()
+		m.mu.Lock()
+	}
 	switch {
 	case strings.Contains(sys, "意图解析器"):
 		if len(m.intents) == 0 {
