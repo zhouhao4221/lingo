@@ -186,6 +186,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 - 把 Webhook 指向 `WebhookHandler` 并设置共享密钥，或配置 `AutoRegisterWebhook` 与 `WebhookURL` 自动注册；灵工部署在内网时，需在 Gitea 的 `[security] ALLOWED_HOST_LIST` 中放行。
 - 研发以 `/reply` 开头的评论（或 MCP 的 `reply_ticket`）回复提交人；PR 中写 `Fixes #N` 关闭 Issue。
 - `l.SelfCheck(ctx)`（启动时也会执行）报告版本、权限、标签、Webhook、模板与工作流问题。
+- 令牌只应发往 `BaseURL`：设置 `GiteaConfig.RejectRedirects: true` 后，所有 Gitea 请求都不跟随 HTTP 重定向（同主机、子域、跨域、https→http 降级一律拒绝），按不可重试的配置错误报告；默认关闭，行为不变。
 
 ## 目录
 

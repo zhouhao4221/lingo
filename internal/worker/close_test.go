@@ -201,6 +201,8 @@ func TestCloseIssueTaskOutcomes(t *testing.T) {
 		{"5xx at limit", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 503}}, 2, "fail"},
 		{"403", &fakeCloseIssues{state: gitea.StateOpen, editErr: &gitea.APIError{StatusCode: 403}}, 0, "fail"},
 		{"404", &fakeCloseIssues{getErr: &gitea.APIError{StatusCode: 404}}, 0, "fail"},
+		// GiteaConfig.RejectRedirects：重定向是配置错误，第一次就失败、不退避重试
+		{"redirect", &fakeCloseIssues{getErr: &gitea.RedirectError{Method: "GET", Path: "/api/v1/repos/demo/api/issues/12", StatusCode: 302, Kind: "cross-origin"}}, 0, "fail"},
 	} {
 		q := &fakeTaskQueue{got: map[int64]outcome{}}
 		drafts := &fakeCloseDrafts{t: rejected}
@@ -211,6 +213,11 @@ func TestCloseIssueTaskOutcomes(t *testing.T) {
 		}
 		if drafts.failed {
 			t.Errorf("%s: ticket marked abnormal", c.name)
+		}
+		if c.name == "redirect" {
+			if r := q.got[1].reason; r != "Gitea 返回了重定向（HTTP 302），已按配置拒绝跟随，请核对 Gitea 地址" {
+				t.Errorf("redirect reason = %q", r)
+			}
 		}
 	}
 }

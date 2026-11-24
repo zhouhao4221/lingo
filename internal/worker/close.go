@@ -112,6 +112,13 @@ func closeFailure(err error, final bool) string {
 		retrying = "，将自动重试"
 	}
 	switch {
+	case errors.Is(err, gitea.ErrRedirect):
+		code := 0
+		var re *gitea.RedirectError
+		if errors.As(err, &re) {
+			code = re.StatusCode
+		}
+		return fmt.Sprintf("Gitea 返回了重定向（HTTP %d），已按配置拒绝跟随，请核对 Gitea 地址", code)
 	case errors.Is(err, gitea.ErrNotFound):
 		return "Issue 不存在或机器人无权访问（HTTP 404），无法确认已关闭"
 	case errors.As(err, &ae) && (ae.StatusCode == http.StatusUnauthorized || ae.StatusCode == http.StatusForbidden):

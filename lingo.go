@@ -120,7 +120,7 @@ func New(cfg Config) (*Lingo, error) {
 		l.log = slog.Default()
 	}
 	var err error
-	if l.gitea, err = gitea.New(gitea.Options{BaseURL: cfg.Gitea.BaseURL, Token: cfg.Gitea.Token}); err != nil {
+	if l.gitea, err = gitea.New(giteaOptions(cfg.Gitea)); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	var opts []store.Option
@@ -445,4 +445,9 @@ func (l *Lingo) fetchAttachment() func(context.Context, ticket.Attachment) (io.R
 		}
 		return rc, err
 	}
+}
+
+// giteaOptions 把公开的 GiteaConfig 转为内部客户端配置；所有 Gitea 请求都经由这一个客户端发出。
+func giteaOptions(g GiteaConfig) gitea.Options {
+	return gitea.Options{BaseURL: g.BaseURL, Token: g.Token, RejectRedirects: g.RejectRedirects}
 }

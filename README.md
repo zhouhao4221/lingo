@@ -178,6 +178,7 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 - Point a webhook at `WebhookHandler` with the shared secret, or set `AutoRegisterWebhook` and `WebhookURL`. If Lingo runs on a private network, allow it in Gitea's `[security] ALLOWED_HOST_LIST`.
 - Developers reply to the submitter with comments starting with `/reply` (or via the MCP `reply_ticket` tool) and close issues from PRs with `Fixes #N`.
 - `l.SelfCheck(ctx)` (also run at startup) reports version, permission, label, webhook, template and workflow problems.
+- Keep the token on `BaseURL`: with `GiteaConfig.RejectRedirects: true`, no Gitea request follows an HTTP redirect (same host, subdomain, cross-host and https→http downgrade are all refused) and the redirect is reported as a non-retryable configuration error. Off by default; behavior is unchanged.
 
 ## Layout
 
