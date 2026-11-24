@@ -42,7 +42,9 @@ type Config struct {
 	Projects     []Project // 第一个为默认项目（请求未指定 project 时使用）
 	Authenticate Authenticator
 	Notifier     Notifier // 可空，为空时不回传进展
-	Tools        []Tool
+	// Tools 是业务数据工具（REQ-008，只读）：知识问答、MCP 与 CallTool 以调用人身份调用，规则见 Tool；
+	// 不合格的工具被忽略并记 Warn 日志，New 不因此失败。
+	Tools []Tool
 	// FetchAttachment 读取附件内容（可选）。附件由接入方自己的附件系统保存，灵工只记录引用；配置后转出 Issue 时
 	// 经它读取内容上传为 Gitea 附件（图片在 Issue 中直接显示，单个最多 100 MB）；为空时只把附件地址写进 Issue。
 	// 灵工不会自己请求附件 URL（避免以服务端身份访问用户填写的地址）。

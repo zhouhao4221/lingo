@@ -20,6 +20,7 @@
 - **进展通知**：事件投递给你的 `Notifier`（至少一次，带事件 ID），并提供变更流；被合并工单的提交人随目标工单收到进展
 - **数据隔离**：一切按调用者的用户 ID、角色与项目隔离；提交人身份不会写入 Gitea
 - **知识问答**：用自然语言问工单进展、修复版本、近期发版，回答附引用；对话中给工单留言须确认；会话只有本人可见，支持流式输出（见下文「知识问答」）
+- **业务数据工具**：接入方注册只读 Tool，问答与 MCP 以提问人的身份代查业务数据，权限预校验、脱敏、审计（见下文「业务数据工具」）
 - **MCP Server**：同样的能力以 MCP 工具提供给 AI 客户端与研发 Agent（Agent 可直接回复提交人）
 
 ## 安装
@@ -187,6 +188,61 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 - 检索只返回重合词数不少于提问与条目中词数较少一方 20% 的条目，避免只因“怎么”“为什么”等常用词命中无关内容。
 - 用量：作答记为 `knowledge_answer`，生成向量记为 `knowledge_embed`（只记次数），抽取记为 `knowledge_extract`。需要迁移 `0005_knowledge.sql`、`0006_knowledge_review.sql`。
 
+### 业务数据工具（Tool）
+
+接入方注册只读的业务数据工具后，灵工能回答"订单 1024 为什么审批失败""我的请假余额还有几天"这类问题：知识问答按需选一个工具、以**提问人的身份**调用，并据结果作答（引用 `citations.tools` 只记工具名）；MCP 客户端在 `tools/list` 中看到自己可调用的工具并直接调用；接入方界面可调用 `CallTool`。
+
+```go
+orderTool := lingo.Tool{
+	Name:        "get_order",
+	Description: "按订单号查询订单状态与审批记录",
+	InputSchema: json.RawMessage(`{"type":"object","required":["order_id"],
+		"properties":{"order_id":{"type":"string","description":"订单号"}}}`),
+	Scope:     "order:read",               // User.Scopes 含它的用户才能调用
+	Mode:      lingo.ToolRead,             // 本期只调用只读工具
+	Sensitive: []string{"customer.phone"}, // 结果与审计参数中替换为 ***
+	Timeout:   5 * time.Second,            // 0 为默认 10 秒，最多 60 秒
+	Call: func(ctx context.Context, u lingo.User, in json.RawMessage) (any, error) {
+		var p struct {
+			OrderID string `json:"order_id"`
+		}
+		if err := json.Unmarshal(in, &p); err != nil {
+			return nil, err
+		}
+		o, err := orders.Get(ctx, p.OrderID) // 响应 ctx 取消
+		if err != nil {
+			return nil, errors.New("order lookup failed") // 错误中不要带业务数据
+		}
+		if o.OwnerID != u.ID && !canViewAllOrders(u) { // 必须按传入用户二次鉴权
+			return nil, errors.New("order not visible")
+		}
+		// 可选：声明数据的实际归属项目，负责该项目的 reviewer / admin 可在审计中看到这次调用
+		return lingo.ToolOutput{Project: o.ProjectKey, Data: o}, nil
+	},
+}
+
+leaveTool := lingo.Tool{
+	Name: "get_leave_balance", Description: "查询本人的剩余年假与调休天数",
+	InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	Scope: "leave:read", Mode: lingo.ToolRead,
+	Call: func(ctx context.Context, u lingo.User, _ json.RawMessage) (any, error) {
+		return leave.Balance(ctx, u.ID) // 只查本人
+	},
+}
+
+l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leaveTool}})
+```
+
+- **权限**：灵工只做第一道防线——`User.Scopes` 含 `Tool.Scope` 才可见、可调用（问答中模型也看不到无权限的工具）。**`Call` 必须按传入的 `lingo.User` 再次鉴权与过滤数据**，灵工不使用超级账号。无权调用、工具不存在、结果声明的归属项目调用人无权访问时，三者返回相同的 `ErrNotFound`（MCP 为 `unknown tool`）。
+- **注册校验**：`Name` 只含字母、数字、下划线（不超过 64 个字符），`Mode` 为 `ToolRead`，`Scope` 非空，`InputSchema` 为 JSON 对象，`Call` 非空，`Timeout` 不为负且不超过 60 秒。不满足的工具**被忽略并记 Warn 日志**（`New` 不会因此失败）；与内置 MCP 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖已有工具。升级后请检查启动日志中的 `Config.Tools entry ignored`。
+- **参数**：只校验 `required` 与 `properties` 的基本类型；不合法时问答按参数的 `description` 追问，MCP / Go 返回参数错误（只含参数名与期望类型）。
+- **结果**：按 `Sensitive` 路径（`phone`、`customer.phone`、`items.*.price`）脱敏，超过 8KB 截断（`truncated`）；**原始结果不写入会话、知识库、审计与日志**，回答正文照常作为会话消息保存。业务数据类回答被标为有帮助时不进入知识库候选。
+- **超时、并发与熔断**：默认 10 秒；超时后仍未返回的 `Call` 继续占用并发名额（每个工具 8 个、合计 64 个），名额满时返回 `ErrToolUnavailable`；同一工具 5 分钟内连续失败 5 次暂停 1 分钟（只在当前实例内）。
+- **审计**：每次调用先写一条待完成记录再执行（写不进就不调用），记录人员、工具、入口、参数摘要（参数名与截断、脱敏后的值；拒绝记录只有参数名）、状态与原因、耗时，不含结果与错误原文，保留 180 天。`ListDataRequests`（REST `GET /data-requests`）：每个人都能看到本人的记录；reviewer / admin 另可看到归属项目在其 `User.Projects` 中**明确列出**的记录——`User.Projects` 为空**不**授予跨用户审计，未声明归属的记录只有本人可见。
+- **合规提醒**：业务数据会发给你配置的模型组织回答，请按数据合规要求选择模型服务，并用 `Sensitive` 去掉不应外发的字段。工具结果被当作数据而不是指令，但仍应避免让工具返回不可信的长文本。
+- 错误：`ErrToolUnavailable`（REST 503 `tool_unavailable`）、`ErrToolFailed`（超时、`Call` 出错或 panic；REST 502 `tool_failed`），都不含错误原文。
+- 需要迁移 `0007_data_requests.sql`；只读，`write` 类工具与转工单时附带业务数据留待后续版本。
+
 ### 连接配置（存数据库）
 
 模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册 Webhook、拒绝重定向）可以不写在代码里，存入数据库，由有权限的人在接入方的配置页里修改，**不用重启**：
@@ -207,6 +263,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 | `GET /projects`、`GET /ticket-types` | 项目与仓库；工单类型及 Issue 模板表单字段 |
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
 | `GET /knowledge/search?q=&project=&limit=`；`GET` / `POST /knowledge`、`PUT` / `DELETE /knowledge/{id}`、`POST /knowledge/{id}/disable\|enable`、`POST /knowledge/disable-by-ticket`、`POST /knowledge/{id}/approve\|reject`、`GET /knowledge/unanswered` | 知识库：检索（所有角色）；维护与审核（reviewer / admin） |
+| `GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=` | 业务数据工具调用审计：本人的，以及 reviewer / admin 明确负责的项目内的 |
 | `GET /tickets/visible?project=&status=&before=` | 可查看的工单：本人的 + `TicketAudience` 放宽可见的同事的（只读） |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
@@ -224,7 +281,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`、`rate_message`、`search_knowledge`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`、`rate_message`、`search_knowledge`；另列出调用者可调用的业务数据工具（`Config.Tools`，按 `User.Scopes` 过滤）。
 
 ### 事件
 

@@ -66,7 +66,7 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 | `internal/webhook` | Gitea Webhook 接收与事件转换（Issue、Release） |
 | `internal/notify` | 进展事件写 outbox，投递给 `Notifier` |
 | `internal/release` | 版本记录：同步 Gitea Release、解析 Issue 引用、工单关联修复版本 |
-| `internal/connector` | 业务数据工具执行：scope 预校验、写操作确认、脱敏、审计、熔断 |
+| `internal/connector` | 业务数据工具执行（REQ-008，只读）：注册校验、scope 预校验、参数轻量校验、脱敏与截断、超时与并发上限、熔断、审计先行与按项目隔离的审计查询；写操作确认待实现 |
 | `internal/knowledge` | 知识库：条目入库校验与脱敏、维护、检索（二元切词 + 可选向量重排）、向量生成（REQ-006）；结案工单抽取、回答反馈、审核、可能重复、未答上统计（REQ-007） |
 | `internal/selfcheck` | 启动自检：Gitea 版本、仓库与权限、标签补齐、Webhook 注册与测试投递、模板与部署工作流 |
 | `internal/worker` | 消费 Webhook 投递并同步工单、按工单顺序投递通知 outbox；同步补偿、知识库生成 |

@@ -3,9 +3,8 @@
 | 字段 | 内容 |
 |-----|------|
 | 产品名称 | 灵工 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
-| 文档版本 | v1.32 |
-| 创建日期 | 2026-11-13 |
-| 最后更新 | 2026-11-22 |
+| 文档版本 | 创建日期 | 2026-11-13 |
+| 最后更新 | 2026-11-25 |
 | 文档负责人 | haiqing |
 | 状态 | 草稿 |
 
@@ -25,7 +24,9 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.33 |
 | v1.32 | 2026-11-25 | haiqing | 知识库二期（REQ-007）：迁移 0006 放宽条目状态（新增待审核 / 已驳回）与来源（工单抽取、回答反馈、工单评论），新增回答反馈、抽取记录、未答上记录三张表；Bug / 需求工单首次进入已发布 / 已上线 / 已关闭后由轻量模型抽取问答（待审核，每张一次，升级前已结案的不抽取）；`RateMessage` 回答反馈（有帮助 / 没帮助次数，知识类回答首次有帮助时入候选）；`AddTicketCommentWith` 后台评论勾选入库；`ApproveKnowledge` / `RejectKnowledge` 审核，入库时标出可能重复；`ListUnansweredQuestions` 未答上统计（90 天）；检索重合词数不少于提问与条目中较短一方的 20%；未答上按项目分别记录 |
+| v1.33 | 2026-11-25 | haiqing | REQ-008 业务数据 Tool（只读）：3.2.0.5 注册校验、三种入口、超时并发熔断、审计先行与可见范围；数据模型新增 lingo_data_requests（0007） |
 | v1.31 | 2026-11-24 | haiqing | 知识库一期（REQ-006）：新增 `lingo_knowledge`（迁移 0005）；后台直接答复工单时可勾选加入知识库（`AnswerTicketWith`，默认不入库，可改写，入库即生效），reviewer / admin 手动新建与维护（编辑、停用 / 恢复、删除、按来源工单停用、按引用次数列出）；检索（`SearchKnowledge`、REST `/knowledge/search`、MCP `search_knowledge`）用中文二元切词 + GIN 数组索引，`Model.Embed` 可用时后台生成向量并重排前 50 条（可选接口 `EmbeddingModelNamer` 区分向量模型）；知识问答新增知识类意图，检索知识条目与同类工单作答并附 `citations.knowledge`，来源工单按查看权限返回；版本说明不入知识库（沿用版本问答）；模型抽取、回答反馈与审核见 REQ-007 |
 | v1.30 | 2026-11-24 | haiqing | 同事可见（REQ-004）：新增 `Config.TicketAudience`，按提交人放宽 external 的只读可见范围（不超出 `User.Projects`）；新增 `ListVisibleTickets`（REST `GET /tickets/visible`、MCP `list_visible_tickets`）与 `Ticket.Mine`；知识问答的查找、汇总与版本关联工单跟随放宽，同事工单带提交人姓名；写操作、附件、事件流、Notifier 与需求视角不跟随；历史会话的引用按当前范围重新判断；无迁移 |
 | v1.29 | 2026-11-24 | haiqing | 连接配置存入数据库（REQ-005）：模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册、拒绝重定向）可明文存入 `lingo_settings`（迁移 0004），经 `ConnectionSettings` / `UpdateConnectionSettings` / `TestConnectionSettings`（REST `/settings/connections`）查看、按字段修改与连通测试，权限由新增的 `Config.AuthorizeSettings` 决定（默认仅 admin）；代码配置优先；保存后当前实例立即生效、其他实例 30 秒内生效；`New` 不再要求 Gitea 地址与令牌，缺失时以未配置状态运行（Webhook 503、Gitea 任务暂缓不计失败）；改地址须同时重填密钥；LabelPrefix、ReplyMode 仍只在代码中配置 |
@@ -415,8 +416,9 @@ flowchart LR
 | `InputSchema` | 入参定义（JSON Schema），如 `order_id` |
 | `Scope` | 调用前用户必须具备的 scope，如 `order:read` |
 | `Mode` | `read`（查询） / `write`（操作，如提交申请、重试任务） |
-| `Sensitive` | 返回结果中需脱敏或不得展示的字段（`[]string`） |
-| `Call` | `func(ctx, lingo.User, json.RawMessage) (any, error)`，业务侧实现 |
+| `Sensitive` | 返回结果中需脱敏的字段路径（`[]string`，如 `customer.phone`、`items.*.price`） |
+| `Timeout` | 调用时限，0 为 10 秒，上限 60 秒（REQ-008） |
+| `Call` | `func(ctx, lingo.User, json.RawMessage) (any, error)`，业务侧实现；可返回 `ToolOutput{Project, Data}` 声明数据的实际归属项目 |
 
 **功能流程**：
 
@@ -435,21 +437,26 @@ flowchart LR
   G --> J[写入 data_requests 审计（摘要）]
 ```
 
-**业务规则**：
-- **代用户请求，双重校验**：灵工先校验 `User.Scopes` 含 `Tool.Scope`；`Call` 收到当前 `lingo.User`，业务侧必须在 `Call` 内按该用户的权限二次校验并做数据范围过滤。灵工不使用任何超级账号
-- **只用于本次会话**：取到的数据只用于本次会话，不写入知识库，不用于回答其他用户
-- **操作需确认**：`write` 类工具必须向用户展示将要提交的内容并经明确确认后才调用；防重复提交：调用方传入幂等键（idempotency key），同一用户 + 工具 + 幂等键只执行一次，记录于 `data_requests.idempotency_key`
-- **转工单时的数据**：业务数据随工单转给 AI 研发 Agent 前需用户同意，并按 `Sensitive` 脱敏
-- **审计**：每次数据请求写入 `data_requests`，只存摘要（人员、工具、参数摘要、结果状态、耗时）；研发负责人与管理员可查，用户可查看本人记录
-- **失败处理**：`Call` 返回错误时如实告知用户，不编造数据；连续失败的工具自动熔断并告警（阈值：待定）
-- `User.Scopes` 不含 `Tool.Scope` 时，不发起调用
+**业务规则**（REQ-008 已实现只读部分，`write` 与转工单附带数据待后续需求）：
+- **代用户请求，双重校验**：灵工先校验 `User.Scopes` 含 `Tool.Scope`（问答中模型也看不到无权限的工具）；`Call` 收到当前 `lingo.User`，业务侧必须在 `Call` 内按该用户的权限二次校验并做数据范围过滤。灵工不使用任何超级账号。无权限、工具不存在、结果声明的归属项目不可访问三者返回相同结果（not_found），不暴露工具或项目是否存在
+- **注册校验**：`Name` 只含字母数字下划线（≤ 64）、`Mode` 为 `read`、`Scope` 非空、`InputSchema` 为 JSON 对象、`Call` 非空、`Timeout` 在 0–60 秒；不满足的忽略并记 Warn，不影响启动；与内置 MCP 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖
+- **入口**：知识问答（意图 `data_query`，每次提问最多一个工具，工具清单最多 30 个、描述截断 300 字）、MCP（`tools/list` 按调用人列出）、Go `CallTool`
+- **只用于本次回答**：原始结果按 `Sensitive` 脱敏、超过 8KB 截断，不写入会话（引用只记工具名）、知识库、审计与日志；回答正文照常保存；业务数据类回答不进入知识库候选与未答上统计
+- **超时、并发与熔断**：默认 10 秒（`Tool.Timeout`，上限 60 秒）；每个工具最多 8 个、合计 64 个调用在途，超时后仍未退出的 `Call` 继续占用名额；同一工具 5 分钟内连续失败 5 次暂停 1 分钟（只在当前实例内），之后放行一次试探
+- **审计**：调用前先写待完成记录（写不进不调用），记录人员、工具、入口、参数摘要（拒绝记录只有参数名）、状态与原因、耗时，不含结果与错误原文，保留 180 天；租约过期的待完成记录由 `Run` 标为中断。可见范围：本人；reviewer / admin 另见归属项目在其 `User.Projects` 中明确列出的记录（`User.Projects` 为空不授予跨用户审计）；归属项目只取 `Call` 返回的 `ToolOutput.Project` 声明，未声明的只有本人可见
+- **日志与错误**：不含参数值、原始结果、`Call` 错误原文、panic 内容与数据库错误详情
+- **操作需确认**（待后续需求）：`write` 类工具必须向用户展示将要提交的内容并经明确确认后才调用；防重复提交使用幂等键
+- **转工单时的数据**（待后续需求）：业务数据随工单转给 AI 研发 Agent 前需用户同意，并按 `Sensitive` 脱敏
+- **失败处理**：`Call` 返回错误时如实告知用户，不编造数据
 
 **验收标准**：
-- [ ] 接入方可在 `Config.Tools` 注册工具并配置 `Scope`、`Mode` 与 `Sensitive`
-- [ ] 具备权限的用户提问时，灵工以其身份调用 `Call` 并基于返回数据回答
-- [ ] 不具备权限的用户无法触发调用；`Call` 拒绝时灵工如实告知
-- [ ] `write` 类工具未经用户确认不会被调用
-- [ ] 每次请求均有审计记录；业务数据不进入知识库，转工单时按 `Sensitive` 脱敏
+- [x] 接入方可在 `Config.Tools` 注册工具并配置 `Scope`、`Mode`、`Sensitive` 与 `Timeout`
+- [x] 具备权限的用户提问时，灵工以其身份调用 `Call` 并基于返回数据回答
+- [x] 不具备权限的用户无法触发调用；`Call` 拒绝时灵工如实告知
+- [ ] `write` 类工具未经用户确认不会被调用（本期不调用 `write` 类工具）
+- [x] 每次请求均有审计记录；业务数据不进入知识库
+- [ ] 转工单时按 `Sensitive` 脱敏（待后续需求）
+
 
 #### 3.2.0.6 提交人身份与数据隔离
 
@@ -936,9 +943,10 @@ flowchart LR
 | lingo_assistant_feedback | 回答反馈（0006） | message_id, user_id, helpful |
 | lingo_knowledge_extractions | 结案工单抽取记录（0006） | ticket_id, status(pending/done/failed/skipped), attempts, locked_until |
 | lingo_knowledge_misses | 未答上的提问（0006） | projects(text[]), question, tokens(text[]), hits, first_at, last_at |
+| lingo_data_requests | 业务数据工具调用审计（0007），不含结果，保留 180 天 | user_id, user_role, project_key（ToolOutput 声明）, tool, channel(assistant/mcp/api), conversation_id, arg_names, args, status(pending/ok/denied/error/unavailable/interrupted), reason, duration_ms, truncated, lease_until |
 | lingo_assistant_actions | 待确认操作（0003），通用结构，每个会话最多一个 pending | conversation_id, message_id, user_id, kind(ticket_comment), payload, summary, status(pending/executed/cancelled/expired/failed), result, expires_at |
 
-知识库、需求评审、业务数据请求审计与多仓库拆单的表在对应功能实现时经新迁移加入。
+需求评审与多仓库拆单的表在对应功能实现时经新迁移加入。
 
 ### 5.2 数据采集
 

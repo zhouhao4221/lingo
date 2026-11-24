@@ -289,7 +289,12 @@ func TestDataToolMCP(t *testing.T) {
 	ctx := context.Background()
 	hrTool := orderTool("hr")
 	hrTool.Name = "get_hr_order"
-	l := newToolLingo(t, db, orderTool(""), hrTool)
+	bigTool := orderTool("")
+	bigTool.Name = "get_big_order"
+	bigTool.Call = func(context.Context, lingo.User, json.RawMessage) (any, error) {
+		return map[string]string{"blob": strings.Repeat("订", 4000)}, nil
+	}
+	l := newToolLingo(t, db, orderTool(""), hrTool, bigTool)
 	h := l.MCPHandler()
 	scoped := map[string]string{"X-User": "u1", "X-Role": "agent", "X-Scopes": "order:read", "X-Projects": "crm"}
 	plain := map[string]string{"X-User": "u2", "X-Role": "agent"}
@@ -315,12 +320,15 @@ func TestDataToolMCP(t *testing.T) {
 	if got := strings.ReplaceAll(call(scoped, "get_hr_order", `{"order_id":"1"}`), "get_hr_order", "X"); got != missing {
 		t.Errorf("project denial differs from missing tool:\n%s\n%s", got, missing)
 	}
+	if big := call(scoped, "get_big_order", `{"order_id":"1"}`); !strings.Contains(big, `"truncated":true`) || strings.Contains(big, `"isError":true`) {
+		t.Errorf("truncated call = %.200s", big)
+	}
 	bad := call(scoped, "get_order", `{"order_id":98765}`)
 	if !strings.Contains(bad, "invalid arguments: parameter order_id must be string") || strings.Contains(bad, "98765") {
 		t.Errorf("invalid args = %s", bad)
 	}
 	rs, err := l.ListDataRequests(ctx, lingo.User{ID: "u1", Role: lingo.RoleAgent}, lingo.DataRequestFilter{})
-	if err != nil || len(rs) != 3 {
+	if err != nil || len(rs) != 4 {
 		t.Fatalf("audit = %+v, %v", rs, err)
 	}
 	for _, r := range rs {

@@ -20,6 +20,7 @@ Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a
 - **Progress notifications** — events delivered to your `Notifier` (at-least-once, with event IDs) plus an event feed; merged tickets follow their target
 - **Data isolation** — everything is scoped by the caller's user ID, role and projects; the submitter's identity never goes to Gitea
 - **Knowledge Q&A** — ask about ticket progress, fix versions and recent releases in plain language, with cited tickets and releases; commenting from the chat requires confirmation; conversations are private to their owner and answers can stream (see "Knowledge Q&A" below)
+- **Business data tools** — register read-only tools; the Q&A assistant and MCP query business data as the asker, with scope checks, masking and an audit trail (see "Business data tools")
 - **MCP server** — the same capabilities as MCP tools for AI clients and AI developer agents (agents can reply to the submitter)
 
 ## Install
@@ -179,6 +180,61 @@ How-to questions ("why is the exported report empty", "how do I set up SSO") are
 - Search only returns entries whose overlap is at least 20% of the shorter of the query and the entry, so common words such as "怎么" alone do not pull in unrelated entries while long questions still find short entries.
 - Usage: answers are recorded as `knowledge_answer`, embeddings as `knowledge_embed` (call counts only), extraction as `knowledge_extract`. Requires migrations `0005_knowledge.sql` and `0006_knowledge_review.sql`.
 
+### Business data tools
+
+Register read-only business data tools and Lingo can answer questions such as "why was order 1024 rejected" or "how many leave days do I have left": the Q&A assistant picks one tool when needed, calls it **as the asker**, and answers from the result (`citations.tools` carries the tool name only); MCP clients see the tools they may call in `tools/list`; your own UI can call `CallTool`.
+
+```go
+orderTool := lingo.Tool{
+	Name:        "get_order",
+	Description: "Look up an order's status and approval history by order number",
+	InputSchema: json.RawMessage(`{"type":"object","required":["order_id"],
+		"properties":{"order_id":{"type":"string","description":"order number"}}}`),
+	Scope:     "order:read",               // only users whose Scopes contain it can call it
+	Mode:      lingo.ToolRead,             // only read tools are called for now
+	Sensitive: []string{"customer.phone"}, // replaced with *** in results and audit arguments
+	Timeout:   5 * time.Second,            // 0 means 10s; at most 60s
+	Call: func(ctx context.Context, u lingo.User, in json.RawMessage) (any, error) {
+		var p struct {
+			OrderID string `json:"order_id"`
+		}
+		if err := json.Unmarshal(in, &p); err != nil {
+			return nil, err
+		}
+		o, err := orders.Get(ctx, p.OrderID) // honour ctx cancellation
+		if err != nil {
+			return nil, errors.New("order lookup failed") // keep business data out of errors
+		}
+		if o.OwnerID != u.ID && !canViewAllOrders(u) { // you must authorize the given user again
+			return nil, errors.New("order not visible")
+		}
+		// Optional: declare which project the data belongs to, so that project's reviewers / admins see the call in the audit
+		return lingo.ToolOutput{Project: o.ProjectKey, Data: o}, nil
+	},
+}
+
+leaveTool := lingo.Tool{
+	Name: "get_leave_balance", Description: "The caller's remaining annual leave and time off in lieu",
+	InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	Scope: "leave:read", Mode: lingo.ToolRead,
+	Call: func(ctx context.Context, u lingo.User, _ json.RawMessage) (any, error) {
+		return leave.Balance(ctx, u.ID) // the caller's own data only
+	},
+}
+
+l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leaveTool}})
+```
+
+- **Permissions**: Lingo is only the first line of defence — a tool is visible and callable only when `User.Scopes` contains `Tool.Scope` (the model never sees tools the asker may not use). **`Call` must authorize and filter by the `lingo.User` it receives**; Lingo never uses a privileged account. Missing permission, an unknown tool and a declared project the caller cannot access all return the same `ErrNotFound` (`unknown tool` over MCP).
+- **Registration checks**: `Name` uses letters, digits and underscores (at most 64), `Mode` is `ToolRead`, `Scope` is non-empty, `InputSchema` is a JSON object, `Call` is set and `Timeout` is between 0 and 60 seconds. Tools that fail are **ignored with a Warn log** (`New` does not fail); a tool named like a built-in MCP tool or an earlier tool (case-insensitive) is ignored and never replaces it. After upgrading, check the startup log for `Config.Tools entry ignored`.
+- **Arguments**: only `required` and the basic `properties` types are checked; on failure the assistant asks for the missing value using the property `description`, and MCP / Go return an argument error naming the parameter and expected type only.
+- **Results** are masked by `Sensitive` paths (`phone`, `customer.phone`, `items.*.price`) and truncated beyond 8 KB (`truncated`). **Raw results are never stored in conversations, the knowledge base, the audit or logs**; the answer text is kept like any other message. Answers based on business data never become knowledge candidates.
+- **Timeouts, concurrency and circuit breaking**: 10 seconds by default; a `Call` still running after its timeout keeps its slot (8 per tool, 64 in total) and `ErrToolUnavailable` is returned when slots run out; five consecutive failures within five minutes pause a tool for one minute (per instance).
+- **Audit**: every call first writes a pending record (no record, no call) with the user, tool, channel, argument summary (names plus truncated, masked values; denied calls keep names only), status, reason and duration — never the result or error text — kept for 180 days. `ListDataRequests` (REST `GET /data-requests`): everyone sees their own records; reviewers / admins also see records whose project is **explicitly listed** in their `User.Projects`. An empty `User.Projects` grants **no** cross-user audit access, and records without a declared project are visible to the caller only.
+- **Compliance**: business data is sent to the model you configure to compose the answer, so pick a model service that meets your data rules and mask fields that must not leave with `Sensitive`. Tool results are treated as data, not instructions, but avoid returning untrusted long text.
+- Errors: `ErrToolUnavailable` (REST 503 `tool_unavailable`) and `ErrToolFailed` (timeout, `Call` error or panic; REST 502 `tool_failed`), never with the underlying error text.
+- Requires migration `0007_data_requests.sql`. Read-only for now; write tools and attaching business data to tickets come later.
+
 ### Connection settings (stored in the database)
 
 Model and Gitea connection settings (addresses, tokens / API keys, webhook secret, webhook auto-registration, redirect rejection) can live in the database instead of code, editable from the host's settings page **without a restart**:
@@ -199,6 +255,7 @@ Model and Gitea connection settings (addresses, tokens / API keys, webhook secre
 | `GET /projects`, `GET /ticket-types` | Projects and repositories; ticket types with issue-template form fields |
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
 | `GET /knowledge/search?q=&project=&limit=`; `GET` / `POST /knowledge`, `PUT` / `DELETE /knowledge/{id}`, `POST /knowledge/{id}/disable\|enable`, `POST /knowledge/disable-by-ticket`, `POST /knowledge/{id}/approve\|reject`, `GET /knowledge/unanswered` | Knowledge base: search (all roles); maintenance and review (reviewers / admins) |
+| `GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=` | Business data tool call audit: your own, plus projects reviewers / admins are explicitly responsible for |
 | `GET /tickets/visible?project=&status=&before=` | Tickets the caller can view: their own plus teammates' via `TicketAudience` (read-only) |
 | `POST` / `GET /tickets/{id}/perspectives` | Requirement perspectives: add, list grouped by perspective (see above) |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
@@ -216,7 +273,7 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`, `rate_message`, `search_knowledge`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`, `rate_message`, `search_knowledge`; plus the business data tools the caller may call (`Config.Tools`, filtered by `User.Scopes`).
 
 ### Events
 
