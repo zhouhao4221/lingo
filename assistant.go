@@ -118,7 +118,7 @@ func (l *Lingo) ListConversations(ctx context.Context, u User, before int64, lim
 // ListConversationMessages 返回会话中 ID 小于 beforeID（0 不限）的最近 limit 条消息，页内按 ID 升序；
 // limit 为 0 时默认 50，最多 200。他人的会话返回 ErrNotFound。
 func (l *Lingo) ListConversationMessages(ctx context.Context, u User, conversationID, beforeID int64, limit int) ([]ConversationMessage, error) {
-	ms, err := l.assistant.Messages(ctx, l.principal(u), conversationID, beforeID, limit)
+	ms, err := l.assistant.Messages(ctx, l.viewer(ctx, u), conversationID, beforeID, limit)
 	if err != nil {
 		return nil, assistantErr(err)
 	}
@@ -148,7 +148,7 @@ func (l *Lingo) SendMessageStream(ctx context.Context, u User, conversationID in
 	if err := l.ensureProjects(ctx); err != nil {
 		return ConversationMessage{}, err
 	}
-	m, err := l.assistant.Send(ctx, l.principal(u), conversationID, in.Content, in.TimeZone, onDelta)
+	m, err := l.assistant.Send(ctx, l.viewer(ctx, u), conversationID, in.Content, in.TimeZone, onDelta)
 	if err != nil {
 		return ConversationMessage{}, assistantErr(err)
 	}
@@ -165,7 +165,7 @@ func (l *Lingo) RetryMessageStream(ctx context.Context, u User, conversationID, 
 	if err := l.ensureProjects(ctx); err != nil {
 		return ConversationMessage{}, err
 	}
-	m, err := l.assistant.Retry(ctx, l.principal(u), conversationID, messageID, timeZone, onDelta)
+	m, err := l.assistant.Retry(ctx, l.viewer(ctx, u), conversationID, messageID, timeZone, onDelta)
 	if err != nil {
 		return ConversationMessage{}, assistantErr(err)
 	}

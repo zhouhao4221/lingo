@@ -57,14 +57,13 @@ func (l *Lingo) ListReleases(ctx context.Context, u User, project, repo string, 
 
 // GetRelease 返回版本详情：关联工单只含 u 可见的；版本所在项目不可访问时返回 ErrNotFound。
 func (l *Lingo) GetRelease(ctx context.Context, u User, id int64) (ReleaseDetail, error) {
-	p := l.principal(u)
-	if !p.Known() {
+	if !l.principal(u).Known() {
 		return ReleaseDetail{}, ErrNotFound
 	}
 	if err := l.ensureProjects(ctx); err != nil {
 		return ReleaseDetail{}, err
 	}
-	d, err := l.releases.Get(ctx, p, id, l.tickets.GetMany)
+	d, err := l.releases.Get(ctx, l.viewer(ctx, u), id, l.tickets.GetMany)
 	if errors.Is(err, release.ErrNotFound) {
 		return ReleaseDetail{}, ErrNotFound
 	}
@@ -73,7 +72,7 @@ func (l *Lingo) GetRelease(ctx context.Context, u User, id int64) (ReleaseDetail
 	}
 	out := ReleaseDetail{Release: publicRelease(d.Release), Tickets: []Ticket{}, Deployments: []Deployment{}}
 	for _, t := range d.Tickets {
-		out.Tickets = append(out.Tickets, l.publicTicket(t))
+		out.Tickets = append(out.Tickets, l.publicTicketFor(u, t))
 	}
 	for _, dep := range d.Deployments {
 		out.Deployments = append(out.Deployments, Deployment{Env: dep.Env, Source: dep.Source, At: dep.At})

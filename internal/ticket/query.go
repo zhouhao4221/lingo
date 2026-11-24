@@ -76,6 +76,15 @@ type MineQuery struct {
 	Limit    int
 }
 
+// VisibleQuery 是可见工单列表的条件：本人提交的，加上 external 被放宽可见的提交人的（REQ-004）。
+type VisibleQuery struct {
+	Scope    Scope
+	UserIDs  []string // 由 Service.ListVisible 填写
+	Status   string
+	BeforeID int64 // 游标：按 ID 降序（新的在前）
+	Limit    int
+}
+
 // EventQuery 是变更流的条件。
 type EventQuery struct {
 	AfterID       int64
@@ -97,8 +106,9 @@ const (
 // Service.Search 按调用者角色填写，调用方传入的值会被覆盖。
 type SearchQuery struct {
 	Scope         Scope
-	UserID        string // 非空时只含该提交人的工单
-	ForwardedOnly bool   // 只含已转出的工单（agent）
+	UserID        string   // 非空时只含该提交人的工单
+	UserIDs       []string // 非空时只含这些提交人的工单（external 本人 + 被放宽可见的，REQ-004）
+	ForwardedOnly bool     // 只含已转出的工单（agent）
 	IDs           []int64
 	IssueNumber   int64 // 主 Issue 编号（与 Repo 一起使用时更精确）
 	Repo          string
@@ -124,6 +134,7 @@ type QueryStore interface {
 	ListTriage(ctx context.Context, q TriageQuery) ([]*Ticket, error)
 	TriageCounts(ctx context.Context, s Scope, overdueBefore time.Time) ([]TriageCount, error)
 	ListMine(ctx context.Context, q MineQuery) ([]*Ticket, error)
+	ListVisible(ctx context.Context, q VisibleQuery) ([]*Ticket, error)
 	// Search 按条件检索工单（新的在前）。
 	Search(ctx context.Context, q SearchQuery) ([]*Ticket, error)
 	// Stats 按项目、类型、状态统计符合条件的工单数（忽略 BeforeID 与 Limit）。
@@ -173,8 +184,29 @@ func (s *Service) ListMine(ctx context.Context, p auth.Principal, q MineQuery) (
 	return s.queries().ListMine(ctx, q)
 }
 
-// Search 在调用者可见的工单中按条件检索（新的在前），可见范围与 Visible 一致：external 只含本人的，agent 只含
-// 已转出的，reviewer / admin 为项目范围内全部；mine 为真时只含调用者本人提交的。project 不在范围内时为空。
+// ListVisible 返回调用者本人提交的工单，external 另含被放宽可见的提交人（Principal.Peers）在其项目内的工单
+// （新的在前）；project 非空时只含该项目，不在范围内时为空。
+func (s *Service) ListVisible(ctx context.Context, p auth.Principal, project string, q VisibleQuery) ([]*Ticket, error) {
+	if !p.Known() || p.ID == "" {
+		return nil, fmt.Errorf("%w: caller has no user id or role", ErrForbidden)
+	}
+	if q.Status != "" && !validStatus(Status(q.Status)) {
+		return nil, fmt.Errorf("%w: status %q", ErrInvalid, q.Status)
+	}
+	q.UserIDs = []string{p.ID}
+	if p.Role == auth.RoleExternal {
+		q.UserIDs = append(q.UserIDs, p.Peers...)
+	}
+	sc, ok := projectScope(p, project)
+	if !ok {
+		return nil, nil
+	}
+	q.Scope, q.Limit = sc, limitOf(q.Limit, DefaultLimit)
+	return s.queries().ListVisible(ctx, q)
+}
+
+// Search 在调用者可读的工单中按条件检索（新的在前），可见范围与 Readable 一致：external 含本人的与被放宽可见的
+// 提交人的，agent 只含已转出的，reviewer / admin 为项目范围内全部；mine 为真时只含调用者本人提交的。project 不在范围内时为空。
 func (s *Service) Search(ctx context.Context, p auth.Principal, project string, mine bool, q SearchQuery) ([]*Ticket, error) {
 	q, ok, err := s.searchScope(p, project, mine, q)
 	if err != nil || !ok {
@@ -207,13 +239,16 @@ func (s *Service) searchScope(p auth.Principal, project string, mine bool, q Sea
 	default:
 		return q, false, fmt.Errorf("%w: time field %q", ErrInvalid, q.TimeField)
 	}
-	q.UserID, q.ForwardedOnly = "", false
+	q.UserID, q.UserIDs, q.ForwardedOnly = "", nil, false
 	switch p.Role {
 	case auth.RoleExternal:
 		if p.ID == "" {
 			return q, false, fmt.Errorf("%w: caller has no user id", ErrForbidden)
 		}
 		q.UserID = p.ID
+		if !mine && len(p.Peers) > 0 {
+			q.UserID, q.UserIDs = "", append([]string{p.ID}, p.Peers...)
+		}
 	case auth.RoleAgent:
 		q.ForwardedOnly = true
 		if mine { // agent 不提交工单
@@ -253,17 +288,19 @@ func (s *Service) ListEvents(ctx context.Context, p auth.Principal, afterID int6
 	return s.queries().Events(ctx, q)
 }
 
-// Comments 返回工单评论：external 只看对外评论，其他可见该工单的角色看全部（含研发内部讨论）。
+// Comments 返回工单评论：external 只看对外评论（被放宽可见的同事工单同样只读对外评论），其他可见该工单的角色看全部
+// （含研发内部讨论）。
 func (s *Service) Comments(ctx context.Context, p auth.Principal, id int64) ([]Comment, error) {
-	if _, err := s.Get(ctx, p, id); err != nil {
+	if _, err := s.View(ctx, p, id); err != nil {
 		return nil, err
 	}
 	return s.queries().Comments(ctx, id, p.Role == auth.RoleExternal)
 }
 
-// Detail 返回工单、评论与附件（一次鉴权），可见范围同 Comments。
+// Detail 返回工单、评论与附件（一次鉴权），可见范围同 Comments；附件只对 Visible 的调用者返回（被放宽可见的同事
+// 看不到附件：截图可能含敏感信息）。
 func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, []Attachment, error) {
-	t, err := s.Get(ctx, p, id)
+	t, err := s.View(ctx, p, id)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -271,6 +308,9 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Tick
 	cs, err := s.queries().Comments(ctx, id, ext)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if !Visible(p, t) {
+		return t, cs, nil, nil
 	}
 	// agent 只看已转出到 Gitea 的附件：后台人员没勾选的截图可能含敏感信息（附件地址本身的访问控制由接入方负责）
 	as, err := s.queries().TicketAttachments(ctx, id, ext, p.Role == auth.RoleAgent)

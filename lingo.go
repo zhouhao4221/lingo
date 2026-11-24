@@ -57,6 +57,13 @@ type Config struct {
 	// u.Projects 内。为空时按工单可见范围：external 只能是本人的需求，agent 只能是已转出的，reviewer / admin 为项目内全部。
 	// 要让业务方、专家、决策者参与他人的需求，在这里按接入方自己的规则放行。
 	AuthorizePerspective func(ctx context.Context, u User, t Ticket, write bool) error
+	// TicketAudience 返回 external 用户 u 额外可见哪些提交人的工单（如同部门、同团队成员），在固定角色规则之外放宽；
+	// 为空时不放宽。放宽只读且不超出 u.Projects：查看工单与对外评论、ListVisibleTickets、知识问答的查找与汇总、版本
+	// 关联的工单跟随放宽；留言、补附件、补充视角、确认留言、附件、ListEvents、Notifier 与需求视角（未配置
+	// AuthorizePerspective 时）仍只对本人。只对 external 调用（agent / reviewer / admin 不调用，User.ID 为空也不调用），
+	// 每个读请求最多调用一次、不缓存（需要时由接入方缓存）；返回错误时按未放宽处理并记 Warn 日志，请求不失败。
+	// 放宽属于隐私变更：启用前应告知用户“同部门成员可以查看你提交的工单”。
+	TicketAudience func(ctx context.Context, u User) (TicketAudience, error)
 	// AuthorizeSettings 判断 u 能否查看（write 为假）或修改、测试（write 为真）连接配置（ConnectionSettings 等，
 	// Go 方法与 REST 都经过它）；返回 nil 允许，ErrForbidden / ErrNotFound 拒绝。为空时只允许 admin。
 	AuthorizeSettings func(ctx context.Context, u User, write bool) error

@@ -82,6 +82,16 @@ func (s *Store) ListMine(ctx context.Context, q ticket.MineQuery) ([]*ticket.Tic
 		ORDER BY t.id DESC LIMIT $4`, q.UserID, q.Status, q.BeforeID, q.Limit)
 }
 
+// ListVisible 实现 ticket.QueryStore。
+func (s *Store) ListVisible(ctx context.Context, q ticket.VisibleQuery) ([]*ticket.Ticket, error) {
+	args := scopeArgs(q.Scope)
+	n := len(args)
+	args = append(args, textArray(q.UserIDs), q.Status, q.BeforeID, q.Limit)
+	return s.tickets(ctx, "SELECT "+ticketColumns+fmt.Sprintf(`
+		WHERE %s AND t.user_id = ANY(($%d::text)::text[]) AND ($%d = '' OR t.status = $%d) AND ($%d::bigint = 0 OR t.id < $%d::bigint)
+		ORDER BY t.id DESC LIMIT $%d`, scopeSQL(1), n+1, n+2, n+2, n+3, n+3, n+4), args...)
+}
+
 // forwardedAtSQL 是工单的转出时间：后台确认转出（triage.forward，含异常工单重新转出时取最早一次）的时间；
 // 没有确认记录的已转出工单为自动转出，取提交时间。未转出的为 NULL。
 const forwardedAtSQL = `(CASE WHEN t.status IN ('pending_triage', 'answered', 'merged', 'rejected') THEN NULL ELSE
@@ -97,6 +107,9 @@ func searchWhere(q ticket.SearchQuery) (string, []any) {
 	w := []string{scopeSQL(1)}
 	if q.UserID != "" {
 		w = append(w, "t.user_id = "+arg(q.UserID))
+	}
+	if len(q.UserIDs) > 0 {
+		w = append(w, "t.user_id = ANY(("+arg(textArray(q.UserIDs))+"::text)::text[])")
 	}
 	if q.ForwardedOnly {
 		w = append(w, "t.status NOT IN ('pending_triage', 'answered', 'merged', 'rejected')")

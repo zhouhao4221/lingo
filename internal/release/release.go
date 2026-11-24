@@ -160,7 +160,7 @@ type Detail struct {
 	Deployments []DeploymentRecord
 }
 
-// Get 返回版本详情；版本所在项目不在调用者范围内时返回 ErrNotFound。关联工单经 tickets 一次读出，按 ticket.Visible 过滤。
+// Get 返回版本详情；版本所在项目不在调用者范围内时返回 ErrNotFound。关联工单经 tickets 一次读出，按 ticket.Readable 过滤（含 external 被放宽可见的同事工单）。
 func (s *Service) Get(ctx context.Context, p auth.Principal, id int64, tickets func(ctx context.Context, ids []int64) ([]*ticket.Ticket, error)) (*Detail, error) {
 	r, key, err := s.o.Store.GetRelease(ctx, id)
 	if err != nil {
@@ -179,7 +179,7 @@ func (s *Service) Get(ctx context.Context, p auth.Principal, id int64, tickets f
 		return nil, err
 	}
 	for _, t := range ts {
-		if ticket.Visible(p, t) {
+		if ticket.Readable(p, t) {
 			d.Tickets = append(d.Tickets, t)
 		}
 	}

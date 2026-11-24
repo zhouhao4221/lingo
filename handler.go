@@ -78,6 +78,19 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		ts, err := l.ListMyTickets(ctx(r), user(r), r.Query("status"), before, int(limit))
 		return list(ts, err)
 	})
+	rt.Handle("GET /tickets/visible", func(r *httpapi.Request) (any, error) {
+		before, err := r.QueryInt("before")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		ts, err := l.ListVisibleTickets(ctx(r), user(r), VisibleTicketFilter{Project: r.Query("project"), Status: r.Query("status"),
+			BeforeID: before, Limit: int(limit)})
+		return list(ts, err)
+	})
 	rt.Handle("GET /tickets/{id}", func(r *httpapi.Request) (any, error) {
 		id, err := r.PathID("id")
 		if err != nil {

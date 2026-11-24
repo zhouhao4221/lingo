@@ -72,6 +72,8 @@ type factTicket struct {
 	Milestone    string        `json:"milestone,omitempty"`
 	DueDate      string        `json:"due_date,omitempty"`
 	Summary      string        `json:"summary,omitempty"`
+	Mine         bool          `json:"mine"`                // 是否提问人本人提交
+	Submitter    string        `json:"submitter,omitempty"` // 非本人提交时的提交人姓名（同事的工单，REQ-004）
 	Comments     []factComment `json:"recent_comments,omitempty"`
 }
 
@@ -129,10 +131,13 @@ var issueRefRe = regexp.MustCompile(`#(\d+)`)
 // plainRefs 把文本中的 "#N" 改写为 "Issue N"，交给模型的数据里 "#N" 只表示灵工工单号（见 grounded）。
 func plainRefs(s string) string { return issueRefRe.ReplaceAllString(s, "Issue $1") }
 
-func (s *Service) factOf(t *ticket.Ticket, loc *time.Location, bodyRunes int) factTicket {
-	f := factTicket{ID: t.ID, Project: t.ProjectKey, Repo: t.Repo, Type: typeName(t.Type), Title: plainRefs(oneLine(t.Title)),
+func (s *Service) factOf(p auth.Principal, t *ticket.Ticket, loc *time.Location, bodyRunes int) factTicket {
+	f := factTicket{Mine: p.ID != "" && t.UserID == p.ID, ID: t.ID, Project: t.ProjectKey, Repo: t.Repo, Type: typeName(t.Type), Title: plainRefs(oneLine(t.Title)),
 		Status: statusName(string(t.Status)), CreatedAt: fmtTime(t.CreatedAt, loc), UpdatedAt: fmtTime(t.UpdatedAt, loc),
 		FixedVersion: t.FixedTag, Milestone: t.Milestone, Summary: plainRefs(textutil.ClipEllipsis(t.Body, bodyRunes))}
+	if !f.Mine {
+		f.Submitter = oneLine(t.UserName)
+	}
 	if t.DeployedAt != nil {
 		f.DeployedAt = fmtTime(*t.DeployedAt, loc)
 	}
@@ -203,7 +208,7 @@ func (s *Service) findTickets(ctx context.Context, tc *turnCtx, in *Intent) (*re
 	f := facts{Kind: "ticket_detail", Total: len(ts), Shown: len(ts)}
 	var cites Citations
 	for _, t := range ts {
-		ft := s.factOf(t, tc.loc, detailBodyRunes)
+		ft := s.factOf(tc.p, t, tc.loc, detailBodyRunes)
 		var cs []ticket.Comment
 		if len(ts) == 1 { // 只在回答单张工单时带上最近的评论（见 README 中送给模型的内容）
 			if cs, err = s.o.Tickets.Comments(ctx, tc.p, t.ID); err != nil {
@@ -270,7 +275,7 @@ func (s *Service) summarize(ctx context.Context, tc *turnCtx, in *Intent) (*repl
 	}
 	var cites Citations
 	for _, t := range ts {
-		f.Tickets = append(f.Tickets, s.factOf(t, tc.loc, listBodyRunes))
+		f.Tickets = append(f.Tickets, s.factOf(tc.p, t, tc.loc, listBodyRunes))
 		cites.Tickets = append(cites.Tickets, s.ticketRef(t))
 	}
 	f.Shown = len(ts)

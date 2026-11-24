@@ -240,6 +240,24 @@ type Ticket struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	TriageSince *time.Time `json:"triage_since,omitempty"` // 进入待确认的时间，非待确认为空
+	Mine        bool       `json:"mine"`                   // 是否调用者本人提交（同事的工单为 false，见 Config.TicketAudience）
+}
+
+// TicketAudience 是 Config.TicketAudience 的返回：external 用户额外可见哪些提交人的工单（REQ-004）。
+type TicketAudience struct {
+	// UserIDs 是额外可见的提交人（接入方用户 ID），如同部门成员。去重后最多取前 MaxTicketAudience 个；含调用者本人时忽略。
+	UserIDs []string
+}
+
+// MaxTicketAudience 是 TicketAudience.UserIDs 的上限，超出部分丢弃并记一条 Warn 日志。
+const MaxTicketAudience = 1000
+
+// VisibleTicketFilter 是 ListVisibleTickets 的条件。
+type VisibleTicketFilter struct {
+	Project  string // 为空时不限（仍限 User.Projects）
+	Status   string
+	BeforeID int64 // 游标：上一页最后一条的 ID
+	Limit    int   // 0 时默认 50，最多 200
 }
 
 // IssueClose 是转研发后被驳回的工单关闭关联 Issue 的进度（RejectForwardedTicket 之后由 Run 异步执行）。

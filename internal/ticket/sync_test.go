@@ -32,6 +32,8 @@ type memStore struct {
 
 	lastEventQuery EventQuery
 	lastSearch     *SearchQuery
+	lastVisible    *VisibleQuery
+	attachStub     []Attachment // TicketAttachments 的返回
 }
 
 func newMem(ts ...Ticket) *memStore {
@@ -149,6 +151,10 @@ func (m *memStore) TriageCounts(context.Context, Scope, time.Time) ([]TriageCoun
 	return nil, nil
 }
 func (m *memStore) ListMine(context.Context, MineQuery) ([]*Ticket, error) { return nil, nil }
+func (m *memStore) ListVisible(_ context.Context, q VisibleQuery) ([]*Ticket, error) {
+	m.lastVisible = &q
+	return nil, nil
+}
 func (m *memStore) Search(_ context.Context, q SearchQuery) ([]*Ticket, error) {
 	m.lastSearch = &q
 	return nil, nil
@@ -166,7 +172,7 @@ func (m *memStore) AutoForwardOverrides(context.Context, []string) (map[string]m
 }
 
 func (m *memStore) TicketAttachments(context.Context, int64, bool, bool) ([]Attachment, error) {
-	return nil, nil
+	return m.attachStub, nil
 }
 
 func (m *memStore) Comments(context.Context, int64, bool) ([]Comment, error) { return nil, nil }

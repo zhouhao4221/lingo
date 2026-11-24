@@ -97,7 +97,7 @@ history（最近的对话，含回答引用过的工单与版本）、need_title
    rejected（已驳回）、submitted（待建 Issue）、open（已转研发）、in_progress（处理中）、need_info（需补充信息）、fixed（已修复待发版）、
    released（已发布）、deployed（已上线）、closed（已关闭未修复）、abnormal（异常）。“没做完 / 未完成”取 submitted、open、in_progress、
    need_info、fixed；“待确认”取 pending_triage。
-6. 用户问“我的”“我提的”时 mine 为 true。
+6. 用户问“我的”“我提的”时 mine 为 true；问“我们组”“同事”“团队”的工单时 mine 为 false。
 7. keywords 是用来匹配工单标题或描述的关键词（如“登录”），最多 5 个；不要把“工单”“bug”“问题”“修了吗”这类通用词当关键词。
 8. time：相对时间用 preset（today、yesterday、this_week、last_week、this_month、last_month、last_7_days、last_30_days）；具体日期用
    from / to（YYYY-MM-DD，含当天）。不要自己推算日期，能用 preset 就用 preset。field 取 created（提交时间，默认）、updated、
@@ -250,7 +250,8 @@ const answerSystemPrompt = `你是工单问答助手“灵工”，根据给定�
 3. 提到工单时写作 #编号（如 #12），只能使用数据中出现的编号。
 4. 数据中 total 大于 shown 时，说明总数，并提示可以补充条件缩小范围。
 5. 用简洁的中文回答（用户用其他语言提问时用同一语言），可以用 Markdown 列表；不要输出 JSON，不要提及“数据”这个词。
-6. 不要透露任何人的个人信息。`
+6. 不要透露任何人的个人信息。
+7. 工单的 mine 为 false 时是同事提交的，可以说明由 submitter（姓名）提交；mine 为 true 时说“你提交的”。`
 
 // Answer 实现 assistant.Brain。
 func (a *Assistant) Answer(ctx context.Context, in assistant.AnswerInput, onDelta func(string)) (string, error) {

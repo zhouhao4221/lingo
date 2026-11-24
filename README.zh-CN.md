@@ -67,7 +67,24 @@ light, _ := lingo.NewDeepSeekModel(os.Getenv("DEEPSEEK_API_KEY"), "")
 
 ### 角色
 
-`Authenticate` 把用户映射为四个固定角色之一：`external`（终端用户，只看本人工单）、`agent`（研发 Agent，看所属项目已转出的工单）、`reviewer`（后台确认，看所属项目全部工单）、`admin`。`User.Projects` 可选，用于限制可访问的项目。`User.Perspective` 可选，是与权限无关的需求视角，见下节。
+`Authenticate` 把用户映射为四个固定角色之一：`external`（终端用户，只看本人工单；可用 `TicketAudience` 放宽为只读查看同事的，见下节）、`agent`（研发 Agent，看所属项目已转出的工单）、`reviewer`（后台确认，看所属项目全部工单）、`admin`。`User.Projects` 可选，用于限制可访问的项目。`User.Perspective` 可选，是与权限无关的需求视角，见下节。
+
+### 同事可见（TicketAudience）
+
+默认 external 只能看本人的工单。配置 `Config.TicketAudience` 后，可按接入方自己的规则（如同部门、同团队）让 external 额外看到某些提交人的工单：
+
+```go
+TicketAudience: func(ctx context.Context, u lingo.User) (lingo.TicketAudience, error) {
+	return lingo.TicketAudience{UserIDs: directory.Teammates(u.ID)}, nil // 接入方的组织数据
+},
+```
+
+- **只读、不超出 `User.Projects`**：查看工单与对外评论、`ListVisibleTickets`（REST `GET /tickets/visible`、MCP `list_visible_tickets`）、知识问答的查找与汇总、版本关联的工单跟随放宽；工单返回 `mine` 区分是否本人提交。
+- **不跟随**：留言、补附件、补充视角、确认留言（对同事的工单返回 `not_found`），附件、`ListEvents` / `Notifier`（只对提交人本人），需求视角（未配置 `AuthorizePerspective` 时）。
+- **合并工单**按提交人判断：同事的工单被合并进他人的主工单时，主工单不随之可见。
+- **问答历史**：重新打开会话时，引用的工单按当前范围重新判断，已不可见的只保留编号；已生成的回答正文不做处理。
+- 只对 external 调用（`User.ID` 为空不调用），每个读请求最多调用一次、不缓存；名单去重后最多取前 1000 个；回调返回错误时按未放宽处理并记 Warn 日志。
+- 这是隐私变更，启用前请告知用户，例如：“你提交的工单（标题、描述、进展与公开回复）同部门成员可以查看，附件仅你和处理人员可见。”
 
 ### 需求视角
 
@@ -128,7 +145,7 @@ lingo.Config{
 用户可以用自然语言问工单与发版，例如“我上周提的登录 bug 修了吗”“最近发版了什么”“demo 项目还有几个待确认的工单”，也可以说“在 #12 补一句：复现环境是 Chrome 120”。推荐接入方把它做成一个独立的对话窗口：左侧是会话列表，右侧是聊天区。
 
 - 灵工的做法：模型只把提问解析为查询意图；查询由灵工按调用者的角色与项目执行（可见范围同 `GetTicket`）；模型依据查询结果组织回答。回答附结构化引用（`citations`：工单 ID、标题、状态、Issue 地址；版本 tag、发布时间），可渲染为卡片或链接。
-- 送给模型的内容：提问与最近 10 轮对话；工单的编号、项目、仓库、类型、标题、状态、时间、修复版本、里程碑与正文摘要；单张工单的最近 5 条评论正文（按提问人可见范围，reviewer / admin 包括研发内部讨论）；版本的名称、说明摘要、上线记录与修复的工单。不含提交人与评论作者的姓名、邮箱、用户 ID，也不含表单字段、提交环境与附件。模型由接入方提供，请按自己的合规要求选择。
+- 送给模型的内容：提问与最近 10 轮对话；工单的编号、项目、仓库、类型、标题、状态、时间、修复版本、里程碑与正文摘要；单张工单的最近 5 条评论正文（按提问人可见范围，reviewer / admin 包括研发内部讨论）；版本的名称、说明摘要、上线记录与修复的工单。不含提交人与评论作者的姓名、邮箱、用户 ID（例外：配置了 `TicketAudience` 时，同事工单带提交人姓名，见上文「同事可见」），也不含表单字段、提交环境与附件。模型由接入方提供，请按自己的合规要求选择。
 - 写操作须确认：要求留言时，助手消息带 `pending_action`；窗口可显示“确认 / 取消”按钮（调用 confirm / cancel），用户也可以直接回复“确认”。30 分钟内有效，取消、问别的或超时后作废。
 - 会话只有本人可见（admin 也不行），可续聊、删除；灵工不自动清理，保留多久由接入方决定。
 - 需要 `Config.Model`（意图解析用 `LightModel`，为空时用 `Model`）；未配置时发送返回 `ErrNoModel`（REST 501）。模型实现 `lingo.StreamModel` 时逐字输出，内置模型已实现（注意 `OpenAIConfig.HTTPClient` 的超时是整个回答的时限，默认 90 秒）。
@@ -172,6 +189,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 |---|---|
 | `GET /projects`、`GET /ticket-types` | 项目与仓库；工单类型及 Issue 模板表单字段 |
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
+| `GET /tickets/visible?project=&status=&before=` | 可查看的工单：本人的 + `TicketAudience` 放宽可见的同事的（只读） |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
 | `POST /tickets/{id}/reject-forwarded`、`GET /tickets/{id}/issue-close`、`POST /tickets/{id}/issue-close/retry` | 驳回已转研发工单（只关闭关联 Issue，异步可重试）及关闭进度 / 重试（reviewer / admin） |
@@ -188,7 +206,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`。
 
 ### 事件
 

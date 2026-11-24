@@ -469,6 +469,9 @@ func (s *Service) proposeComment(ctx context.Context, tc *turnCtx, in *Intent) (
 	}
 	t, err := s.o.Tickets.Get(ctx, tc.p, id)
 	if errors.Is(err, ticket.ErrNotFound) {
+		if _, verr := s.o.Tickets.View(ctx, tc.p, id); verr == nil {
+			return &reply{content: textReadOnly, outcome: OutcomeNotFound}, nil // 同事的工单：只读（REQ-004）
+		}
 		return &reply{content: textNotFound, outcome: OutcomeNotFound}, nil
 	}
 	if err != nil {
