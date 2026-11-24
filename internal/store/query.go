@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -79,6 +80,101 @@ func (s *Store) ListMine(ctx context.Context, q ticket.MineQuery) ([]*ticket.Tic
 	return s.tickets(ctx, "SELECT "+ticketColumns+`
 		WHERE t.user_id = $1 AND ($2 = '' OR t.status = $2) AND ($3::bigint = 0 OR t.id < $3::bigint)
 		ORDER BY t.id DESC LIMIT $4`, q.UserID, q.Status, q.BeforeID, q.Limit)
+}
+
+// forwardedAtSQL 是工单的转出时间：后台确认转出（triage.forward，含异常工单重新转出时取最早一次）的时间；
+// 没有确认记录的已转出工单为自动转出，取提交时间。未转出的为 NULL。
+const forwardedAtSQL = `(CASE WHEN t.status IN ('pending_triage', 'answered', 'merged', 'rejected') THEN NULL ELSE
+	COALESCE((SELECT min(h.created_at) FROM lingo_ticket_events h WHERE h.ticket_id = t.id AND h.kind = 'triage.forward'), t.created_at) END)`
+
+// searchWhere 返回 SearchQuery 的条件（不含 ORDER / LIMIT）与参数。
+func searchWhere(q ticket.SearchQuery) (string, []any) {
+	args := scopeArgs(q.Scope)
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	w := []string{scopeSQL(1)}
+	if q.UserID != "" {
+		w = append(w, "t.user_id = "+arg(q.UserID))
+	}
+	if q.ForwardedOnly {
+		w = append(w, "t.status NOT IN ('pending_triage', 'answered', 'merged', 'rejected')")
+	}
+	if len(q.IDs) > 0 {
+		w = append(w, "t.id = ANY(("+arg(textArrayInt(q.IDs))+"::text)::bigint[])")
+	}
+	if q.IssueNumber > 0 {
+		w = append(w, "t.gitea_issue_number = "+arg(q.IssueNumber))
+	}
+	if q.Repo != "" {
+		owner, name, _ := strings.Cut(q.Repo, "/")
+		w = append(w, "lower(r.owner) = lower("+arg(owner)+") AND lower(r.name) = lower("+arg(name)+")")
+	}
+	if q.Type != "" {
+		w = append(w, "t.type = "+arg(q.Type))
+	}
+	if len(q.Statuses) > 0 {
+		w = append(w, "t.status = ANY(("+arg(textArray(q.Statuses))+"::text)::text[])")
+	}
+	for _, k := range q.Keywords {
+		p := arg("%" + likeEscape(k) + "%")
+		w = append(w, "(t.title ILIKE "+p+" ESCAPE '\\' OR t.body ILIKE "+p+" ESCAPE '\\')")
+	}
+	col := "t.created_at"
+	switch q.TimeField {
+	case ticket.TimeUpdated:
+		col = "t.updated_at"
+	case ticket.TimeForwarded:
+		col = forwardedAtSQL
+	}
+	if !q.From.IsZero() {
+		w = append(w, col+" >= "+arg(q.From))
+	}
+	if !q.To.IsZero() {
+		w = append(w, col+" < "+arg(q.To))
+	}
+	if q.TimeField == ticket.TimeForwarded && q.From.IsZero() && q.To.IsZero() {
+		w = append(w, col+" IS NOT NULL")
+	}
+	return strings.Join(w, " AND "), args
+}
+
+// likeEscape 转义 LIKE 模式中的反斜杠、% 与 _（配合 ESCAPE 子句）。
+func likeEscape(s string) string {
+	return strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(s)
+}
+
+// Search 实现 ticket.QueryStore。
+func (s *Store) Search(ctx context.Context, q ticket.SearchQuery) ([]*ticket.Ticket, error) {
+	where, args := searchWhere(q)
+	if q.BeforeID > 0 {
+		args = append(args, q.BeforeID)
+		where += fmt.Sprintf(" AND t.id < $%d", len(args))
+	}
+	args = append(args, q.Limit)
+	return s.tickets(ctx, "SELECT "+ticketColumns+" WHERE "+where+fmt.Sprintf(" ORDER BY t.id DESC LIMIT $%d", len(args)), args...)
+}
+
+// Stats 实现 ticket.QueryStore。
+func (s *Store) Stats(ctx context.Context, q ticket.SearchQuery) ([]ticket.StatRow, error) {
+	where, args := searchWhere(q)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.key, t.type, t.status, count(*)
+		FROM lingo_tickets t JOIN lingo_projects p ON p.id = t.project_id LEFT JOIN lingo_repos r ON r.id = t.repo_id
+		WHERE `+where+` GROUP BY p.key, t.type, t.status ORDER BY p.key, t.type, t.status`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: ticket stats: %w", err)
+	}
+	defer rows.Close()
+	var out []ticket.StatRow
+	for rows.Next() {
+		var r ticket.StatRow
+		if err := rows.Scan(&r.ProjectKey, &r.Type, &r.Status, &r.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // Events 实现 ticket.QueryStore。事件 ID 在事务内分配、提交顺序可能不同，直接按 ID 翻页时游标可能越过一个

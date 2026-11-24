@@ -32,11 +32,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	model := lightModel()
 	l, err := lingo.New(lingo.Config{
 		DB: db,
-		// LightModel：建 Issue 前用轻量模型整理工单（标题、模板字段、描述）；不配置时按原内容建单。
-		// Model：主模型，供知识问答使用（尚未实现），可不配置。
-		LightModel: lightModel(),
+		// LightModel：建 Issue 前用轻量模型整理工单（标题、模板字段、描述），以及知识问答的意图解析；不配置时按原内容建单。
+		// Model：主模型，知识问答组织回答（内置模型支持流式）；不配置时知识问答返回 ErrNoModel，其余功能不受影响。
+		// 这里两者共用同一个模型；生产环境可给 LightModel 配便宜、快速的模型。
+		Model:      model,
+		LightModel: model,
 		Gitea: lingo.GiteaConfig{
 			BaseURL:       os.Getenv("LINGO_GITEA_URL"),
 			Token:         os.Getenv("LINGO_GITEA_TOKEN"), // 机器人账号：write:issue、read:repository、read:user

@@ -8,7 +8,7 @@
 
 灵工只提供公开 API（Go 方法、REST Handler、MCP Server、Gitea Webhook Handler），无租户、无前端：登录、用户管理、界面与部署由接入方负责。
 
-> **状态：** 工单流程已端到端实现；知识问答（`Ask`、知识库）尚未实现。首个正式版本发布前 API 仍可能调整。
+> **状态：** 工单流程已端到端实现；知识问答首期（工单与版本问答）已实现，知识库检索尚未实现。首个正式版本发布前 API 仍可能调整。
 
 ## 功能
 
@@ -19,6 +19,7 @@
 - **可靠同步**：Webhook 验签、去重、异步处理；定时对账补齐漏掉的投递；启动自检与可选的 Webhook 自动注册
 - **进展通知**：事件投递给你的 `Notifier`（至少一次，带事件 ID），并提供变更流；被合并工单的提交人随目标工单收到进展
 - **数据隔离**：一切按调用者的用户 ID、角色与项目隔离；提交人身份不会写入 Gitea
+- **知识问答**：用自然语言问工单进展、修复版本、近期发版，回答附引用；对话中给工单留言须确认；会话只有本人可见，支持流式输出（见下文「知识问答」）
 - **MCP Server**：同样的能力以 MCP 工具提供给 AI 客户端与研发 Agent（Agent 可直接回复提交人）
 
 ## 安装
@@ -41,7 +42,8 @@ st, err := lingo.CheckMigrations(ctx, db) // err != nil：检查失败、状态�
 
 l, err := lingo.New(lingo.Config{
 	DB:           db,       // *sql.DB（PostgreSQL）
-	LightModel:   light,    // 可选：便宜、快速的 lingo.Model，建 Issue 前整理工单
+	Model:        model,    // 可选：知识问答组织回答（不配置时知识问答不可用）
+	LightModel:   light,    // 可选：便宜、快速的 lingo.Model，建 Issue 前整理工单、问答意图解析（为空用 Model）
 	Gitea:        lingo.GiteaConfig{BaseURL: url, Token: botToken, WebhookSecret: secret},
 	Projects:     projects, // 项目及其 Gitea 仓库
 	Authenticate: authn,    // 从请求解析 lingo.User（ID、角色、项目）
@@ -121,6 +123,36 @@ lingo.Config{
 - 事件 `ticket.perspective_added`（`Perspectives` 为本次视角，`Body` 为“业务方 · 张三 补充了内容”，不含补充内容）与 `ticket.perspective_missing`（`Perspectives` 为缺失视角）的可见范围同其他工单事件。
 - 机器人令牌需能创建标签（`write:issue`）；视角标签在启动自检时补齐。
 
+### 知识问答（对话窗口）
+
+用户可以用自然语言问工单与发版，例如“我上周提的登录 bug 修了吗”“最近发版了什么”“demo 项目还有几个待确认的工单”，也可以说“在 #12 补一句：复现环境是 Chrome 120”。推荐接入方把它做成一个独立的对话窗口：左侧是会话列表，右侧是聊天区。
+
+- 灵工的做法：模型只把提问解析为查询意图；查询由灵工按调用者的角色与项目执行（可见范围同 `GetTicket`）；模型依据查询结果组织回答。回答附结构化引用（`citations`：工单 ID、标题、状态、Issue 地址；版本 tag、发布时间），可渲染为卡片或链接。
+- 送给模型的只有工单的编号、标题、状态、摘要与版本信息，不含提交人与评论作者的身份；模型由接入方提供，请按自己的合规要求选择。
+- 写操作须确认：要求留言时，助手消息带 `pending_action`；窗口可显示“确认 / 取消”按钮（调用 confirm / cancel），用户也可以直接回复“确认”。30 分钟内有效，取消、问别的或超时后作废。
+- 会话只有本人可见（admin 也不行），可续聊、删除；灵工不自动清理，保留多久由接入方决定。
+- 需要 `Config.Model`（意图解析用 `LightModel`，为空时用 `Model`）；未配置时发送返回 `ErrNoModel`（REST 501）。模型实现 `lingo.StreamModel` 时逐字输出，内置模型已实现（注意 `OpenAIConfig.HTTPClient` 的超时是整个回答的时限，默认 90 秒）。
+- 首期只回答工单与版本相关的问题；知识库检索、业务数据 `Tool` 后续提供。
+
+```go
+c, _ := l.CreateConversation(ctx, u, "")
+m, err := l.SendMessageStream(ctx, u, c.ID, lingo.MessageInput{Content: "我上周提的登录 bug 修了吗", TimeZone: "Asia/Shanghai"},
+	func(delta string) { fmt.Print(delta) }) // 逐片段输出；最终以 m.Content 为准
+if m.PendingAction != nil { /* 显示确认按钮，确认时调用 l.ConfirmPendingAction(ctx, u, c.ID, m.PendingAction.ID) */ }
+```
+
+REST 流式：`POST /conversations/{id}/messages`，请求体 `{"content":"…","time_zone":"Asia/Shanghai","stream":true}`，响应为 SSE：
+
+```
+event: delta
+data: {"text":"#12 已修复"}
+
+event: message
+data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布。","status":"done","citations":{…}}
+```
+
+最后恰好一个 `message` 事件，以它的 `content` 为准；开始输出后出错发送 `event: error`（`{"code","message"}`）；开始输出前的错误（如 404、409、501）仍是普通 JSON 错误响应。模型出错时助手消息的 `status` 为 `failed`，可调用 retry 重试。用 `fetch` 读取流（`EventSource` 不支持 POST）。
+
 ### REST 接口
 
 | 接口 | 说明 |
@@ -134,12 +166,15 @@ lingo.Config{
 | `GET /releases`、`GET /releases/{id}` | 版本记录、关联工单与上线记录 |
 | `GET` / `PUT /settings/auto-forward` | 自动转出开关（修改需 admin） |
 | `GET /usage?from=&to=` | 模型 token 用量，按天、用途、模型汇总，含前缀缓存命中率（admin） |
+| `POST` / `GET /conversations`、`DELETE /conversations/{id}` | 知识问答会话：新建、列表（按最近活动，`before` 为上一页的 `cursor`）、删除 |
+| `GET` / `POST /conversations/{id}/messages`、`POST /conversations/{id}/messages/{mid}/retry` | 历史消息；提问（`stream` 为真时 SSE）；重试失败的回答 |
+| `POST /conversations/{id}/actions/{aid}/confirm\|cancel` | 确认 / 取消待确认操作（如留言） |
 
 写操作须使用 `Content-Type: application/json`（防 CSRF）；错误响应为 `{"error":{"code","message"}}`。
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`。
 
 ### 事件
 

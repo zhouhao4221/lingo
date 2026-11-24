@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.27 | 2026-11-24 | haiqing | 知识问答首期（REQ-003）：会话式工单与版本问答。会话只有本人可见（软删除）；模型只把提问解析为查询意图，查询由灵工按调用者权限执行，回答附引用的工单与版本；对话中给工单留言须确认（待确认操作，30 分钟有效，可回复确认或调用确认接口）；Go 方法 `CreateConversation` / `ListConversations` / `ListConversationMessages` / `DeleteConversation` / `SendMessage(Stream)` / `RetryMessage(Stream)` / `ConfirmPendingAction` / `CancelPendingAction`，REST `/conversations`（消息可 SSE 流式），MCP `ask` 等 5 个工具；可选接口 `StreamModel`（内置模型已实现）；未配置 `Model` 时返回 `ErrNoModel`（REST 501）；迁移 0003 新增会话、消息、待确认操作三张表 |
 | v1.26 | 2026-11-21 | haiqing | 产品中文名由「灵问」改为「灵工」（英文名 Lingo 不变）；新增可由接入方配色的 Logo（`assets/logo/`） |
 | v1.25 | 2026-11-21 | haiqing | 新增转研发后驳回（REQ-002）：`RejectForwardedTicket` / `POST /tickets/{id}/reject-forwarded` / MCP `reject_forwarded_ticket`（reviewer / admin，原因必填），工单保留并改为 `rejected`，经 outbox 只关闭关联主 Issue（可重试、防重复），进度与重试 `TicketIssueClose` / `RetryTicketIssueClose`；驳回后 Gitea 回流不覆盖本地结论；新增只读迁移检查 `lingo.CheckMigrations` |
 | v1.24 | 2026-11-21 | haiqing | 新增需求多视角补充（REQ-001；视角标签 `<前缀>/视角/<视角名>`）：固定视角使用者 / 业务方 / 专家 / 决策者（`User.Perspective`，由 `Authenticate` 提供，与权限角色无关）；需求类工单可由各视角追加补充（转出前后均可、只追加），Issue 正文按视角分层渲染（标记区块，单向同步）并打固定视角标签；必填视角（`Config` 默认、`Project` 覆盖）与缺失标注；新增事件 `ticket.perspective_added`、`ticket.perspective_missing`；数据隔离新增两条例外：补充人与首段提交人姓名写入 Issue、视角补充的追加与查询由 `Config.AuthorizePerspective` 判定（未配置时同工单可见范围） |
@@ -219,7 +220,7 @@ flowchart LR
 - **Gitea Webhook**：`l.WebhookHandler()`，验签 + 去重
 - **后台 worker**：`l.Run(ctx)`，负责 outbox 投递、Gitea 同步补偿、知识库生成
 
-**MCP 工具**（已实现的与 REST 对齐；`ask`、`search_knowledge` 随知识问答实现后提供）：
+**MCP 工具**（已实现的与 REST 对齐；`search_knowledge` 随知识库实现后提供）：
 
 | 工具 | 说明 | 主要使用方 |
 |-----|-----|----------|
@@ -234,7 +235,9 @@ flowchart LR
 | `list_triage` / `forward_ticket` / `answer_ticket` / `merge_ticket` / `reject_ticket` | 后台确认（reviewer / admin） | 研发负责人 |
 | `reject_forwarded_ticket` / `get_issue_close` / `retry_issue_close` | 驳回已转研发工单、关闭关联 Issue 的进度与重试（reviewer / admin，见 3.2.2.2） | 研发负责人 |
 | `list_releases` / `get_release` | 版本记录、关联工单与上线记录 | 两侧 |
-| `ask` / `search_knowledge` | 提问与检索知识库（待知识问答实现） | 两侧 |
+| `ask` / `list_conversations` / `list_conversation_messages` | 以自然语言询问工单进展与发版（首期，见 REQ-003）；会话列表与历史 | 两侧 |
+| `confirm_action` / `cancel_action` | 确认 / 取消 `ask` 提出的待确认操作（如给工单留言） | 两侧 |
+| `search_knowledge` | 检索知识库（待知识库实现） | 两侧 |
 
 **业务规则**：
 - Handler 内的路径为相对路径，挂载前缀由接入方决定（见 3.2.1）
@@ -915,8 +918,11 @@ flowchart LR
 | lingo_webhook_deliveries | Webhook 投递（去重 + 待 worker 处理） | delivery_id(唯一), event, event_type, kind, dedup_key(唯一，业务键), repo, issue_number, from_bot, payload(bytea), parse_error, received_at, processed_at, attempts, failures, next_attempt_at, locked_until, last_error |
 | lingo_repo_state | 仓库同步状态 | repo(小写 owner/name), kind(ping/issues/pulls/comments/releases/deployments), at |
 | lingo_llm_usage | 模型调用用量 | kind, model, ticket_id, input, output, cached, ok, latency_ms |
+| lingo_assistant_conversations | 问答会话（0003），只有创建者可见，软删除 | user_id, title, activity_seq(最近活动序号，列表排序与游标), last_active_at, turn_until(生成租约), deleted_at |
+| lingo_assistant_messages | 问答消息（0003） | conversation_id, role(user/assistant), content, status(done/failed), error, reply_to, intent, outcome(统计用), citations(jsonb：引用快照) |
+| lingo_assistant_actions | 待确认操作（0003），通用结构，每个会话最多一个 pending | conversation_id, message_id, user_id, kind(ticket_comment), payload, summary, status(pending/executed/cancelled/expired/failed), result, expires_at |
 
-问答会话、知识库、需求评审、业务数据请求审计与多仓库拆单的表在对应功能实现时经新迁移加入。
+知识库、需求评审、业务数据请求审计与多仓库拆单的表在对应功能实现时经新迁移加入。
 
 ### 5.2 数据采集
 
@@ -1093,7 +1099,7 @@ flowchart LR
 |-----|------|------|------|---------|---------|
 | REQ-001 | 需求多视角分层补充 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
 | REQ-002 | 转研发后驳回与迁移就绪检查 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
-| REQ-003 | 知识问答 Agent：工单与版本问答 | 知识问答 | 草稿 | 2026-11-24 | - |
+| REQ-003 | 知识问答 Agent：工单与版本问答 | 知识问答 | 测试中 | 2026-11-24 | - |
 | REQ-004 | 工单可见性回调 | 工单 | 草稿 | 2026-11-24 | - |
 
 ---

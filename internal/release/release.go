@@ -65,6 +65,8 @@ type Store interface {
 	ListReleases(ctx context.Context, q Query) ([]*Release, error)
 	// GetRelease 返回版本及其项目 key；不存在返回 ErrNotFound。
 	GetRelease(ctx context.Context, id int64) (*Release, string, error)
+	// CountReleases 返回符合条件的版本数（忽略 BeforeID 与 Limit）。
+	CountReleases(ctx context.Context, q Query) (int, error)
 	// ReleaseTicketIDs 返回关联到版本的工单 ID。
 	ReleaseTicketIDs(ctx context.Context, id int64) ([]int64, error)
 	// ReleaseDeployments 返回版本的上线记录。
@@ -77,6 +79,9 @@ type Query struct {
 	Projects []string // All 为假时调用者可访问的项目
 	Project  string
 	Repo     string
+	Tag      string    // 非空时只含该 tag（不区分大小写）
+	Since    time.Time // 非零时只含此时及之后发布的
+	Until    time.Time // 非零时只含此时之前发布的
 	BeforeID int64
 	Limit    int
 }
@@ -131,6 +136,21 @@ func (s *Service) List(ctx context.Context, p auth.Principal, q Query) ([]*Relea
 	q.All, q.Projects = len(p.Projects) == 0, p.Projects
 	q.Limit = ticket.Limit(q.Limit, ticket.DefaultLimit)
 	return s.o.Store.ListReleases(ctx, q)
+}
+
+// Count 返回调用者项目范围内符合条件的版本数，project 不在范围内时为 0。
+func (s *Service) Count(ctx context.Context, p auth.Principal, q Query) (int, error) {
+	if !p.Known() {
+		return 0, fmt.Errorf("%w: unknown role", ticket.ErrForbidden)
+	}
+	if q.Repo != "" && !strings.Contains(q.Repo, "/") {
+		return 0, fmt.Errorf("%w: repo must be owner/name", ticket.ErrInvalid)
+	}
+	if q.Project != "" && !p.InProject(q.Project) {
+		return 0, nil
+	}
+	q.All, q.Projects = len(p.Projects) == 0, p.Projects
+	return s.o.Store.CountReleases(ctx, q)
 }
 
 // Detail 是版本详情。

@@ -86,11 +86,48 @@ type EventQuery struct {
 	ForwardedOnly bool   // 只返回已转出工单的事件
 }
 
+// 检索时间字段（SearchQuery.TimeField）。
+const (
+	TimeCreated   = "created"
+	TimeUpdated   = "updated"
+	TimeForwarded = "forwarded" // 转出时间：后台确认转出的时间，自动转出的为提交时间
+)
+
+// SearchQuery 是工单检索的条件，供知识问答按自然语言条件查找工单。范围（Scope、UserID、ForwardedOnly）由
+// Service.Search 按调用者角色填写，调用方传入的值会被覆盖。
+type SearchQuery struct {
+	Scope         Scope
+	UserID        string // 非空时只含该提交人的工单
+	ForwardedOnly bool   // 只含已转出的工单（agent）
+	IDs           []int64
+	IssueNumber   int64 // 主 Issue 编号（与 Repo 一起使用时更精确）
+	Repo          string
+	Type          string
+	Statuses      []string
+	Keywords      []string  // 各关键词须同时命中，每个匹配标题或正文（不区分大小写）
+	TimeField     string    // TimeCreated | TimeUpdated | TimeForwarded；为空时按 TimeCreated
+	From, To      time.Time // 零值不限；To 不含
+	BeforeID      int64     // 游标：按 ID 降序
+	Limit         int
+}
+
+// StatRow 是工单统计的一行。
+type StatRow struct {
+	ProjectKey string
+	Type       string
+	Status     string
+	Count      int
+}
+
 // QueryStore 是只读查询，由 internal/store 实现。
 type QueryStore interface {
 	ListTriage(ctx context.Context, q TriageQuery) ([]*Ticket, error)
 	TriageCounts(ctx context.Context, s Scope, overdueBefore time.Time) ([]TriageCount, error)
 	ListMine(ctx context.Context, q MineQuery) ([]*Ticket, error)
+	// Search 按条件检索工单（新的在前）。
+	Search(ctx context.Context, q SearchQuery) ([]*Ticket, error)
+	// Stats 按项目、类型、状态统计符合条件的工单数（忽略 BeforeID 与 Limit）。
+	Stats(ctx context.Context, q SearchQuery) ([]StatRow, error)
 	Events(ctx context.Context, q EventQuery) ([]notify.Event, error)
 	Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]Comment, error)
 	// Perspectives 返回工单的视角补充（不含首段），按时间升序。
@@ -134,6 +171,67 @@ func (s *Service) ListMine(ctx context.Context, p auth.Principal, q MineQuery) (
 	}
 	q.UserID, q.Limit = p.ID, limitOf(q.Limit, DefaultLimit)
 	return s.queries().ListMine(ctx, q)
+}
+
+// Search 在调用者可见的工单中按条件检索（新的在前），可见范围与 Visible 一致：external 只含本人的，agent 只含
+// 已转出的，reviewer / admin 为项目范围内全部；mine 为真时只含调用者本人提交的。project 不在范围内时为空。
+func (s *Service) Search(ctx context.Context, p auth.Principal, project string, mine bool, q SearchQuery) ([]*Ticket, error) {
+	q, ok, err := s.searchScope(p, project, mine, q)
+	if err != nil || !ok {
+		return nil, err
+	}
+	q.Limit = limitOf(q.Limit, DefaultLimit)
+	return s.queries().Search(ctx, q)
+}
+
+// Stats 按项目、类型、状态统计调用者可见、符合条件的工单数，可见范围同 Search。
+func (s *Service) Stats(ctx context.Context, p auth.Principal, project string, mine bool, q SearchQuery) ([]StatRow, error) {
+	q, ok, err := s.searchScope(p, project, mine, q)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return s.queries().Stats(ctx, q)
+}
+
+func (s *Service) searchScope(p auth.Principal, project string, mine bool, q SearchQuery) (SearchQuery, bool, error) {
+	if q.Type != "" && !ValidType(q.Type) {
+		return q, false, fmt.Errorf("%w: type %q", ErrInvalid, q.Type)
+	}
+	for _, st := range q.Statuses {
+		if !validStatus(Status(st)) {
+			return q, false, fmt.Errorf("%w: status %q", ErrInvalid, st)
+		}
+	}
+	switch q.TimeField {
+	case "", TimeCreated, TimeUpdated, TimeForwarded:
+	default:
+		return q, false, fmt.Errorf("%w: time field %q", ErrInvalid, q.TimeField)
+	}
+	q.UserID, q.ForwardedOnly = "", false
+	switch p.Role {
+	case auth.RoleExternal:
+		if p.ID == "" {
+			return q, false, fmt.Errorf("%w: caller has no user id", ErrForbidden)
+		}
+		q.UserID = p.ID
+	case auth.RoleAgent:
+		q.ForwardedOnly = true
+		if mine { // agent 不提交工单
+			return q, false, nil
+		}
+	case auth.RoleReviewer, auth.RoleAdmin:
+		if mine {
+			if p.ID == "" {
+				return q, false, nil
+			}
+			q.UserID = p.ID
+		}
+	default:
+		return q, false, fmt.Errorf("%w: unknown role", ErrForbidden)
+	}
+	sc, ok := projectScope(p, project)
+	q.Scope = sc
+	return q, ok, nil
 }
 
 // ListEvents 返回调用者可见的、ID 大于 afterID 的事件（升序）：external 只看本人工单的非 triage 事件；

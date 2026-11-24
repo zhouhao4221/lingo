@@ -48,6 +48,7 @@ type Request struct {
 	User any
 	w    http.ResponseWriter
 	max  int64
+	sse  *SSE
 }
 
 // HandlerFunc 返回要编码为 JSON 的结果；错误经 MapError 转为错误响应。
@@ -74,9 +75,19 @@ func (rt *Router) Handle(pattern string, h HandlerFunc) {
 			writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 			return
 		}
-		res, err := h(&Request{Request: r, User: u, w: w, max: rt.o.MaxBody})
+		req := &Request{Request: r, User: u, w: w, max: rt.o.MaxBody}
+		res, err := h(req)
+		if req.sse != nil && req.sse.started {
+			if err != nil {
+				rt.failStream(req.sse, r, err)
+			}
+			return // 已经以 SSE 输出
+		}
 		if err != nil {
 			rt.fail(w, r, err)
+			return
+		}
+		if _, ok := res.(Streamed); ok {
 			return
 		}
 		status := http.StatusOK
@@ -111,6 +122,23 @@ func (rt *Router) fail(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	writeError(w, status, code, err.Error())
+}
+
+// failStream 在 SSE 已开始输出后，以 error 事件报告错误（data 同错误响应的 error 对象）。
+func (rt *Router) failStream(s *SSE, r *http.Request, err error) {
+	code, msg := "internal", "internal error"
+	status, c := rt.o.MapError(err)
+	switch {
+	case errors.Is(err, ErrBadRequest):
+		code, msg = "bad_request", err.Error()
+	case status != 0:
+		code, msg = c, err.Error()
+	default:
+		rt.o.Logger.Error("lingo: request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+	}
+	var b errorBody
+	b.Error.Code, b.Error.Message = code, msg
+	_ = s.Send("error", b.Error)
 }
 
 type errorBody struct {

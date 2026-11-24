@@ -79,6 +79,20 @@ func TestMigrationTablesParsed(t *testing.T) {
 	if !slices.Equal(st.MissingTables, want) {
 		t.Errorf("0001 tables = %v, want %v", st.MissingTables, want)
 	}
+	// 0003 新建的表同样能解析出来
+	if len(ms) < 3 {
+		t.Fatalf("want at least 3 migrations, got %d", len(ms))
+	}
+	applied := map[string]string{}
+	for _, m := range ms[:3] {
+		applied[m.name] = m.checksum
+	}
+	st = migrationStatus(ms, applied, map[string]bool{})
+	for _, tbl := range []string{"lingo_assistant_conversations", "lingo_assistant_messages", "lingo_assistant_actions"} {
+		if !slices.Contains(st.MissingTables, tbl) {
+			t.Errorf("0003 table %s not parsed: %v", tbl, st.MissingTables)
+		}
+	}
 	// 缺表推算的约束（PRD 5.4）：表名不带引号与 schema 前缀，不用 ALTER TABLE … RENAME 改表名
 	bad := regexp.MustCompile(`(?i)\b(?:CREATE|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:"|[a-z_][a-z0-9_]*\s*\.)|\bALTER\s+TABLE\b[^;]*\bRENAME\s+TO\b`)
 	for _, m := range ms {

@@ -1,0 +1,305 @@
+package lingo
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/zhouhao4221/lingo/internal/assistant"
+	"github.com/zhouhao4221/lingo/internal/auth"
+	"github.com/zhouhao4221/lingo/internal/llm"
+	"github.com/zhouhao4221/lingo/internal/store"
+)
+
+// ErrNoModel 表示未配置 Config.Model：知识问答的发送与重试不可用（会话列表、历史、确认与取消不受影响）。
+var ErrNoModel = errors.New("lingo: model not configured")
+
+// Conversation 是知识问答的会话，只有创建者本人可访问（admin 也看不到他人的会话）。
+type Conversation struct {
+	ID           int64     `json:"id"`
+	Title        string    `json:"title"` // 为空时由首条提问生成
+	CreatedAt    time.Time `json:"created_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
+	Cursor       int64     `json:"cursor"` // 会话列表的分页游标：下一页传入 before
+}
+
+// ConversationMessage 是会话中的一条消息。
+type ConversationMessage struct {
+	ID             int64  `json:"id"`
+	ConversationID int64  `json:"conversation_id"`
+	Role           string `json:"role"` // user | assistant
+	Content        string `json:"content"`
+	Status         string `json:"status"` // done | failed（模型出错，可用 RetryMessage 重试）
+	// Error 是失败类别：model_error | timeout | canceled
+	Error         string         `json:"error,omitempty"`
+	ReplyTo       int64          `json:"reply_to,omitempty"` // 助手消息所回答的用户消息
+	Citations     Citations      `json:"citations"`
+	PendingAction *PendingAction `json:"pending_action,omitempty"` // 该消息提出的待确认操作
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+// Citations 是回答引用的工单与版本（回答当时的快照），接入方可渲染为卡片或链接。
+type Citations struct {
+	Tickets  []TicketCitation  `json:"tickets"`
+	Releases []ReleaseCitation `json:"releases"`
+}
+
+// TicketCitation 是回答引用的工单。
+type TicketCitation struct {
+	ID       int64  `json:"id"`
+	Title    string `json:"title"`
+	Status   string `json:"status"`
+	IssueURL string `json:"issue_url,omitempty"`
+}
+
+// ReleaseCitation 是回答引用的版本。
+type ReleaseCitation struct {
+	ID          int64     `json:"id"`
+	ProjectKey  string    `json:"project"`
+	Repo        string    `json:"repo"`
+	Tag         string    `json:"tag"`
+	PublishedAt time.Time `json:"published_at"`
+	URL         string    `json:"url,omitempty"`
+}
+
+// PendingAction 是待确认操作：灵工在对话中提出、用户确认后才执行的写操作（本期为 ticket_comment：给工单留言）。
+// 确认方式：调用 ConfirmPendingAction（确认按钮），或在对话中紧接着回复确认的话；30 分钟内有效，用户取消、
+// 发送与之无关的新消息或超时后作废。
+type PendingAction struct {
+	ID             int64           `json:"id"`
+	ConversationID int64           `json:"conversation_id"`
+	Kind           string          `json:"kind"`    // ticket_comment
+	Summary        string          `json:"summary"` // 给用户看的操作描述
+	Payload        json.RawMessage `json:"payload"` // ticket_comment: {"ticket_id":12,"body":"…"}
+	Status         string          `json:"status"`  // pending | executed | cancelled | expired | failed
+	ExpiresAt      time.Time       `json:"expires_at"`
+	ResolvedAt     *time.Time      `json:"resolved_at,omitempty"`
+}
+
+// ActionResult 是确认或取消待确认操作的结果。
+type ActionResult struct {
+	Action  PendingAction        `json:"action"`
+	Message *ConversationMessage `json:"message,omitempty"` // 追加到会话的结果消息；重复确认、重复取消时为空
+	Comment *Comment             `json:"comment,omitempty"` // ticket_comment 执行成功时写入的评论
+}
+
+// MessageInput 是一次提问。
+type MessageInput struct {
+	Content string // 最多 4000 字
+	// TimeZone 是 IANA 时区名（如 "Asia/Shanghai"），用于理解“今天”“上周”；为空时用服务进程的本地时区。
+	TimeZone string
+}
+
+// CreateConversation 为 u 新建知识问答会话；title 可空（由首条提问生成）。
+func (l *Lingo) CreateConversation(ctx context.Context, u User, title string) (Conversation, error) {
+	c, err := l.assistant.Create(ctx, l.principal(u), title)
+	if err != nil {
+		return Conversation{}, assistantErr(err)
+	}
+	return publicConversation(c), nil
+}
+
+// ListConversations 返回 u 的会话，按最近活动倒序；before 为上一页最后一条的 Cursor，limit 为 0 时默认 50，最多 200。
+func (l *Lingo) ListConversations(ctx context.Context, u User, before int64, limit int) ([]Conversation, error) {
+	cs, err := l.assistant.List(ctx, l.principal(u), before, limit)
+	if err != nil {
+		return nil, assistantErr(err)
+	}
+	out := make([]Conversation, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, publicConversation(c))
+	}
+	return out, nil
+}
+
+// ListConversationMessages 返回会话中 ID 小于 beforeID（0 不限）的最近 limit 条消息，页内按 ID 升序；
+// limit 为 0 时默认 50，最多 200。他人的会话返回 ErrNotFound。
+func (l *Lingo) ListConversationMessages(ctx context.Context, u User, conversationID, beforeID int64, limit int) ([]ConversationMessage, error) {
+	ms, err := l.assistant.Messages(ctx, l.principal(u), conversationID, beforeID, limit)
+	if err != nil {
+		return nil, assistantErr(err)
+	}
+	out := make([]ConversationMessage, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, publicMessage(m))
+	}
+	return out, nil
+}
+
+// DeleteConversation 删除 u 的会话，删除后不再可见。
+func (l *Lingo) DeleteConversation(ctx context.Context, u User, conversationID int64) error {
+	return assistantErr(l.assistant.Delete(ctx, l.principal(u), conversationID))
+}
+
+// SendMessage 在会话中提问，返回助手消息。灵工把问题解析为查询意图，按 u 的权限查询工单与版本记录后作答，
+// 回答附引用（Citations）；要求给工单留言时返回带 PendingAction 的消息，确认后才写入。
+// 模型出错时提问照常保存，返回 Status 为 failed 的助手消息（err 为 nil），可用 RetryMessage 重试。
+// 未配置 Config.Model 时返回 ErrNoModel；同一会话上一条提问还在处理时返回 ErrConflict。
+func (l *Lingo) SendMessage(ctx context.Context, u User, conversationID int64, in MessageInput) (ConversationMessage, error) {
+	return l.SendMessageStream(ctx, u, conversationID, in, nil)
+}
+
+// SendMessageStream 同 SendMessage，回答文本逐片段回调 onDelta（模型未实现 StreamModel、或固定回复时整段回调一次）。
+// 以返回消息的 Content 为准：极少数情况下（回答引用了数据之外的工单号）灵工会改用按数据生成的回答，与已回调的片段不同。
+func (l *Lingo) SendMessageStream(ctx context.Context, u User, conversationID int64, in MessageInput, onDelta func(delta string)) (ConversationMessage, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return ConversationMessage{}, err
+	}
+	m, err := l.assistant.Send(ctx, l.principal(u), conversationID, in.Content, in.TimeZone, onDelta)
+	if err != nil {
+		return ConversationMessage{}, assistantErr(err)
+	}
+	return publicMessage(m), nil
+}
+
+// RetryMessage 重新回答失败的助手消息（须是会话的最后一条），原地更新该消息；timeZone 同 MessageInput.TimeZone。
+func (l *Lingo) RetryMessage(ctx context.Context, u User, conversationID, messageID int64, timeZone string) (ConversationMessage, error) {
+	return l.RetryMessageStream(ctx, u, conversationID, messageID, timeZone, nil)
+}
+
+// RetryMessageStream 同 RetryMessage，回答文本逐片段回调 onDelta。
+func (l *Lingo) RetryMessageStream(ctx context.Context, u User, conversationID, messageID int64, timeZone string, onDelta func(delta string)) (ConversationMessage, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return ConversationMessage{}, err
+	}
+	m, err := l.assistant.Retry(ctx, l.principal(u), conversationID, messageID, timeZone, onDelta)
+	if err != nil {
+		return ConversationMessage{}, assistantErr(err)
+	}
+	return publicMessage(m), nil
+}
+
+// ConfirmPendingAction 确认执行待确认操作（确认按钮），成功时向会话追加结果消息。确认时再次校验权限，留言与
+// AddTicketComment 行为一致；被拒（无权限、工单状态不允许）时操作置为 failed 并追加说明。对已执行的操作重复确认
+// 返回原结果、不重复执行；已取消、过期或失败的返回 ErrConflict。
+func (l *Lingo) ConfirmPendingAction(ctx context.Context, u User, conversationID, actionID int64) (ActionResult, error) {
+	if err := l.ensureProjects(ctx); err != nil {
+		return ActionResult{}, err
+	}
+	r, err := l.assistant.Confirm(ctx, l.principal(u), conversationID, actionID)
+	if err != nil {
+		return ActionResult{}, assistantErr(err)
+	}
+	return publicActionResult(r), nil
+}
+
+// CancelPendingAction 取消待确认操作（取消按钮），向会话追加说明；重复取消幂等，已执行、过期或失败的返回 ErrConflict。
+func (l *Lingo) CancelPendingAction(ctx context.Context, u User, conversationID, actionID int64) (ActionResult, error) {
+	r, err := l.assistant.Cancel(ctx, l.principal(u), conversationID, actionID)
+	if err != nil {
+		return ActionResult{}, assistantErr(err)
+	}
+	return publicActionResult(r), nil
+}
+
+func assistantErr(err error) error {
+	if errors.Is(err, assistant.ErrNoModel) {
+		return ErrNoModel
+	}
+	return publicErr(err)
+}
+
+func publicConversation(c *assistant.Conversation) Conversation {
+	return Conversation{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, LastActiveAt: c.LastActiveAt, Cursor: c.Seq}
+}
+
+func publicMessage(m *assistant.Message) ConversationMessage {
+	out := ConversationMessage{ID: m.ID, ConversationID: m.ConversationID, Role: m.Role, Content: m.Content, Status: m.Status,
+		Error: m.Error, ReplyTo: m.ReplyTo, Citations: publicCitations(m.Citations), CreatedAt: m.CreatedAt}
+	if m.Action != nil {
+		a := publicAction(m.Action)
+		out.PendingAction = &a
+	}
+	return out
+}
+
+func publicCitations(c assistant.Citations) Citations {
+	out := Citations{Tickets: []TicketCitation{}, Releases: []ReleaseCitation{}}
+	for _, t := range c.Tickets {
+		out.Tickets = append(out.Tickets, TicketCitation(t))
+	}
+	for _, r := range c.Releases {
+		out.Releases = append(out.Releases, ReleaseCitation{ID: r.ID, ProjectKey: r.Project, Repo: r.Repo, Tag: r.Tag,
+			PublishedAt: r.PublishedAt, URL: r.URL})
+	}
+	return out
+}
+
+func publicAction(a *assistant.Action) PendingAction {
+	return PendingAction{ID: a.ID, ConversationID: a.ConversationID, Kind: a.Kind, Summary: a.Summary, Payload: a.Payload,
+		Status: a.Status, ExpiresAt: a.ExpiresAt, ResolvedAt: a.ResolvedAt}
+}
+
+func publicActionResult(r *assistant.ActionResult) ActionResult {
+	out := ActionResult{Action: publicAction(r.Action)}
+	if r.Message != nil {
+		m := publicMessage(r.Message)
+		out.Message = &m
+	}
+	if c := r.Comment; c != nil {
+		out.Comment = &Comment{ID: c.ID, Source: c.Source, AuthorID: c.AuthorID, AuthorName: c.AuthorName, Body: c.Body,
+			Public: c.Public, At: c.At}
+	}
+	return out
+}
+
+// newAssistant 装配知识问答：意图解析与确认判断用 LightModel（为空用 Model），组织回答用 Model；
+// 未配置 Model 时发送返回 ErrNoModel。
+func (l *Lingo) newAssistant() (*assistant.Service, error) {
+	o := assistant.Options{
+		Store:       l.store,
+		Tickets:     l.tickets,
+		Releases:    l.releases,
+		TicketsByID: l.store.GetMany,
+		IssueURL:    l.issueURL,
+		Projects: func(p auth.Principal) []assistant.ProjectInfo {
+			var out []assistant.ProjectInfo
+			for _, pr := range l.cfg.Projects {
+				if !p.InProject(pr.Key) {
+					continue
+				}
+				info := assistant.ProjectInfo{Key: pr.Key, Name: pr.Name}
+				for _, r := range pr.Repos {
+					info.Repos = append(info.Repos, r.Owner+"/"+r.Name)
+				}
+				out = append(out, info)
+			}
+			return out
+		},
+		ProjectOfRepo: func(repo string) string {
+			for _, pr := range l.cfg.Projects {
+				for _, r := range pr.Repos {
+					if strings.EqualFold(r.Owner+"/"+r.Name, repo) {
+						return pr.Key
+					}
+				}
+			}
+			return ""
+		},
+	}
+	if main := l.cfg.Model; !isNil(main) {
+		light := l.cfg.LightModel
+		if isNil(light) {
+			light = main
+		}
+		o.Brain = &llm.Assistant{Light: chatOf(light), Main: chatOf(main), MainStream: streamOf(main), Record: l.recordUsage}
+	}
+	s, err := assistant.New(o)
+	if err != nil {
+		return nil, fmt.Errorf("lingo: %w", err)
+	}
+	return s, nil
+}
+
+// recordUsage 记录知识问答的模型用量（写库失败只记日志）。
+func (l *Lingo) recordUsage(ctx context.Context, kind string, u llm.Usage, ok bool, latency time.Duration) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := l.store.RecordLLMUsage(rctx, store.LLMUsage{Kind: kind, Model: u.Model, Input: u.Input, Output: u.Output,
+		Cached: u.Cached, OK: ok, Latency: latency}); err != nil {
+		l.log.Warn("lingo: record llm usage failed", "err", err)
+	}
+}

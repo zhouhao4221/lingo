@@ -29,6 +29,8 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 ## 业务流
 
 1. **提问**：用户经宿主应用（Go 方法或 REST）或 MCP 向灵工提问（指定项目，可选仓库），创建问答会话。
+   首期（REQ-003）只回答工单与版本问题：模型把提问解析为查询意图，灵工按调用者权限查询工单与版本记录，
+   模型依据查询结果组织回答并附引用；对话中给工单留言须用户确认。
 2. **问答**：问答 Agent 检索知识库，结合 `Model` 生成回答并附来源；无可靠依据时不编造。
    涉及用户本人业务数据时，调用接入方注册的 `Tool`：灵工预校验 `User.Scopes`，`Tool.Call` 内业务侧二次校验，
    结果仅用于本次会话，操作类工具需用户确认，全部写审计。
@@ -52,9 +54,9 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 | 目录 | 职责 |
 | --- | --- |
 | 根包 `lingo` | 公开 API：`Config`、扩展点接口、`New`、Handler、`Run`、`Migrate` |
-| `internal/assistant` | 知识问答 Agent：会话、检索增强回答、追问、转工单 |
-| `internal/llm` | 经 `lingo.Model` 的对话与向量调用封装 |
-| `internal/mcp` | MCP Server：工具定义（list_projects、ask、search_knowledge、create_ticket、get_ticket、reply_ticket、add_perspective、list_perspectives、list_releases、get_release） |
+| `internal/assistant` | 知识问答 Agent：会话（本人可见）、意图到工单 / 版本查询、附引用的回答、待确认操作（本期：留言）；检索增强回答、转工单待实现 |
+| `internal/llm` | 经 `lingo.Model` 的对话与向量调用封装：建单整理、问答的意图解析 / 确认判断 / 组织回答，OpenAI 兼容接口（含流式） |
+| `internal/mcp` | MCP Server：工具定义（list_projects、ask、list_conversations、confirm_action、search_knowledge（待实现）、create_ticket、get_ticket、reply_ticket、add_perspective、list_perspectives、list_releases、get_release） |
 | `internal/project` | 项目与仓库：同步声明、仓库归属与类型、默认仓库、Issue 落库仓库判定 |
 | `internal/auth` | 调用 `Authenticate`，按固定角色与项目范围鉴权 |
 | `internal/ticket` | 工单领域与状态机 |
