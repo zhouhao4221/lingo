@@ -31,7 +31,7 @@ const (
 // DuplicateRatio 是"可能重复"的阈值：新条目的检索词中与已生效条目重合的比例不低于它时标记。未答上的提问归并用同一阈值。
 const DuplicateRatio = 0.6
 
-// MinMatchRatio 是检索时条目至少要命中的检索词比例。
+// MinMatchRatio 是检索时的最低重合比例（相对提问与条目中词数较少的一方）。
 const MinMatchRatio = 0.2
 
 // MissRetention 是未答上提问的保留期。
@@ -142,10 +142,8 @@ type Store interface {
 	TransitionKnowledge(ctx context.Context, id int64, from, to string, d *Draft, tokens []string, by string) error
 	// SimilarKnowledge 返回项目内已生效条目中与 tokens 重合比例（重合词数 / len(tokens)）最高的一条及其比例。
 	SimilarKnowledge(ctx context.Context, project string, tokens []string) (int64, float64, error)
-	// AddKnowledgeFeedback 给条目累加有帮助 / 没帮助次数（可为负，结果不小于 0）。
-	AddKnowledgeFeedback(ctx context.Context, ids []int64, helpful, unhelpful int) error
-	// RecordKnowledgeMiss 记录未答上的提问：90 天内有项目相交、重合比例不低于 ratio 的记录时次数加一，否则新增。
-	RecordKnowledgeMiss(ctx context.Context, projects []string, question string, tokens []string, ratio float64, since time.Time) error
+	// RecordKnowledgeMiss 记录项目内未答上的提问：90 天内同项目有重合比例不低于 ratio 的记录时次数加一，否则新增。
+	RecordKnowledgeMiss(ctx context.Context, project, question string, tokens []string, ratio float64, since time.Time) error
 	ListKnowledgeMisses(ctx context.Context, q MissQuery) ([]Miss, error)
 	PurgeKnowledgeMisses(ctx context.Context, before time.Time) (int, error)
 	// ClaimKnowledgeExtractions 登记新结案的工单并领取一批待抽取的工单（加租约）。
@@ -154,12 +152,12 @@ type Store interface {
 	// 否则 retryAt 后再领取。
 	FinishKnowledgeExtraction(ctx context.Context, ticketID int64, status, errMsg string, maxAttempts int, retryAt time.Time) error
 	DeleteKnowledge(ctx context.Context, id int64) error
-	// DisableKnowledgeByTicket 停用项目 projects 内来源为该工单的条目，返回停用条数。
+	// DisableKnowledgeByTicket 停用项目 projects 内来源为该工单的已生效条目、驳回其待审核候选，返回处理条数。
 	DisableKnowledgeByTicket(ctx context.Context, ticketID int64, projects []string, by string) (int, error)
 	ListKnowledge(ctx context.Context, q ListQuery) ([]*Entry, error)
-	// SearchKnowledgeTokens 返回已生效、在 projects（及 project，非空时）内、与 tokens 重合不少于 minOverlap 个词的条目，
-	// 按重合度降序。
-	SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minOverlap, limit int) ([]Hit, error)
+	// SearchKnowledgeTokens 返回已生效、在 projects（及 project，非空时）内的条目：重合词数不少于 len(tokens) 与条目词数
+	// 中较小者的 minRatio（向上取整，至少 1），按重合度降序。
+	SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int) ([]Hit, error)
 	// SearchKnowledgeWords 关键词兜底：问题或答案包含任一片段（不区分大小写）。
 	SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int) ([]Hit, error)
 	// KnowledgeEmbeddings 返回 ids 中向量模型为 model 的条目向量。
@@ -334,12 +332,16 @@ func (s *Service) Update(ctx context.Context, p auth.Principal, id int64, d Draf
 
 // SetStatus 停用或恢复条目（reviewer / admin）。
 func (s *Service) SetStatus(ctx context.Context, p auth.Principal, id int64, active bool) (*Entry, error) {
-	if _, err := s.get(ctx, p, id); err != nil {
+	e, err := s.get(ctx, p, id)
+	if err != nil {
 		return nil, err
 	}
 	from, to := StatusActive, StatusDisabled
 	if active {
 		from, to = StatusDisabled, StatusActive
+	}
+	if e.Status == to {
+		return e, nil // 幂等：已是目标状态
 	}
 	if err := s.o.Store.TransitionKnowledge(ctx, id, from, to, nil, nil, p.ID); err != nil {
 		return nil, err
@@ -431,9 +433,9 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, project, query s
 	if len(toks) == 0 {
 		return nil, nil
 	}
-	// 至少命中检索词的 MinMatchRatio：只因"怎么""为什么"等常用词重合的条目不算相关
-	minOverlap := max(1, int(math.Ceil(MinMatchRatio*float64(len(toks)))))
-	hits, err := s.o.Store.SearchKnowledgeTokens(ctx, p.Projects, project, toks, minOverlap, rerankPool)
+	// 重合词数至少为提问与条目中词数较少一方的 MinMatchRatio：只因"怎么""为什么"等常用词重合的条目不算相关，长问题
+	// 也能找到短条目
+	hits, err := s.o.Store.SearchKnowledgeTokens(ctx, p.Projects, project, toks, MinMatchRatio, rerankPool)
 	if err != nil {
 		return nil, err
 	}

@@ -45,8 +45,8 @@ type KnowledgeEntry struct {
 	Score          float64   `json:"score,omitempty"` // 检索得分（只在检索结果中）
 	// 以下只在维护接口返回：可能重复的已生效条目（入库时检出）、引用该条目的回答被标为有帮助 / 没帮助的次数
 	DuplicateOf    int64 `json:"duplicate_of,omitempty"`
-	HelpfulCount   int64 `json:"helpful_count"`
-	UnhelpfulCount int64 `json:"unhelpful_count"`
+	HelpfulCount   int64 `json:"helpful_count,omitempty"`
+	UnhelpfulCount int64 `json:"unhelpful_count,omitempty"`
 }
 
 // UnansweredQuestion 是知识类问题没有命中的提问（脱敏），近 90 天内同类提问归并计数。
@@ -360,7 +360,20 @@ func (l *Lingo) embedKnowledge(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
-		for i := 0; i < 10 && ctx.Err() == nil; i++ {
+		for i := 0; i < 20 && ctx.Err() == nil; i++ { // 每轮最多 20 批，避免长时间占用
+			n, err := l.knowledge.EmbedPending(ctx)
+			if err != nil {
+				if !errors.Is(err, llm.ErrNoEmbedding) && ctx.Err() == nil {
+					l.log.Warn("lingo: embed knowledge failed", "err", err)
+				}
+				break
+			}
+			if n == 0 {
+				break
+			}
+		}
+		// 向量在前：新建、编辑的条目尽快可用；抽取每轮最多 5 张（每次领取一张），避免长时间占用
+		for i := 0; i < 5 && ctx.Err() == nil; i++ {
 			n, err := l.knowledge.ExtractPending(ctx)
 			if err != nil {
 				if ctx.Err() == nil {
@@ -374,18 +387,6 @@ func (l *Lingo) embedKnowledge(ctx context.Context) {
 		}
 		if _, err := l.knowledge.PurgeMisses(ctx); err != nil && ctx.Err() == nil {
 			l.log.Warn("lingo: purge unanswered questions failed", "err", err)
-		}
-		for i := 0; i < 20 && ctx.Err() == nil; i++ { // 每轮最多 20 批，避免长时间占用
-			n, err := l.knowledge.EmbedPending(ctx)
-			if err != nil {
-				if !errors.Is(err, llm.ErrNoEmbedding) && ctx.Err() == nil {
-					l.log.Warn("lingo: embed knowledge failed", "err", err)
-				}
-				break
-			}
-			if n == 0 {
-				break
-			}
 		}
 		select {
 		case <-ctx.Done():

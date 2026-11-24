@@ -179,32 +179,35 @@ func (s *Service) Rate(ctx context.Context, p auth.Principal, conversationID, me
 				return err
 			}
 		}
-		prev, err = tx.SetFeedback(ctx, m.ID, p.ID, helpful)
-		return err
+		if prev, err = tx.SetFeedback(ctx, m.ID, p.ID, helpful); err != nil {
+			return err
+		}
+		// 计数与反馈同一事务：计数失败时反馈也不保存，重试会重新计算差值
+		h, u := 0, 0
+		switch {
+		case prev == nil && helpful:
+			h = 1
+		case prev == nil:
+			u = 1
+		case *prev != helpful && helpful:
+			h, u = 1, -1
+		case *prev != helpful:
+			h, u = -1, 1
+		}
+		var ids []int64
+		for _, k := range m.Citations.Knowledge {
+			ids = append(ids, k.ID)
+		}
+		if len(ids) == 0 || (h == 0 && u == 0) {
+			return nil
+		}
+		return tx.AddKnowledgeFeedback(ctx, ids, h, u)
 	})
 	if err != nil {
 		return err
 	}
 	if s.o.Knowledge == nil {
 		return nil
-	}
-	h, u := 0, 0
-	switch {
-	case prev == nil && helpful:
-		h = 1
-	case prev == nil:
-		u = 1
-	case *prev != helpful && helpful:
-		h, u = 1, -1
-	case *prev != helpful:
-		h, u = -1, 1
-	}
-	var ids []int64
-	for _, k := range m.Citations.Knowledge {
-		ids = append(ids, k.ID)
-	}
-	if err := s.o.Knowledge.Feedback(ctx, ids, h, u); err != nil {
-		return err
 	}
 	if !helpful || m.Intent != IntentKnowledgeAsk || m.Outcome != OutcomeAnswered || q == nil {
 		return nil // 只有知识类问题的回答进入候选；其他反馈只记录

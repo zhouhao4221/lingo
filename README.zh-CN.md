@@ -183,8 +183,8 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
   - Bug / 需求工单首次进入已发布、已上线或已关闭（未修复）后，`Run` 用轻量模型抽取一条问答，**待审核**；每张工单最多抽取一次，未配置模型时不抽取。**升级到本版本时已结案的工单不抽取**。
   - 用户对回答反馈有帮助 / 没帮助（`RateMessage`，REST `POST /conversations/{id}/messages/{mid}/feedback`，MCP `rate_message`）：回答引用的条目累加次数；知识类问题的回答第一次被标为有帮助时，提问与回答（去掉工单号、知识编号并脱敏）作为**待审核**候选入库。
   - 审核（reviewer / admin）：`ListKnowledge`（`Status: KnowledgePending`）列出待审核条目，`ApproveKnowledge`（可带编辑后的内容）/ `RejectKnowledge`；入库时与已生效条目重合比例不低于 60% 的标出 `duplicate_of`，只提示不合并。待审核、已驳回的条目不参与检索与回答。
-  - 未答上的问题：知识类问题没有命中时记录脱敏后的提问，近 90 天同类提问归并计数，`ListUnansweredQuestions`（REST `GET /knowledge/unanswered`）按次数列出，供补充知识。
-- 检索只返回至少命中 20% 检索词的条目，避免只因“怎么”“为什么”等常用词命中无关内容。
+  - 未答上的问题：知识类问题没有命中时，在提问人可访问的项目里各记录一条脱敏后的提问，近 90 天同项目的同类提问归并计数，`ListUnansweredQuestions`（REST `GET /knowledge/unanswered`）按次数列出，供补充知识。
+- 检索只返回重合词数不少于提问与条目中词数较少一方 20% 的条目，避免只因“怎么”“为什么”等常用词命中无关内容。
 - 用量：作答记为 `knowledge_answer`，生成向量记为 `knowledge_embed`（只记次数），抽取记为 `knowledge_extract`。需要迁移 `0005_knowledge.sql`、`0006_knowledge_review.sql`。
 
 ### 连接配置（存数据库）

@@ -230,22 +230,36 @@ func (x assistantTx) GetMessage(ctx context.Context, conversationID, id int64) (
 		WHERE m.id = $1 AND m.conversation_id = $2`, id, conversationID))
 }
 
-// SetFeedback 实现 assistant.Tx：写入（覆盖）反馈，返回之前的值。
+// SetFeedback 实现 assistant.Tx：写入（覆盖）反馈，返回之前的值。先插入（并发的首次反馈只有一个插入成功），已存在时
+// 锁定该行再读旧值，避免两个请求都读到"没有反馈"。
 func (x assistantTx) SetFeedback(ctx context.Context, messageID int64, userID string, helpful bool) (*bool, error) {
-	var prev sql.NullBool
-	if err := x.tx.QueryRowContext(ctx, "SELECT helpful FROM lingo_assistant_feedback WHERE message_id = $1 FOR UPDATE",
-		messageID).Scan(&prev); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-	if _, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_assistant_feedback (message_id, user_id, helpful) VALUES ($1, $2, $3)
-		ON CONFLICT (message_id) DO UPDATE SET helpful = EXCLUDED.helpful, user_id = EXCLUDED.user_id, updated_at = now()`,
-		messageID, userID, helpful); err != nil {
+	res, err := x.tx.ExecContext(ctx, `INSERT INTO lingo_assistant_feedback (message_id, user_id, helpful) VALUES ($1, $2, $3)
+		ON CONFLICT (message_id) DO NOTHING`, messageID, userID, helpful)
+	if err != nil {
 		return nil, fmt.Errorf("store: set feedback: %w", err)
 	}
-	if !prev.Valid {
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, err
+	} else if n == 1 {
 		return nil, nil
 	}
-	return &prev.Bool, nil
+	var prev bool
+	if err := x.tx.QueryRowContext(ctx, "SELECT helpful FROM lingo_assistant_feedback WHERE message_id = $1 FOR UPDATE",
+		messageID).Scan(&prev); err != nil {
+		return nil, err
+	}
+	if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_assistant_feedback SET helpful = $2, user_id = $3, updated_at = now()
+		WHERE message_id = $1`, messageID, helpful, userID); err != nil {
+		return nil, fmt.Errorf("store: set feedback: %w", err)
+	}
+	return &prev, nil
+}
+
+// AddKnowledgeFeedback 实现 assistant.Tx：给条目累加有帮助 / 没帮助次数（可为负，结果不小于 0）。
+func (x assistantTx) AddKnowledgeFeedback(ctx context.Context, ids []int64, helpful, unhelpful int) error {
+	_, err := x.tx.ExecContext(ctx, `UPDATE lingo_knowledge SET helpful_count = GREATEST(helpful_count + $2, 0),
+		unhelpful_count = GREATEST(unhelpful_count + $3, 0) WHERE id = ANY(($1::text)::bigint[])`, textArrayInt(ids), helpful, unhelpful)
+	return err
 }
 
 func (x assistantTx) LastUserMessageID(ctx context.Context, conversationID int64) (int64, error) {

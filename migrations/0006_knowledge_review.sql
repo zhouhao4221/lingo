@@ -12,6 +12,8 @@ ALTER TABLE lingo_knowledge
     ADD COLUMN helpful_count     bigint NOT NULL DEFAULT 0,  -- 引用该条目的回答被标为"有帮助"的次数
     ADD COLUMN unhelpful_count   bigint NOT NULL DEFAULT 0;
 CREATE UNIQUE INDEX lingo_knowledge_source_message_idx ON lingo_knowledge (source_message_id) WHERE source_message_id IS NOT NULL;
+-- 每张工单最多一条抽取候选（多实例下的兜底）
+CREATE UNIQUE INDEX lingo_knowledge_extract_ticket_idx ON lingo_knowledge (source_ticket_id) WHERE source = 'ticket_extract';
 CREATE INDEX lingo_knowledge_pending_idx ON lingo_knowledge (project_id, id) WHERE status = 'pending';
 
 -- 问答回答的反馈：每条助手消息一行，以最后一次为准
@@ -38,15 +40,15 @@ CREATE INDEX lingo_knowledge_extractions_pending_idx ON lingo_knowledge_extracti
 INSERT INTO lingo_knowledge_extractions (ticket_id, status)
 SELECT id, 'skipped' FROM lingo_tickets WHERE type IN ('bug', 'feature') AND status IN ('released', 'deployed', 'closed');
 
--- 知识类问题没有命中的提问（脱敏），按切词重合度归并计数，保留 90 天
+-- 知识类问题没有命中的提问（脱敏），按项目分别记录、按切词重合度归并计数，保留 90 天
 CREATE TABLE lingo_knowledge_misses (
-    id         bigserial PRIMARY KEY,
-    projects   text[]      NOT NULL DEFAULT '{}', -- 提问人当时可访问的项目
-    question   text        NOT NULL,
+    id          bigserial PRIMARY KEY,
+    project_key text        NOT NULL,             -- 提问人可访问的项目（每个项目一行，只对该项目的 reviewer 可见）
+    question    text        NOT NULL,
     tokens     text[]      NOT NULL DEFAULT '{}',
     hits       integer     NOT NULL DEFAULT 1,
     first_at   timestamptz NOT NULL DEFAULT now(),
     last_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX lingo_knowledge_misses_tokens_idx ON lingo_knowledge_misses USING gin (tokens);
-CREATE INDEX lingo_knowledge_misses_last_idx ON lingo_knowledge_misses (last_at);
+CREATE INDEX lingo_knowledge_misses_project_idx ON lingo_knowledge_misses (project_key, last_at);

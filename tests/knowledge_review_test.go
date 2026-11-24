@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,13 +91,41 @@ func TestKnowledgeExtractAndReview(t *testing.T) {
 	if _, err := l.DisableKnowledge(ctx, rita, pend[0].ID); err != nil && !errors.Is(err, lingo.ErrConflict) {
 		t.Errorf("disable rejected: %v", err)
 	}
+	// 停用 / 恢复幂等
+	for range 2 {
+		if e, err := l.DisableKnowledge(ctx, rita, existing.ID); err != nil || e.Status != lingo.KnowledgeDisabled {
+			t.Errorf("disable twice: %+v %v", e, err)
+		}
+	}
+	for range 2 {
+		if e, err := l.EnableKnowledge(ctx, rita, existing.ID); err != nil || e.Status != lingo.KnowledgeActive {
+			t.Errorf("enable twice: %+v %v", e, err)
+		}
+	}
+	// 长问题也能找到短条目
+	long := "我们公司的财务同事每个月底都要导出报表为空的情况已经出现好几次了，换了浏览器也一样，请问到底应该怎么处理才好"
+	if got, _ := l.SearchKnowledge(ctx, alice, long, "", 0); !slices.Contains(knowledgeIDs(got), existing.ID) {
+		t.Errorf("long question misses short entry: %v", knowledgeIDs(got))
+	}
+	// 按来源工单停用：已生效的停用，待审核的驳回
+	t5 := seedTicketRow(t, db, "u1", "", "api", "bug", "x", "in_progress", 0)
+	if _, err := db.Exec(`INSERT INTO lingo_knowledge (project_id, question, answer, source, source_ticket_id, status)
+		SELECT id, 'q', 'a', 'ticket_extract', $1, 'pending' FROM lingo_projects WHERE key = 'demo'`, t5); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := l.DisableKnowledgeByTicket(ctx, rita, t5); err != nil || n != 1 {
+		t.Errorf("disable by ticket = %d %v", n, err)
+	}
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge WHERE source_ticket_id = $1 AND status = 'rejected'", t5); n != 1 {
+		t.Errorf("pending candidate not rejected")
+	}
 	// 每张工单只抽取一次
 	runCtx, cancel = context.WithCancel(ctx)
 	go func() { done <- l.Run(runCtx) }()
 	time.Sleep(500 * time.Millisecond)
 	cancel()
 	<-done
-	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge WHERE source = 'ticket_extract'"); n != 2 {
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge WHERE source = 'ticket_extract' AND source_ticket_id <> $1", t5); n != 2 {
 		t.Errorf("extracted again: %d", n)
 	}
 	if n := countRows(t, db, "SELECT count(*) FROM lingo_llm_usage WHERE kind = 'knowledge_extract'"); n != 2 {
@@ -127,9 +157,16 @@ func TestKnowledgeFeedbackCommentsAndMisses(t *testing.T) {
 	m.intents = []string{`{"intent":"knowledge_ask","keywords":["SSO"]}`}
 	ans := send(t, l, bob, conv.ID, "SSO 怎么配置")
 
-	if err := l.RateMessage(ctx, bob, conv.ID, ans.ID, true); err != nil {
-		t.Fatal(err)
+	// 并发的首次反馈只计一次
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = l.RateMessage(ctx, bob, conv.ID, ans.ID, true)
+		}()
 	}
+	wg.Wait()
 	cands, _ := l.ListKnowledge(ctx, rita, lingo.KnowledgeFilter{Status: lingo.KnowledgePending})
 	if len(cands) != 1 || cands[0].Source != lingo.KnowledgeSourceAssistantFeedback || cands[0].Question != "SSO 怎么配置" ||
 		strings.Contains(cands[0].Answer, "K") || strings.Contains(cands[0].Answer, "#7") || cands[0].DuplicateOf != k.ID {
@@ -213,6 +250,10 @@ func TestKnowledgeFeedbackCommentsAndMisses(t *testing.T) {
 	m.answer = func(string) string { return "好的" }
 	bobDemo := bob
 	bobDemo.Projects = []string{"demo"} // 只能访问 demo：未答上记录只归 demo
+	// 只因"怎么"重合的条目不算命中
+	if got, _ := l.SearchKnowledge(ctx, bobDemo, "电子签章怎么开通", "", 0); len(got) > 0 {
+		t.Errorf("common-word hits: %v", knowledgeIDs(got))
+	}
 	for _, q := range []string{"电子签章怎么开通", "电子签章怎么开通呢", "如何申请发票"} {
 		m.intents = []string{`{"intent":"knowledge_ask","keywords":[]}`}
 		send(t, l, bobDemo, conv.ID, q)
@@ -229,7 +270,25 @@ func TestKnowledgeFeedbackCommentsAndMisses(t *testing.T) {
 	if qs, _ := l.ListUnansweredQuestions(ctx, other, lingo.UnansweredFilter{}); len(qs) != 0 {
 		t.Errorf("other project sees misses: %+v", qs)
 	}
-	if _, err := db.Exec("UPDATE lingo_knowledge_misses SET last_at = now() - interval '91 days' WHERE hits = 1"); err != nil {
+	// 模型给出提问人无权访问的项目：不记到该项目
+	m.intents = []string{`{"intent":"knowledge_ask","project":"other","keywords":[]}`}
+	send(t, l, bobDemo, conv.ID, "报销单怎么填写")
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge_misses WHERE project_key = 'other'"); n != 0 {
+		t.Errorf("miss recorded under inaccessible project")
+	}
+	// 按项目分别记录：可访问 demo 与 other 的用户的提问各记一行，不合并到只属于 demo 的记录的可见范围
+	m.intents = []string{`{"intent":"knowledge_ask","keywords":[]}`}
+	send(t, l, bob, conv.ID, "电子签章怎么开通")
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge_misses WHERE project_key = 'other' AND question = '电子签章怎么开通'"); n != 1 {
+		t.Errorf("per-project miss = %d", n)
+	}
+	if qs, _ := l.ListUnansweredQuestions(ctx, other, lingo.UnansweredFilter{}); len(qs) != 1 || qs[0].Hits != 1 {
+		t.Errorf("other reviewer sees = %+v", qs)
+	}
+	if _, err := db.Exec("DELETE FROM lingo_knowledge_misses WHERE project_key = 'other' OR question = '报销单怎么填写'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE lingo_knowledge_misses SET last_at = now() - interval '91 days' WHERE hits = 1 AND question <> '电子签章怎么开通'"); err != nil {
 		t.Fatal(err)
 	}
 	if qs, _ := l.ListUnansweredQuestions(ctx, rita, lingo.UnansweredFilter{}); len(qs) != 1 {
@@ -245,7 +304,7 @@ func TestKnowledgeReviewMigrationIncremental(t *testing.T) {
 	db := testDB(t, true)
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, `DROP TABLE lingo_knowledge_misses, lingo_knowledge_extractions, lingo_assistant_feedback;
-		DROP INDEX lingo_knowledge_pending_idx;
+		DROP INDEX lingo_knowledge_pending_idx, lingo_knowledge_extract_ticket_idx;
 		ALTER TABLE lingo_knowledge DROP COLUMN source_message_id, DROP COLUMN duplicate_of, DROP COLUMN helpful_count, DROP COLUMN unhelpful_count;
 		ALTER TABLE lingo_knowledge DROP CONSTRAINT lingo_knowledge_status_check, DROP CONSTRAINT lingo_knowledge_source_check;
 		ALTER TABLE lingo_knowledge ADD CONSTRAINT lingo_knowledge_status_check CHECK (status IN ('active', 'disabled')),
@@ -301,7 +360,7 @@ func TestKnowledgeExtractRetryNoModelAndPurge(t *testing.T) {
 	m := &scriptModel{fail: 1, answer: func(string) string { return extractJSON }}
 	l, db := newAssistantLingo(t, m)
 	tk := seedTicketRow(t, db, "u1", "", "api", "bug", "导出报表为空", "deployed", 9)
-	if _, err := db.Exec(`INSERT INTO lingo_knowledge_misses (projects, question, tokens, last_at) VALUES ('{demo}', '旧问题', '{旧问}', now() - interval '91 days')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO lingo_knowledge_misses (project_key, question, tokens, last_at) VALUES ('demo', '旧问题', '{旧问}', now() - interval '91 days')`); err != nil {
 		t.Fatal(err)
 	}
 	runFor(l, 10*time.Second, func() bool {

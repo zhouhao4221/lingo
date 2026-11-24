@@ -68,11 +68,12 @@ func insertKnowledge(ctx context.Context, q sqlRunner, e knowledge.NewEntry) (in
 	err = q.QueryRowContext(ctx, `INSERT INTO lingo_knowledge (project_id, repo_id, question, answer, source, source_ticket_id,
 		search_tokens, created_by, updated_by, status, source_message_id, duplicate_of)
 		VALUES ($1, $2, $3, $4, $5, $6, ($7::text)::text[], $8, $8, $9, $10, $11)
-		ON CONFLICT (source_message_id) WHERE source_message_id IS NOT NULL DO NOTHING RETURNING id`,
+		ON CONFLICT DO NOTHING RETURNING id`,
 		pid, rid, e.Question, e.Answer, e.Source, nullInt64(e.SourceTicketID), textArray(e.Tokens), e.By, status,
 		nullInt64(e.SourceMessageID), nullInt64(e.DuplicateOf)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("%w: knowledge for message %d already exists", ticket.ErrConflict, e.SourceMessageID)
+		// 同一回答（source_message_id）或同一工单的抽取候选已存在
+		return 0, fmt.Errorf("%w: knowledge from this source already exists", ticket.ErrConflict)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("store: insert knowledge: %w", err)
@@ -163,8 +164,10 @@ func (s *Store) DeleteKnowledge(ctx context.Context, id int64) error {
 
 // DisableKnowledgeByTicket 实现 knowledge.Store。
 func (s *Store) DisableKnowledgeByTicket(ctx context.Context, ticketID int64, projects []string, by string) (int, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE lingo_knowledge k SET status = 'disabled', updated_by = $3, updated_at = now()
-		FROM lingo_projects p WHERE p.id = k.project_id AND k.source_ticket_id = $1 AND k.status = 'active'
+	// 已生效的停用，待审核的候选驳回（避免之后被审核通过）
+	res, err := s.db.ExecContext(ctx, `UPDATE lingo_knowledge k
+		SET status = CASE k.status WHEN 'active' THEN 'disabled' ELSE 'rejected' END, updated_by = $3, updated_at = now()
+		FROM lingo_projects p WHERE p.id = k.project_id AND k.source_ticket_id = $1 AND k.status IN ('active', 'pending')
 		AND p.key = ANY(($2::text)::text[])`, ticketID, textArray(projects), by)
 	if err != nil {
 		return 0, err
@@ -202,15 +205,16 @@ func (s *Store) knowledgeHits(ctx context.Context, query string, args ...any) ([
 	return out, rows.Err()
 }
 
-// SearchKnowledgeTokens 实现 knowledge.Store：重合词数不少于 minOverlap 的条目，按重合度 = 重合词数 / sqrt(条目词数)
-// 降序，同分时新的在前。
-func (s *Store) SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minOverlap, limit int) ([]knowledge.Hit, error) {
+// SearchKnowledgeTokens 实现 knowledge.Store：重合词数不少于 min(提问词数, 条目词数) × minRatio 的条目，按重合度 =
+// 重合词数 / sqrt(条目词数) 降序，同分时新的在前。
+func (s *Store) SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int) ([]knowledge.Hit, error) {
 	return s.knowledgeHits(ctx, "SELECT "+knowledgeColumns+`, o.n::float8 / sqrt(GREATEST(cardinality(k.search_tokens), 1)) AS score`+
 		knowledgeFrom+`
 		CROSS JOIN LATERAL (SELECT count(*) AS n FROM unnest(k.search_tokens) t WHERE t = ANY(($3::text)::text[])) o
-		WHERE k.status = 'active' AND k.search_tokens && ($3::text)::text[] AND o.n >= $5
+		WHERE k.status = 'active' AND k.search_tokens && ($3::text)::text[]
+		  AND o.n >= GREATEST(1, ceil($5::float8 * LEAST($6::int, cardinality(k.search_tokens))))
 		  AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
-		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(tokens), limit, minOverlap)
+		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(tokens), limit, minRatio, len(tokens))
 }
 
 // SearchKnowledgeWords 实现 knowledge.Store。
@@ -366,15 +370,8 @@ func (s *Store) SimilarKnowledge(ctx context.Context, project string, tokens []s
 	return id, float64(n) / float64(len(tokens)), nil
 }
 
-// AddKnowledgeFeedback 实现 knowledge.Store。
-func (s *Store) AddKnowledgeFeedback(ctx context.Context, ids []int64, helpful, unhelpful int) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE lingo_knowledge SET helpful_count = GREATEST(helpful_count + $2, 0),
-		unhelpful_count = GREATEST(unhelpful_count + $3, 0) WHERE id = ANY(($1::text)::bigint[])`, textArrayInt(ids), helpful, unhelpful)
-	return err
-}
-
-// RecordKnowledgeMiss 实现 knowledge.Store（同一事务内先锁候选再更新，并发记录不会重复新增同一问题太多次）。
-func (s *Store) RecordKnowledgeMiss(ctx context.Context, projects []string, question string, tokens []string, ratio float64, since time.Time) error {
+// RecordKnowledgeMiss 实现 knowledge.Store（同一事务内先锁候选再更新）。
+func (s *Store) RecordKnowledgeMiss(ctx context.Context, project, question string, tokens []string, ratio float64, since time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -384,15 +381,14 @@ func (s *Store) RecordKnowledgeMiss(ctx context.Context, projects []string, ques
 	var n int
 	err = tx.QueryRowContext(ctx, `SELECT id, (SELECT count(*) FROM unnest(m.tokens) t WHERE t = ANY(($2::text)::text[]))
 		FROM lingo_knowledge_misses m
-		WHERE m.last_at >= $3 AND m.projects && ($1::text)::text[] AND m.tokens && ($2::text)::text[]
-		ORDER BY 2 DESC, m.last_at DESC LIMIT 1 FOR UPDATE`, textArray(projects), textArray(tokens), since).Scan(&id, &n)
+		WHERE m.project_key = $1 AND m.last_at >= $3 AND m.tokens && ($2::text)::text[]
+		ORDER BY 2 DESC, m.last_at DESC LIMIT 1 FOR UPDATE`, project, textArray(tokens), since).Scan(&id, &n)
 	switch {
 	case err == nil && float64(n)/float64(len(tokens)) >= ratio:
-		_, err = tx.ExecContext(ctx, `UPDATE lingo_knowledge_misses SET hits = hits + 1, last_at = now(),
-			projects = ARRAY(SELECT DISTINCT unnest(projects || ($2::text)::text[])) WHERE id = $1`, id, textArray(projects))
+		_, err = tx.ExecContext(ctx, "UPDATE lingo_knowledge_misses SET hits = hits + 1, last_at = now() WHERE id = $1", id)
 	case err == nil || errors.Is(err, sql.ErrNoRows):
-		_, err = tx.ExecContext(ctx, `INSERT INTO lingo_knowledge_misses (projects, question, tokens)
-			VALUES (($1::text)::text[], $2, ($3::text)::text[])`, textArray(projects), question, textArray(tokens))
+		_, err = tx.ExecContext(ctx, `INSERT INTO lingo_knowledge_misses (project_key, question, tokens)
+			VALUES ($1, $2, ($3::text)::text[])`, project, question, textArray(tokens))
 	}
 	if err != nil {
 		return fmt.Errorf("store: record knowledge miss: %w", err)
@@ -403,7 +399,7 @@ func (s *Store) RecordKnowledgeMiss(ctx context.Context, projects []string, ques
 // ListKnowledgeMisses 实现 knowledge.Store。
 func (s *Store) ListKnowledgeMisses(ctx context.Context, q knowledge.MissQuery) ([]knowledge.Miss, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, question, hits, first_at, last_at FROM lingo_knowledge_misses
-		WHERE projects && ($1::text)::text[] AND ($2 = '' OR $2 = ANY(projects)) AND last_at >= $3
+		WHERE project_key = ANY(($1::text)::text[]) AND ($2 = '' OR project_key = $2) AND last_at >= $3
 		ORDER BY hits DESC, last_at DESC, id DESC OFFSET $4 LIMIT $5`, textArray(q.Projects), q.Project, q.Since, q.Offset, q.Limit)
 	if err != nil {
 		return nil, err

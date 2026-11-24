@@ -15,7 +15,7 @@ import (
 
 // 抽取任务参数。
 const (
-	extractBatch       = 4
+	extractBatch       = 1 // 每次领取一张：租约只需覆盖一次模型调用
 	extractLease       = 5 * time.Minute
 	extractMaxAttempts = 3
 	extractRetry       = 10 * time.Minute
@@ -92,14 +92,6 @@ func (s *Service) Suggest(ctx context.Context, d Draft, messageID int64) error {
 // refRe 匹配回答中的工单号（#12）与知识编号（K12），入库前去掉。
 var refRe = regexp.MustCompile(`#\d+|\bK\d+\b`)
 
-// Feedback 给回答引用的条目累加有帮助 / 没帮助次数。
-func (s *Service) Feedback(ctx context.Context, ids []int64, helpful, unhelpful int) error {
-	if len(ids) == 0 || (helpful == 0 && unhelpful == 0) {
-		return nil
-	}
-	return s.o.Store.AddKnowledgeFeedback(ctx, ids, helpful, unhelpful)
-}
-
 // Miss 记录一次知识类问题没有命中（提问脱敏、截断，按项目与切词重合度归并）。
 func (s *Service) Miss(ctx context.Context, p auth.Principal, project, question string) error {
 	q := textutil.ClipEllipsis(Scrub(strings.Join(strings.Fields(question), " ")), maxMissRunes)
@@ -107,11 +99,18 @@ func (s *Service) Miss(ctx context.Context, p auth.Principal, project, question 
 	if q == "" || len(toks) == 0 {
 		return nil
 	}
+	// 按项目分别记录（只记提问人可访问的项目）：同一提问只对这些项目的 reviewer 可见，归并也不跨项目
 	projects := p.Projects
-	if project != "" {
+	if project != "" && p.InProject(project) {
 		projects = []string{project}
 	}
-	return s.o.Store.RecordKnowledgeMiss(ctx, projects, q, toks, DuplicateRatio, s.o.Now().Add(-MissRetention))
+	since := s.o.Now().Add(-MissRetention)
+	for _, pr := range projects {
+		if err := s.o.Store.RecordKnowledgeMiss(ctx, pr, q, toks, DuplicateRatio, since); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListMisses 列出调用者项目内近 90 天未答上的提问（reviewer / admin），次数多的在前。
@@ -189,7 +188,9 @@ func (s *Service) extractOne(ctx context.Context, ex Extractor, id int64) (strin
 	}
 	if _, err := s.o.Store.InsertKnowledge(ctx, NewEntry{ProjectKey: d.ProjectKey, Repo: d.Repo, Question: d.Question, Answer: d.Answer,
 		Source: SourceTicketExtract, SourceTicketID: t.ID, Status: StatusPending, DuplicateOf: dup,
-		Tokens: EntryTokens(d.Question, d.Answer)}); err != nil {
+		Tokens: EntryTokens(d.Question, d.Answer)}); errors.Is(err, ticket.ErrConflict) {
+		return "done", "" // 其他实例已为该工单入库（每张工单只抽取一次）
+	} else if err != nil {
 		if errors.Is(err, ticket.ErrInvalid) { // 仓库已不在项目中：不带仓库再试一次
 			d.Repo = ""
 			_, err = s.o.Store.InsertKnowledge(ctx, NewEntry{ProjectKey: d.ProjectKey, Question: d.Question, Answer: d.Answer,
