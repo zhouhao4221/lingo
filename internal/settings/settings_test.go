@@ -67,6 +67,30 @@ func TestApply(t *testing.T) {
 	if _, _, err := Apply(Overrides{}, base, Patch{Gitea: &GiteaPatch{BaseURL: ptr("https://git.example.com/gitea")}}); err != nil {
 		t.Errorf("same host: %v", err)
 	}
+	// https 改成 http：协议变了也要重填令牌
+	if _, _, err := Apply(Overrides{}, base, Patch{Gitea: &GiteaPatch{BaseURL: ptr("http://git.example.com")}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("scheme downgrade: %v", err)
+	}
+	// 两步绕过：先清空地址（一并清空令牌），再改成别处时已没有令牌可发
+	st1, ch1, err := Apply(Overrides{}, base, Patch{Gitea: &GiteaPatch{BaseURL: ptr("")}})
+	if err != nil || st1.Gitea.Token != "" || !slices.Contains(ch1[CategoryGitea], FieldToken) {
+		t.Fatalf("clear base: %+v %v %v", st1.Gitea, ch1, err)
+	}
+	if st2, _, err := Apply(Overrides{}, st1, Patch{Gitea: &GiteaPatch{BaseURL: ptr("https://evil.example.com")}}); err != nil || st2.Gitea.Token != "" {
+		t.Errorf("after clear: %+v %v", st2.Gitea, err)
+	}
+	// 代码中配置了令牌：清空地址后再改成别处仍要求重填（令牌无法清空），因而被拒
+	ov := Overrides{Gitea: Gitea{Token: "cfg-token"}}
+	stc := Stored{Gitea: Gitea{BaseURL: "https://git.example.com"}}
+	stc2, _, _ := Apply(ov, stc, Patch{Gitea: &GiteaPatch{BaseURL: ptr("")}})
+	if _, _, err := Apply(ov, stc2, Patch{Gitea: &GiteaPatch{BaseURL: ptr("https://evil.example.com")}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("config token to new host: %v", err)
+	}
+	// 模型：清空槽位时一并清空 API Key
+	sm, _, err := Apply(Overrides{}, base, Patch{Main: &SlotPatch{Provider: ptr(""), Model: ptr("")}})
+	if err != nil || sm.Model.Main.APIKey != "" {
+		t.Errorf("clear slot: %+v %v", sm.Model.Main, err)
+	}
 	// DeepSeek 未填模型名时使用默认值
 	st, _, err = Apply(Overrides{}, Stored{}, Patch{Main: &SlotPatch{Provider: ptr(ProviderDeepSeek), APIKey: ptr("k")}})
 	if err != nil || st.Model.Main.Model != DefaultDeepSeekModel {

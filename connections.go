@@ -67,21 +67,22 @@ func (l *Lingo) applySettings(st settings.Stored, force bool) bool {
 		if key == "" {
 			l.gitea.Unconfigure()
 		} else if err := l.gitea.Reconfigure(gitea.Options{BaseURL: g.BaseURL, Token: g.Token, RejectRedirects: g.RejectRedirects}); err != nil {
+			// 新配置不可用：整个 Gitea 部分（地址、密钥、来源、版本）都保留原值，保持一致；版本不前进，下次刷新会重试
 			l.log.Error("lingo: invalid gitea settings, keeping the previous connection", "err", err)
 			key = ""
 			if cur != nil {
 				key = cur.giteaKey
+				eff.Gitea, eff.GiteaSrc, eff.GiteaMeta = cur.eff.Gitea, cur.eff.GiteaSrc, cur.eff.GiteaMeta
+			} else {
+				eff.Gitea, eff.GiteaSrc = settings.Gitea{}, map[string]settings.Source{}
 			}
+			next.eff, g = eff, eff.Gitea
 			giteaChanged = false
 		}
 		next.giteaKey = key
 		if giteaChanged {
 			l.resetBot()
-			for _, name := range l.repoNames() {
-				if owner, repo, ok := cutRepo(name); ok {
-					l.tmpls.Forget(owner, repo)
-				}
-			}
+			l.tmpls.Reset()
 			if cur != nil && (cur.giteaKey == "") != (key == "") {
 				l.log.Info("lingo: gitea connection state changed", "configured", key != "")
 			}
@@ -156,15 +157,6 @@ func boolStr(b bool) string {
 		return "1"
 	}
 	return "0"
-}
-
-func cutRepo(name string) (string, string, bool) {
-	for i := 0; i < len(name); i++ {
-		if name[i] == '/' {
-			return name[:i], name[i+1:], i > 0 && i < len(name)-1
-		}
-	}
-	return "", "", false
 }
 
 // refreshSettings 读取数据库中的配置，版本更高时应用；读取失败（数据库不可用、未执行迁移 0004）保留当前连接。

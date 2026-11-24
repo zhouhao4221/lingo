@@ -59,8 +59,11 @@ func (s *Store) MutateSettings(ctx context.Context, by string, fn func([]setting
 		return nil, err
 	}
 	for cat, content := range changes {
-		if _, err := tx.ExecContext(ctx, `UPDATE lingo_settings SET content = $2, version = version + 1, updated_by = $3, updated_at = now()
-			WHERE category = $1`, string(cat), []byte(content), by); err != nil {
+		// 行缺失（误删、部分恢复）时补建，避免保存"成功"却没有写入
+		if _, err := tx.ExecContext(ctx, `INSERT INTO lingo_settings (category, content, version, updated_by, updated_at)
+			VALUES ($1, $2, 1, $3, now())
+			ON CONFLICT (category) DO UPDATE SET content = EXCLUDED.content, version = lingo_settings.version + 1,
+			    updated_by = EXCLUDED.updated_by, updated_at = now()`, string(cat), []byte(content), by); err != nil {
 			return nil, fmt.Errorf("store: save settings %s: %w", cat, err)
 		}
 	}

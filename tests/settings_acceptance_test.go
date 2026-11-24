@@ -143,6 +143,53 @@ func TestSettingsWebhookSecretSyncedToGitea(t *testing.T) {
 	wait("secret-b") // 保存后补跑自检，同步新密钥
 }
 
+// PR #36 审查：数据库中的 Gitea 配置不可用时，保留原连接与原地址（Issue 链接不变），版本不前进。
+func TestSettingsRejectedGiteaKeepsPrevious(t *testing.T) {
+	db := testDB(t, true)
+	gsrv := httptest.NewServer(&giteaServer{templates: "[]"})
+	t.Cleanup(gsrv.Close)
+	l := newBareLingo(t, db, nil, nil)
+	ctx := context.Background()
+	if _, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{
+		BaseURL: sptr(gsrv.URL), Token: sptr("t")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ListTriage(ctx, rita, lingo.TriageFilter{}); err != nil { // 同步项目入库
+		t.Fatal(err)
+	}
+	id := seedTicketRow(t, db, "u1", "", "api", "bug", "x", "open", 12)
+	before, _ := l.GetTicket(ctx, alice, id)
+	// 绕过接口校验直接写入不可用的地址（如较旧版本保存的值）
+	if _, err := db.Exec(`UPDATE lingo_settings SET content = jsonb_set(content, '{base_url}', '"not a url"'), version = version + 1 WHERE category = 'gitea'`); err != nil {
+		t.Fatal(err)
+	}
+	s, err := l.ConnectionSettings(ctx, admin) // 触发刷新
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := l.GetTicket(ctx, alice, id)
+	if before.IssueURL == "" || after.IssueURL != before.IssueURL {
+		t.Errorf("issue url changed: %q -> %q", before.IssueURL, after.IssueURL)
+	}
+	if !strings.HasPrefix(after.IssueURL, gsrv.URL) || s.Gitea.Version != 2 {
+		t.Errorf("view version = %d, url %q", s.Gitea.Version, after.IssueURL)
+	}
+}
+
+// PR #36 审查：配置行缺失时保存会补建，不会静默丢失。
+func TestSettingsMissingRowRecreated(t *testing.T) {
+	db := testDB(t, true)
+	l := newBareLingo(t, db, nil, nil)
+	ctx := context.Background()
+	if _, err := db.Exec(`DELETE FROM lingo_settings WHERE category = 'gitea'`); err != nil {
+		t.Fatal(err)
+	}
+	s, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{WebhookSecret: sptr("s")}})
+	if err != nil || !s.Gitea.WebhookSecret.Set || s.Gitea.Version != 1 {
+		t.Errorf("recreated = %+v %v", s.Gitea, err)
+	}
+}
+
 // 迁移 0004 能在已执行 0001–0003 的库上增量执行。
 func TestSettingsMigrationIncremental(t *testing.T) {
 	db := testDB(t, true)

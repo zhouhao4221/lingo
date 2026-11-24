@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -98,6 +99,7 @@ type Lingo struct {
 	botMu       sync.Mutex
 	bot         string    // 机器人账号 login，首次成功获取后缓存
 	botFetching bool      // 后台获取进行中
+	botGen      uint64    // 连接代次：Gitea 地址或令牌变化时递增，旧连接上的获取结果丢弃
 	botTried    time.Time // 最近一次发起获取的时间，失败后每分钟最多重试一次
 }
 
@@ -110,10 +112,6 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, errors.New("lingo: Config.Authenticate is required")
 	case len(cfg.Projects) == 0:
 		return nil, errors.New("lingo: at least one Project is required")
-	case cfg.Gitea.AutoRegisterWebhook && cfg.Gitea.WebhookURL == "":
-		return nil, errors.New("lingo: Config.Gitea.WebhookURL is required when AutoRegisterWebhook is set")
-	case cfg.Gitea.AutoRegisterWebhook && cfg.Gitea.WebhookSecret == "":
-		return nil, errors.New("lingo: Config.Gitea.WebhookSecret is required when AutoRegisterWebhook is set")
 	}
 	if err := project.Validate(projectSpecs(cfg.Projects)); err != nil {
 		return nil, fmt.Errorf("lingo: Config.Projects: %w", err)
@@ -129,6 +127,11 @@ func New(cfg Config) (*Lingo, error) {
 	var err error
 	// Gitea 地址与令牌可不在代码中配置（存数据库、经 UpdateConnectionSettings 修改）；代码中给了就先校验
 	l.gitea = gitea.NewUnconfigured()
+	if b := cfg.Gitea.BaseURL; b != "" {
+		if u, err := url.Parse(b); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, errors.New("lingo: Config.Gitea.BaseURL must be an absolute http(s) address")
+		}
+	}
 	if cfg.Gitea.BaseURL != "" && cfg.Gitea.Token != "" {
 		if l.gitea, err = gitea.New(giteaOptions(cfg.Gitea)); err != nil {
 			return nil, fmt.Errorf("lingo: %w", err)
@@ -149,6 +152,10 @@ func New(cfg Config) (*Lingo, error) {
 		l.refreshSettings(ctx)
 		cancel()
 		l.settingsChecked.Store(time.Now().UnixNano())
+	}
+	if (cfg.Gitea.BaseURL == "") != (cfg.Gitea.Token == "") && !l.gitea.Configured() {
+		// 代码中只配了地址或令牌之一（如环境变量拼错），数据库也没有补齐：按未配置运行，明确提示
+		l.log.Warn("lingo: Config.Gitea has only one of BaseURL and Token and the database does not provide the other; running unconfigured")
 	}
 	l.webhook = l.newWebhookHandler()
 	if l.tickets, err = ticket.NewService(ticket.ServiceOptions{
@@ -191,11 +198,12 @@ func (l *Lingo) labelPrefix() string {
 	return "lingo"
 }
 
-// resetBot 清除机器人账号缓存（Gitea 地址或令牌变化后重新获取）。
+// resetBot 清除机器人账号缓存（Gitea 地址或令牌变化后重新获取）：代次递增，进行中的旧获取结果作废。
 func (l *Lingo) resetBot() {
 	l.botMu.Lock()
 	defer l.botMu.Unlock()
-	l.bot, l.botTried = "", time.Time{}
+	l.bot, l.botTried, l.botFetching = "", time.Time{}, false
+	l.botGen++
 }
 
 // chatOf 把 Model 适配为 llm.Chat；实现了 UsageModel 的模型报告用量。
@@ -384,17 +392,20 @@ func (l *Lingo) botLogin() string {
 	defer l.botMu.Unlock()
 	if l.bot == "" && !l.botFetching && time.Since(l.botTried) >= time.Minute {
 		l.botFetching, l.botTried = true, time.Now()
-		go l.fetchBotLogin()
+		go l.fetchBotLogin(l.botGen)
 	}
 	return l.bot
 }
 
-func (l *Lingo) fetchBotLogin() {
+func (l *Lingo) fetchBotLogin(gen uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	u, err := l.gitea.GetCurrentUser(ctx)
 	l.botMu.Lock()
 	defer l.botMu.Unlock()
+	if gen != l.botGen {
+		return // 期间连接已更换：结果属于旧连接，丢弃（新连接的获取由 botLogin 另行发起）
+	}
 	l.botFetching = false
 	if err != nil {
 		l.log.Warn("lingo: fetch Gitea bot account failed, will retry", "err", err)
@@ -403,8 +414,9 @@ func (l *Lingo) fetchBotLogin() {
 	l.bot = u.Login
 }
 
-// WebhookHandler 接收 Gitea Webhook（Issue、评论、PR、Release、提交状态、Actions 运行）：验签、去重后落库
-// 并立即返回，由 Run 中的 worker 处理。未配置 Config.Gitea.WebhookSecret 时拒绝所有投递（503）。
+// WebhookHandler 接收 Gitea Webhook（Issue、评论、PR、Release、提交状态、Actions 运行）：按当前生效的 Webhook 密钥
+// （代码配置或数据库中的连接配置）验签、去重后落库并立即返回，由 Run 中的 worker 处理。Gitea 未配置（地址或令牌为空）
+// 或未设置 Webhook 密钥时拒绝所有投递（503）。
 func (l *Lingo) WebhookHandler() http.Handler { return l.webhook }
 
 // MarkDeployed 告知灵工仓库 repo（"owner/name"）的版本 tag 已在环境 env（为空取 "production"）上线，

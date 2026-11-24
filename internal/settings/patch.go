@@ -138,10 +138,16 @@ func applyGitea(cfg, cur Gitea, p GiteaPatch) (Gitea, []string, error) {
 			return Gitea{}, nil, err
 		}
 	}
-	// 改了地址（host 变化）却沿用已存的令牌：令牌会发往新地址，要求同时重新提交令牌
+	// 地址变了（协议或主机）却沿用已存的令牌：令牌会发往新地址。清空地址时一并清空已存的令牌（防止先清空、再改成别处
+	// 的两步绕过）；改成新地址时要求同时重新提交令牌
 	oldBase, newBase := first(cfg.BaseURL, cur.BaseURL), first(cfg.BaseURL, out.BaseURL)
-	if p.Token == nil && first(cfg.Token, cur.Token) != "" && hostOf(oldBase) != "" && hostOf(newBase) != "" && hostOf(newBase) != hostOf(oldBase) {
-		return Gitea{}, nil, fmt.Errorf("%w: changing the gitea address requires re-entering the token", ErrInvalid)
+	if p.Token == nil && first(cfg.Token, cur.Token) != "" && originOf(oldBase) != originOf(newBase) {
+		if newBase != "" {
+			return Gitea{}, nil, fmt.Errorf("%w: changing the gitea address requires re-entering the token", ErrInvalid)
+		}
+		if out.Token != "" {
+			out.Token, fields = "", append(fields, FieldToken)
+		}
 	}
 	return out, fields, nil
 }
@@ -175,9 +181,12 @@ func applySlot(name string, cur Slot, p SlotPatch) (Slot, []string, error) {
 	if (out.Provider == "") != (out.Model == "") {
 		return Slot{}, nil, fmt.Errorf("%w: %s model needs both provider and model", ErrInvalid, name)
 	}
-	// 改了接口地址（含换类型）却沿用已存的 API Key：要求同时重新提交 API Key
-	if old, nw := hostOf(endpoint(cur)), hostOf(endpoint(out)); p.APIKey == nil && cur.APIKey != "" && old != "" && nw != "" && nw != old {
-		return Slot{}, nil, fmt.Errorf("%w: changing the %s model address requires re-entering the api_key", ErrInvalid, name)
+	// 接口地址变了（协议、主机，含换类型）却沿用已存的 API Key：清空槽位时一并清空 API Key，改成新地址时要求重新提交
+	if p.APIKey == nil && cur.APIKey != "" && originOf(endpoint(cur)) != originOf(endpoint(out)) {
+		if endpoint(out) != "" {
+			return Slot{}, nil, fmt.Errorf("%w: changing the %s model address requires re-entering the api_key", ErrInvalid, name)
+		}
+		out.APIKey, fields = "", append(fields, "api_key")
 	}
 	return out, fields, nil
 }
@@ -192,12 +201,13 @@ func first(a, b string) string {
 	return b
 }
 
-func hostOf(s string) string {
+// originOf 返回地址的协议与主机（含端口），用于判断密钥会不会发往别处；空串或无法解析为空。
+func originOf(s string) string {
 	u, err := url.Parse(s)
-	if err != nil {
+	if err != nil || s == "" {
 		return ""
 	}
-	return strings.ToLower(u.Host)
+	return strings.ToLower(u.Scheme + "://" + u.Host)
 }
 
 // checkURL 只接受 http(s) 绝对地址，不含用户信息、查询与片段（错误信息不回显地址）。
