@@ -20,6 +20,13 @@ import (
 // GET /tickets/{id}/issue-close、POST /tickets/{id}/issue-close/retry（关闭关联 Issue 的进度与重试）、
 // GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
+//
+// 知识问答（会话只有本人可见）：POST /conversations、GET /conversations、DELETE /conversations/{id}、
+// GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream"}）、
+// POST /conversations/{id}/messages/{mid}/retry、POST /conversations/{id}/actions/{aid}/confirm|cancel。
+// stream 为 true 时以 SSE 返回：若干 event: delta（data {"text"}），最后恰好一个 event: message（data 为完整的助手消息，
+// 以它的 content 为准）；开始输出后出错发送 event: error（data {"code","message"}）。开始输出前的错误仍按 JSON 错误响应。
+// 未配置 Config.Model 时发送与重试返回 501 model_not_configured。
 func (l *Lingo) Handler() http.Handler { return l.rest }
 
 func (l *Lingo) newRESTHandler() http.Handler {
@@ -268,6 +275,127 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		us, err := l.LLMUsage(ctx(r), user(r), from, to)
 		return list(us, err)
 	})
+	rt.Handle("POST /conversations", func(r *httpapi.Request) (any, error) {
+		var in struct {
+			Title string `json:"title"`
+		}
+		if err := r.DecodeOptional(&in); err != nil {
+			return nil, err
+		}
+		c, err := l.CreateConversation(ctx(r), user(r), in.Title)
+		if err != nil {
+			return nil, err
+		}
+		return httpapi.Created{Value: c}, nil
+	})
+	rt.Handle("GET /conversations", func(r *httpapi.Request) (any, error) {
+		before, err := r.QueryInt("before")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		return list(l.ListConversations(ctx(r), user(r), before, int(limit)))
+	})
+	rt.Handle("DELETE /conversations/{id}", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, l.DeleteConversation(ctx(r), user(r), id)
+	})
+	rt.Handle("GET /conversations/{id}/messages", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		before, err := r.QueryInt("before")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		return list(l.ListConversationMessages(ctx(r), user(r), id, before, int(limit)))
+	})
+	// reply 返回助手消息；stream 时以 SSE 输出
+	reply := func(r *httpapi.Request, stream bool, do func(onDelta func(string)) (ConversationMessage, error)) (any, error) {
+		if !stream {
+			return do(nil)
+		}
+		sse := r.SSE()
+		m, err := do(func(d string) {
+			_ = sse.Send("delta", struct {
+				Text string `json:"text"`
+			}{d})
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := sse.Send("message", m); err != nil {
+			return nil, nil //nolint:nilerr // 客户端已断开：消息已落库，下次读取历史即可
+		}
+		return httpapi.Streamed{}, nil
+	}
+	rt.Handle("POST /conversations/{id}/messages", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Content  string `json:"content"`
+			TimeZone string `json:"time_zone"`
+			Stream   bool   `json:"stream"`
+		}
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		return reply(r, in.Stream, func(onDelta func(string)) (ConversationMessage, error) {
+			return l.SendMessageStream(ctx(r), user(r), id, MessageInput{Content: in.Content, TimeZone: in.TimeZone}, onDelta)
+		})
+	})
+	rt.Handle("POST /conversations/{id}/messages/{mid}/retry", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		mid, err := r.PathID("mid")
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			TimeZone string `json:"time_zone"`
+			Stream   bool   `json:"stream"`
+		}
+		if err := r.DecodeOptional(&in); err != nil {
+			return nil, err
+		}
+		return reply(r, in.Stream, func(onDelta func(string)) (ConversationMessage, error) {
+			return l.RetryMessageStream(ctx(r), user(r), id, mid, in.TimeZone, onDelta)
+		})
+	})
+	action := func(name string, do func(r *httpapi.Request, id, aid int64) (ActionResult, error)) {
+		rt.Handle("POST /conversations/{id}/actions/{aid}/"+name, func(r *httpapi.Request) (any, error) {
+			id, err := r.PathID("id")
+			if err != nil {
+				return nil, err
+			}
+			aid, err := r.PathID("aid")
+			if err != nil {
+				return nil, err
+			}
+			return do(r, id, aid)
+		})
+	}
+	action("confirm", func(r *httpapi.Request, id, aid int64) (ActionResult, error) {
+		return l.ConfirmPendingAction(ctx(r), user(r), id, aid)
+	})
+	action("cancel", func(r *httpapi.Request, id, aid int64) (ActionResult, error) {
+		return l.CancelPendingAction(ctx(r), user(r), id, aid)
+	})
 	rt.Handle("GET /settings/auto-forward", func(r *httpapi.Request) (any, error) {
 		ss, err := l.AutoForwardSettings(ctx(r), user(r))
 		return list(ss, err)
@@ -313,6 +441,8 @@ func restError(err error) (int, string) {
 		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, ErrConflict):
 		return http.StatusConflict, "conflict"
+	case errors.Is(err, ErrNoModel):
+		return http.StatusNotImplemented, "model_not_configured"
 	}
 	return 0, ""
 }

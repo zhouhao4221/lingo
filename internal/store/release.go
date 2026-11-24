@@ -21,16 +21,31 @@ func (s *Store) InReleaseTx(ctx context.Context, fn func(release.Tx) error) erro
 	return s.inTx(ctx, func(x *ticketTx) error { return fn(releaseTx{x}) })
 }
 
+// releaseWhere 是版本列表的条件，占用 $1–$10（$5、$6 为 BeforeID 与 Limit，由调用方使用）。
+const releaseWhere = `($7 OR p.key = ANY(($1::text)::text[])) AND ($2 = '' OR p.key = $2)
+		  AND ($3 = '' OR (lower(rp.owner) = lower($3) AND lower(rp.name) = lower($4)))
+		  AND ($8 = '' OR lower(r.tag) = lower($8))
+		  AND ($9::timestamptz IS NULL OR COALESCE(r.published_at, r.synced_at) >= $9)
+		  AND ($10::timestamptz IS NULL OR COALESCE(r.published_at, r.synced_at) < $10)`
+
+func releaseArgs(q release.Query) []any {
+	owner, name, _ := strings.Cut(q.Repo, "/")
+	var since, until sql.NullTime
+	if !q.Since.IsZero() {
+		since = sql.NullTime{Time: q.Since, Valid: true}
+	}
+	if !q.Until.IsZero() {
+		until = sql.NullTime{Time: q.Until, Valid: true}
+	}
+	return []any{textArray(q.Projects), q.Project, owner, name, q.BeforeID, q.Limit, q.All, q.Tag, since, until}
+}
+
 // ListReleases 实现 release.Store：按记录 ID 倒序（与 before 游标一致，翻页不重不漏），通常即发布先后。
 func (s *Store) ListReleases(ctx context.Context, q release.Query) ([]*release.Release, error) {
-	owner, name, _ := strings.Cut(q.Repo, "/")
 	rows, err := s.db.QueryContext(ctx, "SELECT "+releaseColumns+`, rp.owner || '/' || rp.name FROM lingo_releases r
 		JOIN lingo_repos rp ON rp.id = r.repo_id JOIN lingo_projects p ON p.id = rp.project_id
-		WHERE ($7 OR p.key = ANY(($1::text)::text[])) AND ($2 = '' OR p.key = $2)
-		  AND ($3 = '' OR (lower(rp.owner) = lower($3) AND lower(rp.name) = lower($4)))
-		  AND ($5::bigint = 0 OR r.id < $5::bigint)
-		ORDER BY r.id DESC LIMIT $6`,
-		textArray(q.Projects), q.Project, owner, name, q.BeforeID, q.Limit, q.All)
+		WHERE `+releaseWhere+` AND ($5::bigint = 0 OR r.id < $5::bigint)
+		ORDER BY r.id DESC LIMIT $6`, releaseArgs(q)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list releases: %w", err)
 	}
@@ -45,6 +60,19 @@ func (s *Store) ListReleases(ctx context.Context, q release.Query) ([]*release.R
 		out = append(out, &r)
 	}
 	return out, rows.Err()
+}
+
+// CountReleases 实现 release.Store。
+func (s *Store) CountReleases(ctx context.Context, q release.Query) (int, error) {
+	var n int
+	// $5 / $6 不参与计数，仍要传入以保持占位符编号
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM lingo_releases r
+		JOIN lingo_repos rp ON rp.id = r.repo_id JOIN lingo_projects p ON p.id = rp.project_id
+		WHERE `+releaseWhere+` AND $5::bigint >= 0 AND $6::int >= 0`, releaseArgs(q)...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count releases: %w", err)
+	}
+	return n, nil
 }
 
 // GetRelease 实现 release.Store。

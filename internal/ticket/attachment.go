@@ -168,6 +168,33 @@ func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, bo
 	}
 	var c *Comment
 	err = s.o.Store.InTx(ctx, func(tx Tx) error {
+		var err error
+		c, err = s.addComment(ctx, tx, p, id, body, attachments)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// AddCommentTx 在调用方的事务 tx 中执行 AddComment（校验、写入、同步与通知相同），供需要与其他写入同事务提交的
+// 领域使用（如知识问答确认留言）。
+func (s *Service) AddCommentTx(ctx context.Context, tx Tx, p auth.Principal, id int64, body string, attachments []Attachment) (*Comment, error) {
+	body = strings.TrimSpace(body)
+	attachments, err := CleanAttachments(attachments)
+	if err != nil {
+		return nil, err
+	}
+	if body == "" && len(attachments) == 0 {
+		return nil, fmt.Errorf("%w: comment is empty", ErrInvalid)
+	}
+	return s.addComment(ctx, tx, p, id, body, attachments)
+}
+
+func (s *Service) addComment(ctx context.Context, tx Tx, p auth.Principal, id int64, body string, attachments []Attachment) (*Comment, error) {
+	var c *Comment
+	err := func() error {
 		t, err := tx.LockByID(ctx, id)
 		if err != nil {
 			return err
@@ -233,7 +260,7 @@ func (s *Service) AddComment(ctx context.Context, p auth.Principal, id int64, bo
 			return tx.Emit(ctx, s.event(t, notify.TicketStatus, prev, p.ID, ""))
 		}
 		return nil
-	})
+	}()
 	if err != nil {
 		return nil, err
 	}

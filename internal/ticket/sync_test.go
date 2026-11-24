@@ -31,6 +31,7 @@ type memStore struct {
 	sending      map[int64]bool // 评论 ID → 持有发送租约
 
 	lastEventQuery EventQuery
+	lastSearch     *SearchQuery
 }
 
 func newMem(ts ...Ticket) *memStore {
@@ -148,6 +149,14 @@ func (m *memStore) TriageCounts(context.Context, Scope, time.Time) ([]TriageCoun
 	return nil, nil
 }
 func (m *memStore) ListMine(context.Context, MineQuery) ([]*Ticket, error) { return nil, nil }
+func (m *memStore) Search(_ context.Context, q SearchQuery) ([]*Ticket, error) {
+	m.lastSearch = &q
+	return nil, nil
+}
+func (m *memStore) Stats(_ context.Context, q SearchQuery) ([]StatRow, error) {
+	m.lastSearch = &q
+	return nil, nil
+}
 func (m *memStore) Events(_ context.Context, q EventQuery) ([]notify.Event, error) {
 	m.lastEventQuery = q
 	return nil, nil

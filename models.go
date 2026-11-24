@@ -65,18 +65,29 @@ type UsageModel interface {
 	ChatUsage(ctx context.Context, messages []Message) (string, Usage, error)
 }
 
+// StreamModel 是能流式输出的 Model（可选）：实现它的模型，知识问答的回答逐片段推送（REST 的 SSE、
+// SendMessageStream 的回调）；未实现时整段生成后一次推送。内置的 NewOpenAIModel / NewDeepSeekModel 已实现
+// （注意 OpenAIConfig.HTTPClient 的超时是整个回答的时限，默认 90 秒）。
+type StreamModel interface {
+	Model
+	// ChatStream 逐片段调用 onDelta，返回的全文为各片段拼接；ctx 取消时应尽快返回。不报告用量时返回零值 Usage。
+	ChatStream(ctx context.Context, messages []Message, onDelta func(delta string)) (string, Usage, error)
+}
+
 // LLMUsageStat 是按天（UTC）、用途、模型汇总的模型用量。CacheHitRate = Cached / Input。
 type LLMUsageStat struct {
-	Day          time.Time `json:"day"`
-	Kind         string    `json:"kind"` // 用途：draft_issue（建单整理）
-	Model        string    `json:"model"`
-	Calls        int       `json:"calls"`
-	Failed       int       `json:"failed"`
-	Input        int64     `json:"input_tokens"`
-	Output       int64     `json:"output_tokens"`
-	Cached       int64     `json:"cached_tokens"`
-	CacheHitRate float64   `json:"cache_hit_rate"`
-	AvgLatencyMS int64     `json:"avg_latency_ms"`
+	Day time.Time `json:"day"`
+	// Kind 是用途：draft_issue（建单整理）、assistant_intent（问答意图解析）、assistant_confirm（问答确认判断）、
+	// assistant_answer（问答组织回答）
+	Kind         string  `json:"kind"`
+	Model        string  `json:"model"`
+	Calls        int     `json:"calls"`
+	Failed       int     `json:"failed"`
+	Input        int64   `json:"input_tokens"`
+	Output       int64   `json:"output_tokens"`
+	Cached       int64   `json:"cached_tokens"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
+	AvgLatencyMS int64   `json:"avg_latency_ms"`
 }
 
 // LLMUsage 返回 [from, to) 内的模型用量汇总（仅 admin）；零值 from / to 表示最近 30 天。
@@ -119,6 +130,19 @@ func (m openAIModel) ChatUsage(ctx context.Context, messages []Message) (string,
 	}
 	s, u, err := m.c.ChatUsage(ctx, ms)
 	return s, Usage(u), err
+}
+
+func (m openAIModel) ChatStream(ctx context.Context, messages []Message, onDelta func(string)) (string, Usage, error) {
+	s, u, err := m.c.ChatStream(ctx, llmMessages(messages), onDelta)
+	return s, Usage(u), err
+}
+
+func llmMessages(messages []Message) []llm.Message {
+	ms := make([]llm.Message, 0, len(messages))
+	for _, x := range messages {
+		ms = append(ms, llm.Message{Role: x.Role, Content: x.Content})
+	}
+	return ms
 }
 
 func (m openAIModel) Chat(ctx context.Context, messages []Message) (string, error) {

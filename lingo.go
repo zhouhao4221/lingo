@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zhouhao4221/lingo/internal/assistant"
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -26,10 +27,11 @@ import (
 // Config 是 lingo 的全部配置，由接入方在代码中构造。
 type Config struct {
 	DB *sql.DB // PostgreSQL，驱动由接入方选择
-	// Model 是主模型（对话 + 向量），供知识问答使用（尚未实现）；可空。
+	// Model 是主模型（对话 + 向量），供知识问答组织回答（实现 StreamModel 时流式输出）；为空时知识问答不可用
+	// （SendMessage 返回 ErrNoModel），其他功能不受影响。
 	Model Model
-	// LightModel 是轻量模型（只用 Chat），用于建 Issue 前整理工单：生成标题、从描述中抽取模板字段、整理描述。
-	// 为空时用 Model；两者都为空时按原内容建单。整理失败不影响建单，Issue 末尾附提交人原始描述。
+	// LightModel 是轻量模型（只用 Chat），用于建 Issue 前整理工单（生成标题、从描述中抽取模板字段、整理描述），以及
+	// 知识问答的意图解析与确认判断。为空时用 Model；两者都为空时按原内容建单。整理失败不影响建单，Issue 末尾附提交人原始描述。
 	LightModel   Model
 	Gitea        GiteaConfig
 	Projects     []Project // 第一个为默认项目（请求未指定 project 时使用）
@@ -69,17 +71,18 @@ type Config struct {
 
 // Lingo 是一个灵工实例。
 type Lingo struct {
-	cfg      Config
-	log      *slog.Logger
-	gitea    *gitea.Client
-	store    *store.Store
-	webhook  http.Handler
-	rest     http.Handler
-	mcp      http.Handler
-	worker   *worker.Worker
-	tickets  *ticket.Service
-	releases *release.Service
-	tmpls    *gitea.TemplateCache
+	cfg       Config
+	log       *slog.Logger
+	gitea     *gitea.Client
+	store     *store.Store
+	webhook   http.Handler
+	rest      http.Handler
+	mcp       http.Handler
+	worker    *worker.Worker
+	tickets   *ticket.Service
+	releases  *release.Service
+	assistant *assistant.Service
+	tmpls     *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
 	projectsSynced bool // Config.Projects 已同步入库
@@ -147,6 +150,9 @@ func New(cfg Config) (*Lingo, error) {
 	if l.worker, err = l.newWorker(); err != nil {
 		return nil, err
 	}
+	if l.assistant, err = l.newAssistant(); err != nil {
+		return nil, err
+	}
 	l.rest = l.newRESTHandler()
 	l.mcp = l.newMCPHandler()
 	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
@@ -176,18 +182,40 @@ func (l *Lingo) drafter() worker.Drafter {
 	if isNil(m) {
 		return nil
 	}
-	return &llm.Drafter{Chat: func(ctx context.Context, ms []llm.Message) (string, llm.Usage, error) {
-		in := make([]Message, 0, len(ms))
-		for _, x := range ms {
-			in = append(in, Message{Role: x.Role, Content: x.Content})
-		}
+	return &llm.Drafter{Chat: chatOf(m)}
+}
+
+// chatOf 把 Model 适配为 llm.Chat；实现了 UsageModel 的模型报告用量。
+func chatOf(m Model) llm.Chat {
+	return func(ctx context.Context, ms []llm.Message) (string, llm.Usage, error) {
+		in := publicMessages(ms)
 		if um, ok := m.(UsageModel); ok {
 			s, u, err := um.ChatUsage(ctx, in)
 			return s, llm.Usage(u), err
 		}
 		s, err := m.Chat(ctx, in)
 		return s, llm.Usage{}, err
-	}}
+	}
+}
+
+// streamOf 把实现了 StreamModel 的 Model 适配为 llm.Stream；未实现时为 nil。
+func streamOf(m Model) llm.Stream {
+	sm, ok := m.(StreamModel)
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, ms []llm.Message, onDelta func(string)) (string, llm.Usage, error) {
+		s, u, err := sm.ChatStream(ctx, publicMessages(ms), onDelta)
+		return s, llm.Usage(u), err
+	}
+}
+
+func publicMessages(ms []llm.Message) []Message {
+	out := make([]Message, 0, len(ms))
+	for _, x := range ms {
+		out = append(out, Message{Role: x.Role, Content: x.Content})
+	}
+	return out
 }
 
 // isNil 报告接口值是否为 nil，含装着 nil 指针的接口（如 var m *MyModel; cfg.LightModel = m）。

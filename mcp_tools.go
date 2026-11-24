@@ -3,7 +3,9 @@ package lingo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/mcp"
@@ -15,13 +17,15 @@ import (
 // 工具：list_projects、list_ticket_types、create_ticket、get_ticket、list_my_tickets、reply_ticket、add_perspective、
 // list_perspectives、list_events、
 // list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、reject_forwarded_ticket、get_issue_close、
-// retry_issue_close、list_releases、get_release、get_llm_usage。
+// retry_issue_close、list_releases、get_release、get_llm_usage；
+// 知识问答：ask、list_conversations、list_conversation_messages、confirm_action、cancel_action。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵工（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
 进展回传给提交人。研发 Agent 可用 get_ticket 读取工单上下文（含提交人的补充与附件列表），用 reply_ticket 回复提交人
 （会同步到 Issue，并通知提交人）。需求工单可按调用者视角（使用者 / 业务方 / 专家 / 决策者）用 add_perspective 追加补充、
-list_perspectives 查看分层补充与缺失的必填视角。所有数据按调用者身份隔离。`
+list_perspectives 查看分层补充与缺失的必填视角。用 ask 以自然语言询问工单进展与发版情况（会话只有本人可见）；
+要求留言时 ask 返回待确认操作，经用户同意后用 confirm_action 执行。所有数据按调用者身份隔离。`
 
 // replyModeNote 说明 Gitea 评论是否会转给提交人，随 GiteaConfig.ReplyMode 变化。
 func (l *Lingo) replyModeNote() string {
@@ -267,6 +271,90 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 			`{"type":"object","properties":{"from":{"type":"string","format":"date-time"},"to":{"type":"string","format":"date-time"}}}`,
 			func(ctx context.Context, u User, a struct{ From, To time.Time }) (any, error) {
 				return list(l.LLMUsage(ctx, u, a.From, a.To))
+			}),
+		tool("ask", "以自然语言询问工单进展、修复版本、上线情况与近期发版，回答附引用的工单与版本。conversation_id 为空时新建会话，"+
+			"返回值含 conversation_id，追问时传入。要求给工单留言时返回 pending_action，须经用户同意后用 confirm_action 执行。",
+			`{"type":"object","required":["question"],"properties":{"question":{"type":"string"},
+				"conversation_id":{"type":"integer"},"time_zone":{"type":"string","description":"IANA 时区，如 Asia/Shanghai"}}}`,
+			func(ctx context.Context, u User, a struct {
+				Question       string
+				ConversationID int64  `json:"conversation_id"`
+				TimeZone       string `json:"time_zone"`
+			}) (any, error) {
+				if strings.TrimSpace(a.Question) == "" {
+					return nil, &mcp.ArgError{Msg: "question is required"}
+				}
+				id, created := a.ConversationID, false
+				if id == 0 {
+					if isNil(l.cfg.Model) { // 先校验，避免失败的调用留下空会话
+						return nil, ErrNoModel
+					}
+					c, err := l.CreateConversation(ctx, u, "")
+					if err != nil {
+						return nil, err
+					}
+					id, created = c.ID, true
+				}
+				m, err := l.SendMessage(ctx, u, id, MessageInput{Content: a.Question, TimeZone: a.TimeZone})
+				if err != nil {
+					if created && (errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrNoModel)) {
+						// 提问在保存前就被拒（参数不合法等）：删掉刚建的空会话；其他错误时提问可能已经保存，保留会话
+						_ = l.DeleteConversation(context.WithoutCancel(ctx), u, id)
+					}
+					return nil, err
+				}
+				return struct {
+					ConversationID int64               `json:"conversation_id"`
+					Message        ConversationMessage `json:"message"`
+				}{id, m}, nil
+			}),
+		tool("list_conversations", "列出当前用户的问答会话，按最近活动倒序；before 为上一页最后一条的 cursor。",
+			`{"type":"object","properties":{"before":{"type":"integer"},"limit":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				Before int64
+				Limit  int
+			}) (any, error) {
+				return list(l.ListConversations(ctx, u, a.Before, a.Limit))
+			}),
+		tool("list_conversation_messages", "查看问答会话的消息（页内按 id 升序）；before 为本页第一条的 id，用于向前翻页。",
+			`{"type":"object","required":["conversation_id"],"properties":{"conversation_id":{"type":"integer"},"before":{"type":"integer"},"limit":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ConversationID int64 `json:"conversation_id"`
+				Before         int64
+				Limit          int
+			}) (any, error) {
+				if err := requireID(a.ConversationID); err != nil {
+					return nil, err
+				}
+				return list(l.ListConversationMessages(ctx, u, a.ConversationID, a.Before, a.Limit))
+			}),
+		tool("confirm_action", "执行 ask 返回的待确认操作（如给工单留言）。只在用户明确同意后调用。",
+			`{"type":"object","required":["conversation_id","action_id"],"properties":{"conversation_id":{"type":"integer"},"action_id":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ConversationID int64 `json:"conversation_id"`
+				ActionID       int64 `json:"action_id"`
+			}) (any, error) {
+				if err := requireID(a.ConversationID); err != nil {
+					return nil, err
+				}
+				if err := requireID(a.ActionID); err != nil {
+					return nil, err
+				}
+				return l.ConfirmPendingAction(ctx, u, a.ConversationID, a.ActionID)
+			}),
+		tool("cancel_action", "取消 ask 返回的待确认操作。",
+			`{"type":"object","required":["conversation_id","action_id"],"properties":{"conversation_id":{"type":"integer"},"action_id":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				ConversationID int64 `json:"conversation_id"`
+				ActionID       int64 `json:"action_id"`
+			}) (any, error) {
+				if err := requireID(a.ConversationID); err != nil {
+					return nil, err
+				}
+				if err := requireID(a.ActionID); err != nil {
+					return nil, err
+				}
+				return l.CancelPendingAction(ctx, u, a.ConversationID, a.ActionID)
 			}),
 		tool("get_release", "查看版本：说明、关联的工单（按调用者可见性过滤）与上线记录。",
 			`{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}`,

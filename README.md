@@ -8,7 +8,7 @@ Lingo is an embeddable Go library that connects end users with an AI development
 
 Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a Gitea webhook handler). It has no multi-tenancy and no frontend: login, user management, UI and deployment stay with the host application.
 
-> **Status:** the ticket workflow is implemented end to end. The knowledge Q&A agent (`Ask`, knowledge base) is not implemented yet. The API may still change before the first tagged release.
+> **Status:** the ticket workflow is implemented end to end. The first stage of knowledge Q&A (questions about tickets and releases) is implemented; knowledge-base search is not yet. The API may still change before the first tagged release.
 
 ## Features
 
@@ -19,6 +19,7 @@ Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a
 - **Reliable sync** — signed, de-duplicated webhooks processed asynchronously; periodic reconciliation recovers missed deliveries; startup self-check and optional webhook auto-registration
 - **Progress notifications** — events delivered to your `Notifier` (at-least-once, with event IDs) plus an event feed; merged tickets follow their target
 - **Data isolation** — everything is scoped by the caller's user ID, role and projects; the submitter's identity never goes to Gitea
+- **Knowledge Q&A** — ask about ticket progress, fix versions and recent releases in plain language, with cited tickets and releases; commenting from the chat requires confirmation; conversations are private to their owner and answers can stream (see "Knowledge Q&A" below)
 - **MCP server** — the same capabilities as MCP tools for AI clients and AI developer agents (agents can reply to the submitter)
 
 ## Install
@@ -41,7 +42,8 @@ st, err := lingo.CheckMigrations(ctx, db) // err != nil: check failed, state unk
 
 l, err := lingo.New(lingo.Config{
 	DB:           db,       // *sql.DB (PostgreSQL)
-	LightModel:   light,    // optional: a cheap, fast lingo.Model that tidies tickets before issues are created
+	Model:        model,    // optional: writes knowledge Q&A answers (Q&A is unavailable without it)
+	LightModel:   light,    // optional: a cheap, fast lingo.Model that tidies tickets and parses Q&A intents (falls back to Model)
 	Gitea:        lingo.GiteaConfig{BaseURL: url, Token: botToken, WebhookSecret: secret},
 	Projects:     projects, // projects and their Gitea repositories
 	Authenticate: authn,    // resolves lingo.User (ID, role, projects) from a request
@@ -123,6 +125,26 @@ Notes:
 - `ticket.perspective_added` (`Perspectives` holds the contributor's perspective, `Body` a notice without the content) and `ticket.perspective_missing` (`Perspectives` holds the missing ones) follow the visibility of other ticket events.
 - The bot token must be able to create labels (`write:issue`); perspective labels are created by the startup self-check.
 
+### Knowledge Q&A (chat window)
+
+Users can ask about their tickets and releases in plain language, for example "has the login bug I filed last week been fixed?", "what was released recently?" or "how many tickets in demo are waiting for triage?". They can also say "add to #12: reproduced on Chrome 120". We recommend building it as a separate chat window, with the conversation list on the left and the chat on the right.
+
+- How it works: the model only turns the question into a query intent. Lingo runs the query with the caller's role and projects (same visibility as `GetTicket`), and the model writes the answer from the results. Answers carry structured `citations` (ticket ID, title, status, issue URL; release tag and publish time) that you can render as cards or links.
+- What the model receives: the question and the last 10 turns; each ticket's number, project, repository, type, title, status, timestamps, fix version, milestone and a body excerpt; the 5 most recent comment bodies of a single ticket (within the asker's visibility, so internal developer discussion for reviewers and admins); release names, note excerpts, deployments and fixed tickets. Names, emails and user IDs of submitters and comment authors are never sent, nor are form fields, submission context or attachments. You supply the model, so choose one that meets your compliance needs.
+- Writes need confirmation: when the user asks to comment, the assistant message carries a `pending_action`. Show confirm / cancel buttons (call confirm / cancel), or let the user simply reply "confirm". It is valid for 30 minutes and is dropped on cancel, on an unrelated message or on timeout.
+- Conversations are visible only to their owner (not even to admins). Users can continue or delete them. Lingo never purges them; retention is up to you.
+- Requires `Config.Model` (intent parsing uses `LightModel`, falling back to `Model`). Without it, sending returns `ErrNoModel` (REST 501). Models implementing `lingo.StreamModel` stream the answer; the built-in models do (note that `OpenAIConfig.HTTPClient`'s timeout bounds the whole answer, 90 s by default).
+- This first version answers ticket and release questions only. Knowledge-base search and business-data `Tool`s come later.
+
+```go
+c, _ := l.CreateConversation(ctx, u, "")
+m, err := l.SendMessageStream(ctx, u, c.ID, lingo.MessageInput{Content: "Has my login bug been fixed?", TimeZone: "Asia/Shanghai"},
+	func(delta string) { fmt.Print(delta) }) // streamed text; m.Content is authoritative
+if m.PendingAction != nil { /* show a confirm button that calls l.ConfirmPendingAction(ctx, u, c.ID, m.PendingAction.ID) */ }
+```
+
+REST streaming: `POST /conversations/{id}/messages` with `{"content":"…","time_zone":"Asia/Shanghai","stream":true}` returns SSE: any number of `event: delta` (`{"text"}`) followed by exactly one `event: message` carrying the full assistant message, whose `content` is authoritative. Errors after the stream starts arrive as `event: error` (`{"code","message"}`); errors before it (404, 409, 501) are regular JSON errors. A message whose model call failed has `status: "failed"` and can be retried. Read the stream with `fetch` (`EventSource` cannot POST).
+
 ### REST API
 
 | Endpoint | Description |
@@ -136,12 +158,15 @@ Notes:
 | `GET /releases`, `GET /releases/{id}` | Releases with linked tickets and deployments |
 | `GET` / `PUT /settings/auto-forward` | Auto-forward switches (changes: admin) |
 | `GET /usage?from=&to=` | Model token usage by day, purpose and model, with prompt-cache hit rate (admin) |
+| `POST` / `GET /conversations`, `DELETE /conversations/{id}` | Q&A conversations: create, list (by recent activity; pass the previous page's `cursor` as `before`), delete |
+| `GET` / `POST /conversations/{id}/messages`, `POST /conversations/{id}/messages/{mid}/retry` | History; ask (SSE when `stream` is true); retry a failed answer |
+| `POST /conversations/{id}/actions/{aid}/confirm\|cancel` | Confirm / cancel a pending action (such as a comment) |
 
 Write requests must use `Content-Type: application/json` (CSRF protection); errors are `{"error":{"code","message"}}`.
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`.
 
 ### Events
 
