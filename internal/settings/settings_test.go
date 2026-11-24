@@ -79,12 +79,16 @@ func TestApply(t *testing.T) {
 	if st2, _, err := Apply(Overrides{}, st1, Patch{Gitea: &GiteaPatch{BaseURL: ptr("https://evil.example.com")}}); err != nil || st2.Gitea.Token != "" {
 		t.Errorf("after clear: %+v %v", st2.Gitea, err)
 	}
-	// 代码中配置了令牌：清空地址后再改成别处仍要求重填（令牌无法清空），因而被拒
+	// 令牌在代码中：首次设置地址放行；之后清空或改成别处都要改代码
 	ov := Overrides{Gitea: Gitea{Token: "cfg-token"}}
-	stc := Stored{Gitea: Gitea{BaseURL: "https://git.example.com"}}
-	stc2, _, _ := Apply(ov, stc, Patch{Gitea: &GiteaPatch{BaseURL: ptr("")}})
-	if _, _, err := Apply(ov, stc2, Patch{Gitea: &GiteaPatch{BaseURL: ptr("https://evil.example.com")}}); !errors.Is(err, ErrInvalid) {
-		t.Errorf("config token to new host: %v", err)
+	stc, _, err := Apply(ov, Stored{}, Patch{Gitea: &GiteaPatch{BaseURL: ptr("https://git.example.com")}})
+	if err != nil || stc.Gitea.BaseURL == "" {
+		t.Fatalf("first address with code token: %v", err)
+	}
+	for _, b := range []string{"", "https://evil.example.com"} {
+		if _, _, err := Apply(ov, stc, Patch{Gitea: &GiteaPatch{BaseURL: ptr(b)}}); !errors.Is(err, ErrConflict) {
+			t.Errorf("code token, base %q: %v", b, err)
+		}
 	}
 	// 模型：清空槽位时一并清空 API Key
 	sm, _, err := Apply(Overrides{}, base, Patch{Main: &SlotPatch{Provider: ptr(""), Model: ptr("")}})

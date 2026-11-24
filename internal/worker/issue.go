@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/cache"
@@ -965,7 +966,8 @@ const maxIssueTitle = 255
 type labelCache struct {
 	once  sync.Once
 	c     *cache.Cache[string, map[string]int64]
-	locks sync.Map // 仓库 → *sync.Mutex：同一仓库的“列出再创建”串行，避免并发建出同名标签
+	gen   atomic.Uint64 // reset 时递增：进行中的查询结果属于旧连接，不写入缓存
+	locks sync.Map      // 仓库 → *sync.Mutex：同一仓库的“列出再创建”串行，避免并发建出同名标签
 }
 
 func (c *labelCache) lock(key string) func() {
@@ -988,17 +990,26 @@ func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, lab
 			return id, true, nil
 		}
 	}
+	gen := c.gen.Load()
 	ids, _, err := gitea.EnsureLabels(ctx, g, owner, name, nil)
 	if err != nil {
 		return 0, false, giteaErr("list labels", err)
 	}
-	c.cache().Put(key, ids)
+	c.put(gen, key, ids)
 	id, ok := ids[strings.ToLower(label)]
 	return id, ok, nil
 }
 
 func (c *labelCache) reset() {
+	c.gen.Add(1)
 	c.cache().DeleteFunc(func(string) bool { return true })
+}
+
+// put 写入缓存；查询期间连接已更换（代次变化）时丢弃。
+func (c *labelCache) put(gen uint64, key string, ids map[string]int64) {
+	if c.gen.Load() == gen {
+		c.cache().Put(key, ids)
+	}
 }
 
 func (c *labelCache) forget(owner, name string) {
@@ -1019,11 +1030,12 @@ func (c *labelCache) ensure(ctx context.Context, g IssueWriter, owner, name stri
 		}
 	}
 	if !ok {
+		gen := c.gen.Load()
 		var err error
 		if ids, _, err = gitea.EnsureLabels(ctx, g, owner, name, want); err != nil {
 			return nil, giteaErr("ensure labels", err)
 		}
-		c.cache().Put(key, ids)
+		c.put(gen, key, ids)
 	}
 	out := make([]int64, 0, len(want))
 	for _, l := range want {

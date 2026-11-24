@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,6 +226,63 @@ func TestSettingsModelSaveIgnoresGiteaAutoRegister(t *testing.T) {
 	}
 	if _, err := l.TestConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{}); err != nil {
 		t.Errorf("empty test: %v", err)
+	}
+}
+
+// PR #36 第三轮审查：令牌在代码、地址在数据库时可以保存地址；之后改地址需改代码。
+func TestSettingsCodeTokenDatabaseAddress(t *testing.T) {
+	db := testDB(t, true)
+	gsrv := httptest.NewServer(&giteaServer{templates: "[]"})
+	t.Cleanup(gsrv.Close)
+	l := newBareLingo(t, db, nil, func(c *lingo.Config) { c.Gitea.Token = "code-token" })
+	ctx := context.Background()
+	s, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{BaseURL: sptr(gsrv.URL)}})
+	if err != nil || !s.Gitea.Configured || !s.Gitea.Applied || s.Gitea.Token.Source != lingo.SourceConfig {
+		t.Fatalf("first address = %+v %v", s.Gitea, err)
+	}
+	if _, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{BaseURL: sptr("https://other.example.com")}}); !errors.Is(err, lingo.ErrConflict) {
+		t.Errorf("change address with code token: %v", err)
+	}
+}
+
+// PR #36 第三轮审查：开启自动注册但没有 Webhook 密钥时，自检不注册（不写入空密钥）并报告错误。
+func TestSettingsSelfCheckSkipsAutoRegisterWithoutSecret(t *testing.T) {
+	db := testDB(t, true)
+	var mu sync.Mutex
+	var hookWrites int
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		p := strings.TrimPrefix(r.URL.Path, "/api/v1")
+		switch {
+		case strings.Contains(p, "/hooks") && r.Method != "GET":
+			hookWrites++
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"id":9}`))
+		case strings.Contains(p, "/hooks"):
+			_, _ = w.Write([]byte(`[]`))
+		case p == "/user":
+			_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(g.Close)
+	l := newBareLingo(t, db, nil, func(c *lingo.Config) {
+		c.Gitea = lingo.GiteaConfig{BaseURL: g.URL, Token: "t", AutoRegisterWebhook: true, WebhookURL: "https://app.example.com/wh"}
+	})
+	rs := l.SelfCheck(context.Background())
+	found := false
+	for _, r := range rs {
+		if r.Item == "webhook" && r.Level == "error" && strings.Contains(r.Message, "未自动注册") {
+			found = true
+		}
+	}
+	mu.Lock()
+	writes := hookWrites
+	mu.Unlock()
+	if !found || writes != 0 {
+		t.Errorf("results = %+v, hook writes = %d", rs, writes)
 	}
 }
 

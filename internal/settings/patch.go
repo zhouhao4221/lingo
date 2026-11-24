@@ -138,15 +138,24 @@ func applyGitea(cfg, cur Gitea, p GiteaPatch) (Gitea, []string, error) {
 			return Gitea{}, nil, err
 		}
 	}
-	// 地址变了（协议或主机）却沿用已存的令牌：令牌会发往新地址。清空地址时一并清空已存的令牌（防止先清空、再改成别处
-	// 的两步绕过）；改成新地址时要求同时重新提交令牌
+	// 地址变了（协议或主机）却沿用已有的令牌：令牌会发往新地址。
+	//   - 首次设置地址（原来为空）：放行，令牌是为这次接入准备的
+	//   - 清空地址：一并清空数据库中的令牌（防止先清空、再改成别处的两步绕过）；令牌由代码配置时无法清空，拒绝
+	//   - 改成别的地址：要求同时重新提交令牌；令牌由代码配置时只能改代码
 	oldBase, newBase := first(cfg.BaseURL, cur.BaseURL), first(cfg.BaseURL, out.BaseURL)
 	if p.Token == nil && first(cfg.Token, cur.Token) != "" && originOf(oldBase) != originOf(newBase) {
-		if newBase != "" {
+		switch {
+		case newBase == "" && cfg.Token != "":
+			return Gitea{}, nil, fmt.Errorf("%w: the gitea token is configured in code; clear the address in code", ErrConflict)
+		case newBase == "":
+			if out.Token != "" {
+				out.Token, fields = "", append(fields, FieldToken)
+			}
+		case oldBase == "":
+		case cfg.Token != "":
+			return Gitea{}, nil, fmt.Errorf("%w: the gitea token is configured in code; change the address in code", ErrConflict)
+		default:
 			return Gitea{}, nil, fmt.Errorf("%w: changing the gitea address requires re-entering the token", ErrInvalid)
-		}
-		if out.Token != "" {
-			out.Token, fields = "", append(fields, FieldToken)
 		}
 	}
 	return out, fields, nil

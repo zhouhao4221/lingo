@@ -195,8 +195,8 @@ func (l *Lingo) UpdateConnectionSettings(ctx context.Context, u User, in Connect
 		l.log.Info("lingo: connection settings updated", "by", u.ID, "category", string(cat), "fields", fields, "version", meta.Version)
 	}
 	if len(changed) > 0 {
-		l.applySettings(st, true) // 刚提交的就是最新值：直接应用（不依赖版本比较）
-		select {                  // 通知 Run：Gitea 连接变化时补跑自检
+		l.applySettings(st, false) // 按版本或修改时间判断：并发保存时不会让较旧的结果覆盖较新的
+		select {                   // 通知 Run：Gitea 连接变化时补跑自检
 		case l.settingsChanged <- struct{}{}:
 		default:
 		}
@@ -215,6 +215,9 @@ func (l *Lingo) markApplied(s ConnectionSettings, st settings.Stored) Connection
 	s.Model.Applied = want.MainSrc == settings.SourceUnset || !isNil(c.main)
 	if want.MainSrc == settings.SourceDatabase && c.mainSlot != want.Main {
 		s.Model.Applied = false
+	}
+	if want.LightSrc == settings.SourceDatabase && c.litSlot != want.Light {
+		s.Model.Applied = false // 轻量模型没有建起来（退回主模型）
 	}
 	return s
 }

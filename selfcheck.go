@@ -30,11 +30,19 @@ func (l *Lingo) SelfCheck(ctx context.Context) []CheckResult {
 			repos = append(repos, selfcheck.Repo{Name: r.Owner + "/" + r.Name, Templates: r.Templates, DeployWorkflow: r.Deploy.Workflow})
 		}
 	}
+	// 开启了自动注册却没有回调地址或密钥：不自动注册（否则会把空密钥写进各仓库的 Webhook），报告错误
+	autoRegister := g.AutoRegisterWebhook
+	var pre []CheckResult
+	if autoRegister && (g.WebhookURL == "" || g.WebhookSecret == "") {
+		autoRegister = false
+		pre = append(pre, CheckResult{Item: "webhook", Level: string(selfcheck.Error),
+			Message: "已开启 Webhook 自动注册，但回调地址或 Webhook 密钥未配置，未自动注册"})
+	}
 	rs := selfcheck.Run(ctx, selfcheck.Options{Gitea: l.gitea, Pings: l.store, Repos: repos, LabelPrefix: l.labelPrefix(),
-		WebhookURL: g.WebhookURL, WebhookSecret: g.WebhookSecret, AutoRegister: g.AutoRegisterWebhook,
+		WebhookURL: g.WebhookURL, WebhookSecret: g.WebhookSecret, AutoRegister: autoRegister,
 		// 多实例同时启动时只有一个执行（其他实例跳过），避免重复创建 Webhook 与标签
 		Lock: func(ctx context.Context) (func(), bool, error) { return l.store.TryLock(ctx, selfCheckLockKey) }})
-	out := make([]CheckResult, 0, len(rs))
+	out := append(make([]CheckResult, 0, len(rs)+len(pre)), pre...)
 	for _, r := range rs {
 		out = append(out, CheckResult{Repo: r.Repo, Item: r.Item, Level: string(r.Level), Message: r.Message})
 	}

@@ -125,7 +125,7 @@ type GiteaConfig struct {
 
 	// AutoRegisterWebhook 为真时，Run 启动时（以及连接配置变化后）在各仓库查找或创建指向 WebhookURL 的 Webhook
 	// （token 另需 write:repository）；为假时由接入方手工配置。WebhookURL 与 WebhookSecret 可以来自代码或数据库，
-	// 生效后缺任何一个时自检会报告错误，经接口保存时会被拒绝。
+	// 生效后缺任何一个时自检不自动注册并报告错误（不会把空密钥写进 Gitea），经接口保存 Gitea 配置时会被拒绝。
 	AutoRegisterWebhook bool
 	WebhookURL          string // WebhookHandler 的外部可访问地址
 
