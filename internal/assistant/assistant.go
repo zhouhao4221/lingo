@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/zhouhao4221/lingo/internal/knowledge"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
@@ -53,6 +54,7 @@ const (
 	IntentCancel        = "cancel"
 	IntentClarify       = "clarify"
 	IntentOutOfScope    = "out_of_scope"
+	IntentKnowledgeAsk  = "knowledge_ask" // 使用方法、原因、怎么做等知识类问题（REQ-006）
 
 	// IntentOtherDecision 是 Brain.Confirm 的第三种结果：用户在说别的事情。
 	IntentOtherDecision = "other"
@@ -114,10 +116,25 @@ type Message struct {
 	Action         *Action // 该助手消息提出的待确认操作（读取时回填）
 }
 
-// Citations 是回答引用的工单与版本（回答当时的快照）。
+// Citations 是回答引用的工单、版本与知识条目（回答当时的快照）。
 type Citations struct {
-	Tickets  []TicketRef  `json:"tickets"`
-	Releases []ReleaseRef `json:"releases"`
+	Tickets   []TicketRef    `json:"tickets"`
+	Releases  []ReleaseRef   `json:"releases"`
+	Knowledge []KnowledgeRef `json:"knowledge,omitempty"`
+}
+
+// KnowledgeRef 是引用的知识条目；SourceTicketID 只在调用者能查看来源工单时填写。
+type KnowledgeRef struct {
+	ID             int64  `json:"id"`
+	Question       string `json:"question"`
+	SourceTicketID int64  `json:"source_ticket_id,omitempty"`
+}
+
+// Knowledge 是知识库检索，由 knowledge.Service 实现。
+type Knowledge interface {
+	Search(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]knowledge.Hit, error)
+	ByIDs(ctx context.Context, ids []int64) ([]*knowledge.Entry, error)
+	Cite(ctx context.Context, ids []int64) error
 }
 
 // TicketRef 是引用的工单。
@@ -228,6 +245,8 @@ type Options struct {
 	Releases Releases
 	// TicketsByID 一次读取多张工单（不鉴权，供版本详情读取关联工单后按 Visible 过滤）。
 	TicketsByID func(ctx context.Context, ids []int64) ([]*ticket.Ticket, error)
+	// Knowledge 是知识库检索（REQ-006）；为空时知识类问题按超出范围回答。
+	Knowledge Knowledge
 	// Brain 是模型调用；为空时发送与重试返回 ErrNoModel。
 	Brain Brain
 	// BrainFor 非空时每轮提问开始时调用，取当前的模型（运行时可更换模型），返回 nil 表示未配置；优先于 Brain。

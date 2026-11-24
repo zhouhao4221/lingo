@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"github.com/zhouhao4221/lingo/internal/knowledge"
 	"regexp"
 	"slices"
 	"sort"
@@ -97,6 +98,16 @@ type facts struct {
 	Stats    []factStat    `json:"stats,omitempty"`
 	Tickets  []factTicket  `json:"tickets,omitempty"`
 	Releases []factRelease `json:"releases,omitempty"`
+	// Knowledge 是检索到的知识条目（REQ-006），回答中写作 K编号
+	Knowledge []factKnowledge `json:"knowledge,omitempty"`
+}
+
+// factKnowledge 是交给模型的知识条目。
+type factKnowledge struct {
+	ID        string `json:"id"` // "K12"
+	Question  string `json:"question"`
+	Answer    string `json:"answer"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // factRelease 是交给模型的版本事实。
@@ -388,7 +399,7 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 	if err != nil {
 		return nil, modelError{err}
 	}
-	ok := grounded(out, ids)
+	ok := grounded(out, ids) && groundedKnowledge(out, f.Knowledge)
 	if !ok {
 		out = fallback()
 	}
@@ -444,6 +455,93 @@ func grounded(out string, ids []int64) bool {
 		}
 	}
 	return true
+}
+
+var knowledgeNumRe = regexp.MustCompile(`\bK(\d+)\b`)
+
+// groundedKnowledge 报告回答中的知识条目编号（K12）都在本轮数据中。
+func groundedKnowledge(out string, ks []factKnowledge) bool {
+	for _, m := range knowledgeNumRe.FindAllStringSubmatch(out, -1) {
+		if !slices.ContainsFunc(ks, func(k factKnowledge) bool { return k.ID == "K"+m[1] }) {
+			return false
+		}
+	}
+	return true
+}
+
+// 知识问答的数量与截断。
+const (
+	knowledgeHits    = 5
+	knowledgeTickets = 5
+	knowledgeRunes   = 1500
+)
+
+// askKnowledge 回答知识类问题：检索调用者项目内已生效的知识条目，并检索调用者可见的同类工单，一并交给模型作答；
+// 都没有命中时引导提交咨询工单。来源工单只在调用者能查看时出现在引用中。
+func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*reply, error) {
+	hits, err := s.o.Knowledge.Search(ctx, tc.p, in.Project, tc.question, in.Keywords, knowledgeHits)
+	if err != nil {
+		return nil, err
+	}
+	var ts []*ticket.Ticket
+	if len(in.Keywords) > 0 {
+		q := ticket.SearchQuery{Keywords: in.Keywords, Type: in.Type, Limit: knowledgeTickets}
+		if ts, err = s.o.Tickets.Search(ctx, tc.p, in.Project, false, q); err != nil {
+			return nil, err
+		}
+	}
+	if len(hits) == 0 && len(ts) == 0 {
+		return &reply{content: textNoKnowledge, outcome: OutcomeNotFound}, nil
+	}
+	readable, err := s.readableSources(ctx, tc.p, hits)
+	if err != nil {
+		return nil, err
+	}
+	f := facts{Kind: "knowledge", Total: len(hits) + len(ts), Shown: len(hits) + len(ts)}
+	var cites Citations
+	ids := make([]int64, 0, len(hits))
+	for _, h := range hits {
+		f.Knowledge = append(f.Knowledge, factKnowledge{ID: "K" + strconv.FormatInt(h.ID, 10), Question: plainRefs(oneLine(h.Question)),
+			Answer: plainRefs(textutil.ClipEllipsis(h.Answer, knowledgeRunes)), UpdatedAt: fmtTime(h.UpdatedAt, tc.loc)})
+		ref := KnowledgeRef{ID: h.ID, Question: oneLine(h.Question)}
+		if readable[h.SourceTicketID] {
+			ref.SourceTicketID = h.SourceTicketID
+		}
+		cites.Knowledge = append(cites.Knowledge, ref)
+		ids = append(ids, h.ID)
+	}
+	for _, t := range ts {
+		f.Tickets = append(f.Tickets, s.factOf(tc.p, t, tc.loc, listBodyRunes))
+		cites.Tickets = append(cites.Tickets, s.ticketRef(t))
+	}
+	r, err := s.answer(ctx, tc, f, cites, func() string { return knowledgeText(hits, ts, tc.loc) })
+	if err != nil {
+		return nil, err
+	}
+	_ = s.o.Knowledge.Cite(ctx, ids) // 引用次数是统计数据：失败不影响回答
+	return r, nil
+}
+
+// readableSources 返回调用者能查看的来源工单（ticket.Readable）。
+func (s *Service) readableSources(ctx context.Context, p auth.Principal, hits []knowledge.Hit) (map[int64]bool, error) {
+	var ids []int64
+	for _, h := range hits {
+		if h.SourceTicketID > 0 {
+			ids = append(ids, h.SourceTicketID)
+		}
+	}
+	out := map[int64]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	ts, err := s.o.TicketsByID(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range ts {
+		out[t.ID] = ticket.Readable(p, t)
+	}
+	return out, nil
 }
 
 // groundedStream 转发模型的流式片段：末尾可能还没写完的 "#数字" 先扣住，完整的工单号在事实之外时停止转发。

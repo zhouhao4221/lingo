@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"fmt"
+	"github.com/zhouhao4221/lingo/internal/knowledge"
 	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
@@ -63,6 +64,9 @@ func (s *Service) Messages(ctx context.Context, p auth.Principal, conversationID
 // recheckCites 按当前可读范围重新判断消息引用的工单：已不可读的（如同事已不在 TicketAudience 名单内，或项目
 // 不在调用者范围内）只保留编号，标题、状态与 Issue 地址置空。回答正文是生成时的文本，不做处理（REQ-004）。
 func (s *Service) recheckCites(ctx context.Context, p auth.Principal, ms []*Message) error {
+	if err := s.recheckKnowledge(ctx, p, ms); err != nil {
+		return err
+	}
 	var ids []int64
 	for _, m := range ms {
 		for _, r := range m.Citations.Tickets {
@@ -100,4 +104,53 @@ func (s *Service) Delete(ctx context.Context, p auth.Principal, conversationID i
 
 func cleanTitle(s string) string {
 	return textutil.Clip(strings.Join(strings.Fields(s), " "), maxTitleRunes)
+}
+
+// recheckKnowledge 按当前状态重新判断消息引用的知识条目：已停用、已删除或不在调用者项目内的只保留编号；来源工单只在
+// 调用者仍能查看时保留（REQ-006）。
+func (s *Service) recheckKnowledge(ctx context.Context, p auth.Principal, ms []*Message) error {
+	if s.o.Knowledge == nil {
+		return nil
+	}
+	var ids, srcs []int64
+	for _, m := range ms {
+		for _, r := range m.Citations.Knowledge {
+			ids = append(ids, r.ID)
+			if r.SourceTicketID > 0 {
+				srcs = append(srcs, r.SourceTicketID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	es, err := s.o.Knowledge.ByIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	live := make(map[int64]bool, len(es))
+	for _, e := range es {
+		live[e.ID] = e.Status == knowledge.StatusActive && p.InProject(e.ProjectKey)
+	}
+	readable := map[int64]bool{}
+	if len(srcs) > 0 {
+		ts, err := s.o.TicketsByID(ctx, srcs)
+		if err != nil {
+			return err
+		}
+		for _, t := range ts {
+			readable[t.ID] = ticket.Readable(p, t)
+		}
+	}
+	for _, m := range ms {
+		for i := range m.Citations.Knowledge {
+			r := &m.Citations.Knowledge[i]
+			if !live[r.ID] {
+				r.Question, r.SourceTicketID = "", 0
+			} else if !readable[r.SourceTicketID] {
+				r.SourceTicketID = 0
+			}
+		}
+	}
+	return nil
 }

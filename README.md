@@ -8,7 +8,7 @@ Lingo is an embeddable Go library that connects end users with an AI development
 
 Lingo provides public APIs only (Go methods, a REST handler, an MCP server and a Gitea webhook handler). It has no multi-tenancy and no frontend: login, user management, UI and deployment stay with the host application.
 
-> **Status:** the ticket workflow is implemented end to end. The first stage of knowledge Q&A (questions about tickets and releases) is implemented; knowledge-base search is not yet. The API may still change before the first tagged release.
+> **Status:** the ticket workflow is implemented end to end. Knowledge Q&A (questions about tickets and releases) and the first phase of the knowledge base (entries saved when answering tickets, searched to answer questions) are implemented; model extraction and review are not yet. The API may still change before the first tagged release.
 
 ## Features
 
@@ -147,11 +147,11 @@ Notes:
 Users can ask about their tickets and releases in plain language, for example "has the login bug I filed last week been fixed?", "what was released recently?" or "how many tickets in demo are waiting for triage?". They can also say "add to #12: reproduced on Chrome 120". We recommend building it as a separate chat window, with the conversation list on the left and the chat on the right.
 
 - How it works: the model only turns the question into a query intent. Lingo runs the query with the caller's role and projects (same visibility as `GetTicket`), and the model writes the answer from the results. Answers carry structured `citations` (ticket ID, title, status, issue URL; release tag and publish time) that you can render as cards or links.
-- What the model receives: the question and the last 10 turns; each ticket's number, project, repository, type, title, status, timestamps, fix version, milestone and a body excerpt; the 5 most recent comment bodies of a single ticket (within the asker's visibility, so internal developer discussion for reviewers and admins); release names, note excerpts, deployments and fixed tickets. Names, emails and user IDs of submitters and comment authors are never sent (exception: with `TicketAudience`, a teammate's ticket carries the submitter's name; see Teammate visibility), nor are form fields, submission context or attachments. You supply the model, so choose one that meets your compliance needs.
+- What the model receives: the question and the last 10 turns; each ticket's number, project, repository, type, title, status, timestamps, fix version, milestone and a body excerpt; the 5 most recent comment bodies of a single ticket (within the asker's visibility, so internal developer discussion for reviewers and admins); release names, note excerpts, deployments and fixed tickets; for how-to questions, the matching knowledge entries (question and an answer excerpt). Names, emails and user IDs of submitters and comment authors are never sent (exception: with `TicketAudience`, a teammate's ticket carries the submitter's name; see Teammate visibility), nor are form fields, submission context or attachments. You supply the model, so choose one that meets your compliance needs.
 - Writes need confirmation: when the user asks to comment, the assistant message carries a `pending_action`. Show confirm / cancel buttons (call confirm / cancel), or let the user simply reply "confirm". It is valid for 30 minutes and is dropped on cancel, on an unrelated message or on timeout.
 - Conversations are visible only to their owner (not even to admins). Users can continue or delete them. Lingo never purges them; retention is up to you.
 - Requires `Config.Model` (intent parsing uses `LightModel`, falling back to `Model`). Without it, sending returns `ErrNoModel` (REST 501). Models implementing `lingo.StreamModel` stream the answer; the built-in models do (note that `OpenAIConfig.HTTPClient`'s timeout bounds the whole answer, 90 s by default).
-- This first version answers ticket and release questions only. Knowledge-base search and business-data `Tool`s come later.
+- Answers questions about tickets, releases and how-to / why / what-to-do questions (see Knowledge base below); business-data `Tool`s come later.
 
 ```go
 c, _ := l.CreateConversation(ctx, u, "")
@@ -161,6 +161,16 @@ if m.PendingAction != nil { /* show a confirm button that calls l.ConfirmPending
 ```
 
 REST streaming: `POST /conversations/{id}/messages` with `{"content":"…","time_zone":"Asia/Shanghai","stream":true}` returns SSE: any number of `event: delta` (`{"text"}`) followed by exactly one `event: message` carrying the full assistant message, whose `content` is authoritative. Errors after the stream starts arrive as `event: error` (`{"code","message"}`); errors before it (404, 409, 501) are regular JSON errors. A message whose model call failed has `status: "failed"` and can be retried. Read the stream with `fetch` (`EventSource` cannot POST).
+
+### Knowledge base
+
+How-to questions ("why is the exported report empty", "how do I set up SSO") are answered from the knowledge base: Lingo searches active entries in the asker's projects (up to 5) plus similar tickets the asker can see, and the model answers from them. Answers list the entries in `citations.knowledge` (ID and question; the source ticket only when the asker can view it), and each cited entry's cite count goes up. With no match, Lingo says the knowledge base has nothing on it yet and suggests a consult ticket.
+
+- **Adding entries**: reviewers and admins can add their answer to the knowledge base when answering a pending ticket (`AnswerTicketWith`, REST `POST /tickets/{id}/answer` with `knowledge`, MCP `answer_ticket` with `add_to_knowledge`); it is off by default. They can also create entries by hand (`CreateKnowledge`). Entries go live at once and anyone with access to the project may find them, so **rewrite the question and answer in general terms and drop anything specific to the submitter**. Emails and phone numbers are replaced with placeholders.
+- **Maintenance** (reviewers / admins, within `User.Projects`): `ListKnowledge` (sortable by cite count), `UpdateKnowledge`, `DisableKnowledge` / `EnableKnowledge`, `DeleteKnowledge`, `DisableKnowledgeByTicket` (disables entries derived from a ticket, e.g. when its submitter asks for their data to be removed).
+- **Search** (all roles): `SearchKnowledge` (REST `GET /knowledge/search`, MCP `search_knowledge`). No database extension needed: Chinese text is split into bigrams and ranked by overlap with a GIN array index, with substring matching as a fallback.
+- **Vectors (optional)**: when the main model's `Embed` works, `Run` generates vectors in the background (for new or edited entries, or after the embedding model changes), and search re-ranks the top 50 by similarity. Vectors are told apart by model name when the model implements `lingo.EmbeddingModelNamer` (the built-in adapters do; DeepSeek and an OpenAI adapter without `EmbeddingModel` produce none), otherwise by dimension. Each search then makes one extra `Embed` call and falls back to bigram ranking on error.
+- Usage: answers are recorded as `knowledge_answer`, embeddings as `knowledge_embed` (call counts only). Requires migration `0005_knowledge.sql`.
 
 ### Connection settings (stored in the database)
 
@@ -181,6 +191,7 @@ Model and Gitea connection settings (addresses, tokens / API keys, webhook secre
 |---|---|
 | `GET /projects`, `GET /ticket-types` | Projects and repositories; ticket types with issue-template form fields |
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
+| `GET /knowledge/search?q=&project=&limit=`; `GET` / `POST /knowledge`, `PUT` / `DELETE /knowledge/{id}`, `POST /knowledge/{id}/disable\|enable`, `POST /knowledge/disable-by-ticket` | Knowledge base: search (all roles); maintenance (reviewers / admins) |
 | `GET /tickets/visible?project=&status=&before=` | Tickets the caller can view: their own plus teammates' via `TicketAudience` (read-only) |
 | `POST` / `GET /tickets/{id}/perspectives` | Requirement perspectives: add, list grouped by perspective (see above) |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
@@ -198,7 +209,7 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`, `search_knowledge`.
 
 ### Events
 

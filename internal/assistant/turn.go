@@ -392,6 +392,8 @@ func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired
 			return &reply{content: textNotFound, outcome: OutcomeNotFound}, nil
 		case IntentReleaseList:
 			return &reply{content: textNoRelease, outcome: OutcomeNotFound}, nil
+		case IntentKnowledgeAsk:
+			return &reply{content: textNoKnowledge, outcome: OutcomeNotFound}, nil
 		}
 		in.Project = ""
 	}
@@ -409,6 +411,11 @@ func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired
 			return &reply{content: textExpired, outcome: OutcomeActionExpired}, nil
 		}
 		return &reply{content: textNoAction, outcome: OutcomeNoAction}, nil
+	case IntentKnowledgeAsk:
+		if s.o.Knowledge == nil {
+			return &reply{content: textOutOfScope, outcome: OutcomeOutOfScope}, nil
+		}
+		return s.askKnowledge(ctx, tc, in)
 	case IntentOutOfScope:
 		return &reply{content: textOutOfScope, outcome: OutcomeOutOfScope}, nil
 	}

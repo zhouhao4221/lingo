@@ -17,8 +17,8 @@ import (
 // 工具：list_projects、list_ticket_types、create_ticket、get_ticket、list_my_tickets、reply_ticket、add_perspective、
 // list_perspectives、list_events、
 // list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、reject_forwarded_ticket、get_issue_close、
-// retry_issue_close、list_releases、get_release、get_llm_usage；
-// 知识问答：ask、list_conversations、list_conversation_messages、confirm_action、cancel_action。
+// retry_issue_close、list_releases、get_release、get_llm_usage、list_visible_tickets；
+// 知识问答：ask、list_conversations、list_conversation_messages、confirm_action、cancel_action；知识库：search_knowledge。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵工（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
@@ -207,16 +207,32 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				}
 				return l.ForwardTicket(ctx, u, a.ID, ForwardOptions{Title: a.Title, Type: a.Type, Repo: a.Repo, Note: a.Note, AttachmentIDs: a.AttachmentIDs})
 			}),
-		tool("answer_ticket", "直接答复待确认工单并结束，不转出（reviewer / admin）。",
-			`{"type":"object","required":["id","answer"],"properties":{"id":{"type":"integer"},"answer":{"type":"string"}}}`,
+		tool("answer_ticket", "直接答复待确认工单并结束，不转出（reviewer / admin）。add_to_knowledge 为 true 时同时加入知识库（直接生效，所有用户可检索）：knowledge_question / knowledge_answer 为改写后的通用问题与答案，省略时取工单标题正文与答复原文，建议改写并去掉只针对提交人的内容。",
+			`{"type":"object","required":["id","answer"],"properties":{"id":{"type":"integer"},"answer":{"type":"string"},"add_to_knowledge":{"type":"boolean"},"knowledge_question":{"type":"string"},"knowledge_answer":{"type":"string"}}}`,
 			func(ctx context.Context, u User, a struct {
-				ID     int64
-				Answer string
+				ID                int64
+				Answer            string
+				AddToKnowledge    bool   `json:"add_to_knowledge"`
+				KnowledgeQuestion string `json:"knowledge_question"`
+				KnowledgeAnswer   string `json:"knowledge_answer"`
 			}) (any, error) {
 				if err := requireID(a.ID); err != nil {
 					return nil, err
 				}
-				return l.AnswerTicket(ctx, u, a.ID, a.Answer)
+				in := TicketAnswer{Answer: a.Answer}
+				if a.AddToKnowledge {
+					in.Knowledge = &KnowledgeDraft{Question: a.KnowledgeQuestion, Answer: a.KnowledgeAnswer}
+				}
+				return l.AnswerTicketWith(ctx, u, a.ID, in)
+			}),
+		tool("search_knowledge", "检索知识库：按问题或关键词返回已生效的知识条目（问题、答案、来源），按相关度排序；project 可限定项目，limit 最多 20。",
+			`{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"project":{"type":"string"},"limit":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				Query   string
+				Project string
+				Limit   int
+			}) (any, error) {
+				return list(l.SearchKnowledge(ctx, u, a.Query, a.Project, a.Limit))
 			}),
 		tool("merge_ticket", "把待确认工单合并到同项目的另一工单（reviewer / admin）。",
 			`{"type":"object","required":["id","target_ticket_id"],"properties":{"id":{"type":"integer"},"target_ticket_id":{"type":"integer"},"note":{"type":"string"}}}`,

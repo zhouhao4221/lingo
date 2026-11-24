@@ -43,8 +43,17 @@ type ConversationMessage struct {
 
 // Citations 是回答引用的工单与版本（回答当时的快照），接入方可渲染为卡片或链接。
 type Citations struct {
-	Tickets  []TicketCitation  `json:"tickets"`
-	Releases []ReleaseCitation `json:"releases"`
+	Tickets   []TicketCitation    `json:"tickets"`
+	Releases  []ReleaseCitation   `json:"releases"`
+	Knowledge []KnowledgeCitation `json:"knowledge"` // 知识条目（REQ-006）
+}
+
+// KnowledgeCitation 是回答引用的知识条目。Question 为空表示条目已停用、删除或不再可访问（只保留编号）；
+// SourceTicketID 只在调用者能查看来源工单时填写。
+type KnowledgeCitation struct {
+	ID             int64  `json:"id"`
+	Question       string `json:"question"`
+	SourceTicketID int64  `json:"source_ticket_id,omitempty"`
 }
 
 // TicketCitation 是回答引用的工单。
@@ -218,7 +227,10 @@ func publicMessage(m *assistant.Message) ConversationMessage {
 }
 
 func publicCitations(c assistant.Citations) Citations {
-	out := Citations{Tickets: []TicketCitation{}, Releases: []ReleaseCitation{}}
+	out := Citations{Tickets: []TicketCitation{}, Releases: []ReleaseCitation{}, Knowledge: []KnowledgeCitation{}}
+	for _, k := range c.Knowledge {
+		out.Knowledge = append(out.Knowledge, KnowledgeCitation(k))
+	}
 	for _, t := range c.Tickets {
 		out.Tickets = append(out.Tickets, TicketCitation(t))
 	}
@@ -282,6 +294,7 @@ func (l *Lingo) newAssistant() (*assistant.Service, error) {
 		},
 	}
 	o.BrainFor = l.brainFor // 每轮提问取当前的模型（连接配置可在运行时修改）
+	o.Knowledge = l.knowledge
 	s, err := assistant.New(o)
 	if err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)

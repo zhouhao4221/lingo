@@ -153,3 +153,6 @@ func (m openAIModel) Chat(ctx context.Context, messages []Message) (string, erro
 func (m openAIModel) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	return m.c.Embed(ctx, texts)
 }
+
+// EmbeddingModelName 实现 EmbeddingModelNamer。
+func (m openAIModel) EmbeddingModelName() string { return m.c.EmbeddingModelName() }

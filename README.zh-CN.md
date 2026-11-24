@@ -8,7 +8,7 @@
 
 灵工只提供公开 API（Go 方法、REST Handler、MCP Server、Gitea Webhook Handler），无租户、无前端：登录、用户管理、界面与部署由接入方负责。
 
-> **状态：** 工单流程已端到端实现；知识问答首期（工单与版本问答）已实现，知识库检索尚未实现。首个正式版本发布前 API 仍可能调整。
+> **状态：** 工单流程已端到端实现；知识问答（工单与版本问答）与知识库一期（后台答复入库、检索作答）已实现，知识库的模型抽取与审核尚未实现。首个正式版本发布前 API 仍可能调整。
 
 ## 功能
 
@@ -145,11 +145,11 @@ lingo.Config{
 用户可以用自然语言问工单与发版，例如“我上周提的登录 bug 修了吗”“最近发版了什么”“demo 项目还有几个待确认的工单”，也可以说“在 #12 补一句：复现环境是 Chrome 120”。推荐接入方把它做成一个独立的对话窗口：左侧是会话列表，右侧是聊天区。
 
 - 灵工的做法：模型只把提问解析为查询意图；查询由灵工按调用者的角色与项目执行（可见范围同 `GetTicket`）；模型依据查询结果组织回答。回答附结构化引用（`citations`：工单 ID、标题、状态、Issue 地址；版本 tag、发布时间），可渲染为卡片或链接。
-- 送给模型的内容：提问与最近 10 轮对话；工单的编号、项目、仓库、类型、标题、状态、时间、修复版本、里程碑与正文摘要；单张工单的最近 5 条评论正文（按提问人可见范围，reviewer / admin 包括研发内部讨论）；版本的名称、说明摘要、上线记录与修复的工单。不含提交人与评论作者的姓名、邮箱、用户 ID（例外：配置了 `TicketAudience` 时，同事工单带提交人姓名，见上文「同事可见」），也不含表单字段、提交环境与附件。模型由接入方提供，请按自己的合规要求选择。
+- 送给模型的内容：提问与最近 10 轮对话；工单的编号、项目、仓库、类型、标题、状态、时间、修复版本、里程碑与正文摘要；单张工单的最近 5 条评论正文（按提问人可见范围，reviewer / admin 包括研发内部讨论）；版本的名称、说明摘要、上线记录与修复的工单；知识类问题另含检索到的知识条目（问题与答案摘要）。不含提交人与评论作者的姓名、邮箱、用户 ID（例外：配置了 `TicketAudience` 时，同事工单带提交人姓名，见上文「同事可见」），也不含表单字段、提交环境与附件。模型由接入方提供，请按自己的合规要求选择。
 - 写操作须确认：要求留言时，助手消息带 `pending_action`；窗口可显示“确认 / 取消”按钮（调用 confirm / cancel），用户也可以直接回复“确认”。30 分钟内有效，取消、问别的或超时后作废。
 - 会话只有本人可见（admin 也不行），可续聊、删除；灵工不自动清理，保留多久由接入方决定。
 - 需要 `Config.Model`（意图解析用 `LightModel`，为空时用 `Model`）；未配置时发送返回 `ErrNoModel`（REST 501）。模型实现 `lingo.StreamModel` 时逐字输出，内置模型已实现（注意 `OpenAIConfig.HTTPClient` 的超时是整个回答的时限，默认 90 秒）。
-- 首期只回答工单与版本相关的问题；知识库检索、业务数据 `Tool` 后续提供。
+- 回答工单、版本与知识类问题（使用方法、原因、怎么办，见下节「知识库」）；业务数据 `Tool` 后续提供。
 
 ```go
 c, _ := l.CreateConversation(ctx, u, "")
@@ -170,6 +170,16 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 
 最后恰好一个 `message` 事件，以它的 `content` 为准；开始输出后出错发送 `event: error`（`{"code","message"}`）；开始输出前的错误（如 404、409、501）仍是普通 JSON 错误响应。模型出错时助手消息的 `status` 为 `failed`，可调用 retry 重试。用 `fetch` 读取流（`EventSource` 不支持 POST）。
 
+### 知识库
+
+知识类问题（“导出报表为什么是空的”“怎么配置 SSO”）由知识库回答：灵工在提问人可访问的项目里检索已生效的知识条目（最多 5 条），并检索提问人可见的同类工单，交给模型依据作答；回答在 `citations.knowledge` 中附知识条目（编号、问题；来源工单只在提问人能查看时给出），条目的引用次数加一。都没有命中时回复“知识库里还没有相关内容”，引导提交咨询工单。
+
+- **入库**：reviewer / admin 直接答复待确认工单时可勾选加入知识库（`AnswerTicketWith`，REST `POST /tickets/{id}/answer` 带 `knowledge`，MCP `answer_ticket` 的 `add_to_knowledge`），默认不入库；也可手动新建（`CreateKnowledge`）。入库即生效、所有能访问该项目的用户都可能检索到，**请把问题与答案改写为通用内容，去掉只针对提交人的信息**；邮箱与手机号会自动替换为占位。
+- **维护**（reviewer / admin，限 `User.Projects`）：`ListKnowledge`（可按引用次数排序）、`UpdateKnowledge`、`DisableKnowledge` / `EnableKnowledge`、`DeleteKnowledge`、`DisableKnowledgeByTicket`（提交人要求删除个人数据时，按来源工单停用派生的条目）。
+- **检索**（所有角色）：`SearchKnowledge`（REST `GET /knowledge/search`、MCP `search_knowledge`）。不需要数据库扩展：中文按二元切词、用 GIN 数组索引按重合度排序，没有命中时按关键词包含匹配兜底。
+- **向量（可选）**：主模型的 `Embed` 可用时，`Run` 在后台为条目生成向量（新建、编辑后，或换了向量模型），检索时对前 50 条按相似度重排；模型实现 `lingo.EmbeddingModelNamer` 时按模型名区分向量（内置适配器已实现，DeepSeek 与未配置 `EmbeddingModel` 的 OpenAI 适配器不生成向量），否则按维度区分。查询时多一次 `Embed` 调用，出错时只用切词检索。
+- 用量：作答记为 `knowledge_answer`，生成向量记为 `knowledge_embed`（只记次数）。需要迁移 `0005_knowledge.sql`。
+
 ### 连接配置（存数据库）
 
 模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册 Webhook、拒绝重定向）可以不写在代码里，存入数据库，由有权限的人在接入方的配置页里修改，**不用重启**：
@@ -189,6 +199,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 |---|---|
 | `GET /projects`、`GET /ticket-types` | 项目与仓库；工单类型及 Issue 模板表单字段 |
 | `POST /tickets`、`GET /tickets/mine`、`GET /tickets/{id}`、`POST /tickets/{id}/comments` | 提交、列表、详情（含评论与附件）、补充 |
+| `GET /knowledge/search?q=&project=&limit=`；`GET` / `POST /knowledge`、`PUT` / `DELETE /knowledge/{id}`、`POST /knowledge/{id}/disable\|enable`、`POST /knowledge/disable-by-ticket` | 知识库：检索（所有角色）；维护（reviewer / admin） |
 | `GET /tickets/visible?project=&status=&before=` | 可查看的工单：本人的 + `TicketAudience` 放宽可见的同事的（只读） |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
@@ -206,7 +217,7 @@ data: {"id":8,"role":"assistant","content":"#12 已修复，已在 v1.3.0 发布
 
 ### MCP 工具
 
-`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`。
+`list_projects`、`list_ticket_types`、`create_ticket`、`get_ticket`、`list_my_tickets`、`list_visible_tickets`、`reply_ticket`、`add_perspective`、`list_perspectives`、`list_events`、`list_triage`、`forward_ticket`、`answer_ticket`、`merge_ticket`、`reject_ticket`、`reject_forwarded_ticket`、`get_issue_close`、`retry_issue_close`、`list_releases`、`get_release`、`get_llm_usage`、`ask`、`list_conversations`、`list_conversation_messages`、`confirm_action`、`cancel_action`、`search_knowledge`。
 
 ### 事件
 
