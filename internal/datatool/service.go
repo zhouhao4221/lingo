@@ -135,6 +135,15 @@ func New(o Options) (*Service, []Rejection) {
 // Empty 报告没有可用的工具。
 func (s *Service) Empty() bool { return len(s.tools) == 0 }
 
+// All 返回全部已接受的工具（按注册顺序）。
+func (s *Service) All() []Info {
+	out := make([]Info, 0, len(s.tools))
+	for _, t := range s.tools {
+		out = append(out, Info{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+	}
+	return out
+}
+
 // Visible 返回调用人可调用的工具（按注册顺序）。
 func (s *Service) Visible(c Caller) []Info {
 	var out []Info

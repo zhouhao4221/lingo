@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -237,5 +239,93 @@ func TestDataToolPurge(t *testing.T) {
 	var n int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM lingo_data_requests").Scan(&n); err != nil || n != 1 {
 		t.Errorf("rows after purge = %d, %v", n, err)
+	}
+}
+
+func mcpRaw(t *testing.T, h http.Handler, hdr map[string]string, body string) string {
+	t.Helper()
+	r := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Body.String()
+}
+
+const toolsListReq = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+
+// 回归：不注册工具或注册的全部被忽略时，tools/list 与 v0.8.0 完全一致（testdata 由 v0.8.0 生成），initialize 不变。
+func TestDataToolMCPRegression(t *testing.T) {
+	golden, err := os.ReadFile("testdata/mcp_tools_v0.8.0.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := testDB(t, true)
+	user := map[string]string{"X-User": "u1", "X-Role": "external", "X-Scopes": "order:read"}
+	ignored := []lingo.Tool{
+		func() lingo.Tool { x := orderTool(""); x.Mode = lingo.ToolWrite; return x }(),
+		func() lingo.Tool { x := orderTool(""); x.Scope = ""; return x }(),
+		func() lingo.Tool { x := orderTool(""); x.Name = "ASK"; return x }(),
+		func() lingo.Tool { x := orderTool(""); x.Timeout = 2 * time.Minute; return x }(),
+	}
+	none := newToolLingo(t, db)
+	bad := newToolLingo(t, db, ignored...)
+	for name, l := range map[string]*lingo.Lingo{"none": none, "all ignored": bad} {
+		if got := mcpRaw(t, l.MCPHandler(), user, toolsListReq); got != string(golden) {
+			t.Errorf("%s: tools/list differs from v0.8.0", name)
+		}
+	}
+	init := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`
+	if a, b := mcpRaw(t, none.MCPHandler(), user, init), mcpRaw(t, bad.MCPHandler(), user, init); a != b {
+		t.Errorf("initialize differs:\n%s\n%s", a, b)
+	}
+}
+
+func TestDataToolMCP(t *testing.T) {
+	golden, _ := os.ReadFile("testdata/mcp_tools_v0.8.0.json")
+	db := testDB(t, true)
+	ctx := context.Background()
+	hrTool := orderTool("hr")
+	hrTool.Name = "get_hr_order"
+	l := newToolLingo(t, db, orderTool(""), hrTool)
+	h := l.MCPHandler()
+	scoped := map[string]string{"X-User": "u1", "X-Role": "agent", "X-Scopes": "order:read", "X-Projects": "crm"}
+	plain := map[string]string{"X-User": "u2", "X-Role": "agent"}
+	if got := mcpRaw(t, h, plain, toolsListReq); got != string(golden) {
+		t.Error("caller without scope sees business tools")
+	}
+	list := mcpRaw(t, h, scoped, toolsListReq)
+	if !strings.Contains(list, `"name":"get_order"`) || !strings.Contains(list, `"name":"list_projects"`) {
+		t.Errorf("tools/list = %s", list)
+	}
+	call := func(hdr map[string]string, name, args string) string {
+		return mcpRaw(t, h, hdr, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+name+`","arguments":`+args+`}}`)
+	}
+	ok := call(scoped, "get_order", `{"order_id":"1024"}`)
+	if !strings.Contains(ok, `\"owner\":\"u1\"`) || strings.Contains(ok, "13800000000") || !strings.Contains(ok, `"structuredContent"`) {
+		t.Errorf("call = %s", ok)
+	}
+	missing := strings.ReplaceAll(call(plain, "no_such_tool", `{}`), "no_such_tool", "X")
+	if got := strings.ReplaceAll(call(plain, "get_order", `{"order_id":"1"}`), "get_order", "X"); got != missing {
+		t.Errorf("no-scope call differs from missing tool:\n%s\n%s", got, missing)
+	}
+	// 结果声明的项目（hr）调用人无权访问：与工具不存在相同
+	if got := strings.ReplaceAll(call(scoped, "get_hr_order", `{"order_id":"1"}`), "get_hr_order", "X"); got != missing {
+		t.Errorf("project denial differs from missing tool:\n%s\n%s", got, missing)
+	}
+	bad := call(scoped, "get_order", `{"order_id":98765}`)
+	if !strings.Contains(bad, "invalid arguments: parameter order_id must be string") || strings.Contains(bad, "98765") {
+		t.Errorf("invalid args = %s", bad)
+	}
+	rs, err := l.ListDataRequests(ctx, lingo.User{ID: "u1", Role: lingo.RoleAgent}, lingo.DataRequestFilter{})
+	if err != nil || len(rs) != 3 {
+		t.Fatalf("audit = %+v, %v", rs, err)
+	}
+	for _, r := range rs {
+		if r.Channel != "mcp" || r.Project != "" {
+			t.Errorf("mcp record = %+v", r)
+		}
 	}
 }

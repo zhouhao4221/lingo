@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zhouhao4221/lingo/internal/datatool"
 	"github.com/zhouhao4221/lingo/internal/mcp"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -19,6 +20,7 @@ import (
 // list_triage、forward_ticket、answer_ticket、merge_ticket、reject_ticket、reject_forwarded_ticket、get_issue_close、
 // retry_issue_close、list_releases、get_release、get_llm_usage、list_visible_tickets；
 // 知识问答：ask、list_conversations、list_conversation_messages、confirm_action、cancel_action、rate_message；知识库：search_knowledge。
+// 另列出调用者可调用的业务数据工具（Config.Tools，按 User.Scopes 过滤，REQ-008）：看不到的工具按不存在处理，规则同 CallTool。
 func (l *Lingo) MCPHandler() http.Handler { return l.mcp }
 
 const mcpInstructions = `灵工（lingo）连接用户与研发：用户提交咨询 / Bug / 需求工单，经后台确认后由机器人在 Gitea 建 Issue；研发在 Gitea 处理，
@@ -37,7 +39,7 @@ func (l *Lingo) replyModeNote() string {
 
 func (l *Lingo) newMCPHandler() http.Handler {
 	return mcp.New(mcp.Options{
-		Name: "lingo", Version: "0.1.0", Instructions: mcpInstructions + l.replyModeNote(),
+		Name: "lingo", Version: "0.1.0", Instructions: mcpInstructions + l.replyModeNote() + l.dataToolsNote(),
 		AllowedOrigins: l.cfg.MCPAllowedOrigins,
 		Authenticate:   func(r *http.Request) (any, error) { return l.cfg.Authenticate(r) },
 		ErrorText: func(err error) (string, bool) {
@@ -46,9 +48,56 @@ func (l *Lingo) newMCPHandler() http.Handler {
 			}
 			return "", false
 		},
-		Tools:  l.mcpTools(),
+		Tools:  append(l.mcpTools(), l.dataMCPTools()...),
 		Logger: l.log,
 	})
+}
+
+// dataToolsNote 在注册了业务数据工具时补充说明（没有时不改变 initialize 的内容）。
+func (l *Lingo) dataToolsNote() string {
+	if l.data.Empty() {
+		return ""
+	}
+	return "\n另有接入方注册的业务数据工具（只读），以调用者身份查询其有权访问的业务数据；结果已脱敏，可能被截断（truncated 为 true）。"
+}
+
+// dataMCPTools 把业务数据工具暴露为 MCP 工具：只对 User.Scopes 覆盖的调用者可见；无权调用、不存在与结果归属
+// 不可访问时都按工具不存在响应。
+func (l *Lingo) dataMCPTools() []mcp.Tool {
+	var out []mcp.Tool
+	for _, info := range l.data.All() {
+		name := info.Name
+		out = append(out, mcp.Tool{Name: name, Description: info.Description, InputSchema: info.InputSchema,
+			Visible: func(user any) bool {
+				u, _ := user.(User)
+				c, err := dataCaller(u)
+				return err == nil && l.data.CanCall(c, name)
+			},
+			Call: func(ctx context.Context, user any, args json.RawMessage) (any, error) {
+				u, _ := user.(User)
+				c, err := dataCaller(u)
+				if err != nil {
+					return nil, mcp.ErrUnknownTool
+				}
+				r, err := l.data.Run(ctx, c, name, args, datatool.ChannelMCP, 0)
+				var ie *datatool.InputError
+				switch {
+				case errors.As(err, &ie):
+					return nil, &mcp.ArgError{Msg: ie.Error()}
+				case errors.Is(err, datatool.ErrNotFound):
+					return nil, mcp.ErrUnknownTool
+				case err != nil:
+					return nil, dataErr(err)
+				case r.Truncated:
+					return struct {
+						Truncated bool   `json:"truncated"`
+						Text      string `json:"text"`
+					}{true, r.Text}, nil
+				}
+				return r.Data, nil
+			}})
+	}
+	return out
 }
 
 // builtinToolNames 返回内置 MCP 工具名（业务数据工具不得与之重名）。
