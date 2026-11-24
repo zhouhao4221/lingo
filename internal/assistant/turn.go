@@ -392,6 +392,8 @@ func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired
 			return &reply{content: textNotFound, outcome: OutcomeNotFound}, nil
 		case IntentReleaseList:
 			return &reply{content: textNoRelease, outcome: OutcomeNotFound}, nil
+		case IntentKnowledgeAsk:
+			return &reply{content: textNoKnowledge, outcome: OutcomeNotFound}, nil
 		}
 		in.Project = ""
 	}
@@ -409,6 +411,11 @@ func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired
 			return &reply{content: textExpired, outcome: OutcomeActionExpired}, nil
 		}
 		return &reply{content: textNoAction, outcome: OutcomeNoAction}, nil
+	case IntentKnowledgeAsk:
+		if s.o.Knowledge == nil {
+			return &reply{content: textOutOfScope, outcome: OutcomeOutOfScope}, nil
+		}
+		return s.askKnowledge(ctx, tc, in)
 	case IntentOutOfScope:
 		return &reply{content: textOutOfScope, outcome: OutcomeOutOfScope}, nil
 	}
@@ -439,7 +446,8 @@ func (s *Service) history(ctx context.Context, p auth.Principal, convID, beforeI
 	}
 	out := make([]HistoryItem, 0, len(ms))
 	for _, m := range ms {
-		h := HistoryItem{Role: m.Role, Content: textutil.ClipEllipsis(m.Content, historyRunes), Tickets: m.Citations.Tickets}
+		h := HistoryItem{Role: m.Role, Content: textutil.ClipEllipsis(m.Content, historyRunes), Tickets: m.Citations.Tickets,
+			Knowledge: m.Citations.Knowledge}
 		for _, r := range m.Citations.Releases {
 			h.Tags = append(h.Tags, r.Repo+" "+r.Tag)
 		}

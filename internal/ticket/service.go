@@ -313,6 +313,12 @@ func (s *Service) Forward(ctx context.Context, p auth.Principal, id int64, in Fo
 
 // Answer 直接答复待确认工单并结束（reviewer / admin），答复对提交人可见。
 func (s *Service) Answer(ctx context.Context, p auth.Principal, id int64, answer string) (*Ticket, error) {
+	return s.AnswerWith(ctx, p, id, answer, nil)
+}
+
+// AnswerWith 同 Answer，另在同一事务内、答复保存后调用 after（如答复时勾选入库知识，REQ-006）；after 返回错误时整体回滚。
+func (s *Service) AnswerWith(ctx context.Context, p auth.Principal, id int64, answer string,
+	after func(ctx context.Context, tx Tx, t *Ticket, answer string) error) (*Ticket, error) {
 	if answer = strings.TrimSpace(answer); answer == "" {
 		return nil, fmt.Errorf("%w: answer is required", ErrInvalid)
 	}
@@ -321,6 +327,11 @@ func (s *Service) Answer(ctx context.Context, p auth.Principal, id int64, answer
 		if _, err := tx.AddComment(ctx, Comment{TicketID: t.ID, Source: "staff", AuthorID: p.ID, AuthorName: p.Name, Body: answer,
 			Public: true, At: s.o.Now()}); err != nil {
 			return "", "", err
+		}
+		if after != nil {
+			if err := after(ctx, tx, t, answer); err != nil {
+				return "", "", err
+			}
 		}
 		return answer, "", nil // 答复已作为评论保存
 	})

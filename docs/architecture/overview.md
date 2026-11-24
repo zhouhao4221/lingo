@@ -56,7 +56,7 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 | 根包 `lingo` | 公开 API：`Config`、扩展点接口、`New`、Handler、`Run`、`Migrate` |
 | `internal/assistant` | 知识问答 Agent：会话（本人可见）、意图到工单 / 版本查询、附引用的回答、待确认操作（本期：留言）；检索增强回答、转工单待实现 |
 | `internal/llm` | 经 `lingo.Model` 的对话与向量调用封装：建单整理、问答的意图解析 / 确认判断 / 组织回答，OpenAI 兼容接口（含流式） |
-| `internal/mcp` | MCP Server：工具定义（list_projects、ask、list_conversations、confirm_action、search_knowledge（待实现）、create_ticket、get_ticket、reply_ticket、add_perspective、list_perspectives、list_releases、get_release） |
+| `internal/mcp` | MCP Server：工具定义（list_projects、ask、list_conversations、confirm_action、search_knowledge、create_ticket、get_ticket、reply_ticket、add_perspective、list_perspectives、list_releases、get_release） |
 | `internal/settings` | 连接配置（模型与 Gitea）：合并代码配置与数据库、按字段修改、校验、掩码；运行时热更新由根包按版本号刷新 |
 | `internal/project` | 项目与仓库：同步声明、仓库归属与类型、默认仓库、Issue 落库仓库判定 |
 | `internal/auth` | 调用 `Authenticate`，按固定角色与项目范围鉴权 |
@@ -67,7 +67,7 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 | `internal/notify` | 进展事件写 outbox，投递给 `Notifier` |
 | `internal/release` | 版本记录：同步 Gitea Release、解析 Issue 引用、工单关联修复版本 |
 | `internal/connector` | 业务数据工具执行：scope 预校验、写操作确认、脱敏、审计、熔断 |
-| `internal/knowledge` | 知识库问答抽取、审核与检索 |
+| `internal/knowledge` | 知识库：条目入库校验与脱敏、维护、检索（二元切词 + 可选向量重排）、向量生成（REQ-006）；抽取与审核见 REQ-007 |
 | `internal/selfcheck` | 启动自检：Gitea 版本、仓库与权限、标签补齐、Webhook 注册与测试投递、模板与部署工作流 |
 | `internal/worker` | 消费 Webhook 投递并同步工单、按工单顺序投递通知 outbox；同步补偿、知识库生成 |
 | `internal/store` | 基于 `*sql.DB` 的仓储实现 |

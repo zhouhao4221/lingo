@@ -32,6 +32,9 @@ type OpenAIOptions struct {
 	MaxRetries     int               // 429 / 5xx / 网络错误的重试次数：0 取默认 2，负数不重试
 }
 
+// EmbeddingModelName 返回向量模型名（未配置时为空），供知识库区分不同模型生成的向量。
+func (c *OpenAI) EmbeddingModelName() string { return c.o.EmbeddingModel }
+
 // ErrNoEmbedding 表示未配置向量模型。
 var ErrNoEmbedding = errors.New("llm: embedding model not configured")
 

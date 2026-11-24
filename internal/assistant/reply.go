@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"fmt"
+	"github.com/zhouhao4221/lingo/internal/knowledge"
 	"strings"
 	"time"
 
@@ -12,16 +13,17 @@ import (
 
 // 固定回复：这些情形不调用模型。
 const (
-	textNotFound   = "没有找到相关的工单。如果要反馈新问题，可以提交一个工单。"
-	textNoRelease  = "暂无符合条件的发版记录。"
-	textOutOfScope = "目前我只能回答工单和版本相关的问题，比如工单进展、修复版本、最近发版。其他问题可以提交一个咨询工单，由研发人员答复。"
-	textClarify    = "没太理解你的问题，能换个说法，或者说明是哪个工单、哪个项目吗？"
-	textNoAction   = "当前没有待确认的操作。"
-	textExpired    = "这个操作已经过期（超过 30 分钟未确认），没有执行。需要的话请重新发起。"
-	textCancelled  = "好的，已取消，没有执行。"
-	textNeedTarget = "要在哪个工单留言？请带上工单号，例如：在 #12 留言：复现环境是 Chrome 120。"
-	textNeedBody   = "请直接给出要留言的原文，例如：在 #12 留言：复现环境是 Chrome 120。"
-	textReadOnly   = "这是同事提交的工单，你可以查看进展，但只能对自己提交的工单留言。"
+	textNotFound    = "没有找到相关的工单。如果要反馈新问题，可以提交一个工单。"
+	textNoRelease   = "暂无符合条件的发版记录。"
+	textOutOfScope  = "目前我只能回答工单和版本相关的问题，比如工单进展、修复版本、最近发版。其他问题可以提交一个咨询工单，由研发人员答复。"
+	textClarify     = "没太理解你的问题，能换个说法，或者说明是哪个工单、哪个项目吗？"
+	textNoAction    = "当前没有待确认的操作。"
+	textExpired     = "这个操作已经过期（超过 30 分钟未确认），没有执行。需要的话请重新发起。"
+	textCancelled   = "好的，已取消，没有执行。"
+	textNeedTarget  = "要在哪个工单留言？请带上工单号，例如：在 #12 留言：复现环境是 Chrome 120。"
+	textNeedBody    = "请直接给出要留言的原文，例如：在 #12 留言：复现环境是 Chrome 120。"
+	textNoKnowledge = "知识库里还没有相关内容。可以提交一个咨询工单，由后台人员答复。"
+	textReadOnly    = "这是同事提交的工单，你可以查看进展，但只能对自己提交的工单留言。"
 )
 
 var statusNames = map[string]string{
@@ -68,6 +70,24 @@ func candidatesText(ts []*ticket.Ticket, total int) string {
 	}
 	if total > len(ts) {
 		fmt.Fprintf(&b, "\n以上为最近的 %d 张，可以补充时间、类型或关键词缩小范围。", len(ts))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// knowledgeText 是知识问答的确定性回答（模型输出不可用时）：列出检索到的条目与同类工单。
+func knowledgeText(hits []knowledge.Hit, ts []*ticket.Ticket, loc *time.Location) string {
+	var b strings.Builder
+	if len(hits) > 0 {
+		b.WriteString("知识库中的相关内容：\n\n")
+		for _, h := range hits {
+			b.WriteString(fmt.Sprintf("- K%d %s：%s\n", h.ID, oneLine(h.Question), textutil.ClipEllipsis(oneLine(h.Answer), 200)))
+		}
+	}
+	if len(ts) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("相关工单：\n\n" + ticketsText(ts, loc))
 	}
 	return strings.TrimSpace(b.String())
 }

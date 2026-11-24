@@ -1,0 +1,299 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/zhouhao4221/lingo/internal/knowledge"
+	"github.com/zhouhao4221/lingo/internal/ticket"
+)
+
+// sqlRunner 是 *sql.DB 与 *sql.Tx 的公共方法。
+type sqlRunner interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+const knowledgeColumns = `k.id, p.key, COALESCE(r.owner || '/' || r.name, ''), k.question, k.answer, k.source,
+	COALESCE(k.source_ticket_id, 0), k.status, k.cite_count, k.created_by, k.updated_by, k.created_at, k.updated_at`
+
+const knowledgeFrom = ` FROM lingo_knowledge k JOIN lingo_projects p ON p.id = k.project_id
+	LEFT JOIN lingo_repos r ON r.id = k.repo_id`
+
+func scanKnowledge(sc interface{ Scan(...any) error }, extra ...any) (*knowledge.Entry, error) {
+	e := &knowledge.Entry{}
+	err := sc.Scan(append([]any{&e.ID, &e.ProjectKey, &e.Repo, &e.Question, &e.Answer, &e.Source, &e.SourceTicketID, &e.Status,
+		&e.CiteCount, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt}, extra...)...)
+	return e, err
+}
+
+// knowledgeRepo 解析项目与可选仓库的 ID；项目或仓库不存在时返回 ErrInvalid。
+func knowledgeRepo(ctx context.Context, q sqlRunner, project, repo string) (int64, sql.NullInt64, error) {
+	var pid int64
+	if err := q.QueryRowContext(ctx, "SELECT id FROM lingo_projects WHERE key = $1", project).Scan(&pid); errors.Is(err, sql.ErrNoRows) {
+		return 0, sql.NullInt64{}, fmt.Errorf("%w: project %q", ticket.ErrInvalid, project)
+	} else if err != nil {
+		return 0, sql.NullInt64{}, err
+	}
+	if repo == "" {
+		return pid, sql.NullInt64{}, nil
+	}
+	var rid int64
+	err := q.QueryRowContext(ctx, "SELECT id FROM lingo_repos WHERE project_id = $1 AND lower(owner || '/' || name) = lower($2)",
+		pid, repo).Scan(&rid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, sql.NullInt64{}, fmt.Errorf("%w: repo %q not in project %q", ticket.ErrInvalid, repo, project)
+	}
+	return pid, sql.NullInt64{Int64: rid, Valid: err == nil}, err
+}
+
+func insertKnowledge(ctx context.Context, q sqlRunner, e knowledge.NewEntry) (int64, error) {
+	pid, rid, err := knowledgeRepo(ctx, q, e.ProjectKey, e.Repo)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = q.QueryRowContext(ctx, `INSERT INTO lingo_knowledge (project_id, repo_id, question, answer, source, source_ticket_id,
+		search_tokens, created_by, updated_by) VALUES ($1, $2, $3, $4, $5, $6, ($7::text)::text[], $8, $8) RETURNING id`,
+		pid, rid, e.Question, e.Answer, e.Source, nullInt64(e.SourceTicketID), textArray(e.Tokens), e.By).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("store: insert knowledge: %w", err)
+	}
+	return id, nil
+}
+
+// InsertKnowledge 实现 knowledge.Store。
+func (s *Store) InsertKnowledge(ctx context.Context, e knowledge.NewEntry) (int64, error) {
+	return insertKnowledge(ctx, s.db, e)
+}
+
+// InsertKnowledge 在工单事务内入库（答复工单时勾选入库，实现 knowledge.Writer）。
+func (x *ticketTx) InsertKnowledge(ctx context.Context, e knowledge.NewEntry) (int64, error) {
+	return insertKnowledge(ctx, x.tx, e)
+}
+
+// GetKnowledge 实现 knowledge.Store；不存在时返回 ticket.ErrNotFound。
+func (s *Store) GetKnowledge(ctx context.Context, id int64) (*knowledge.Entry, error) {
+	e, err := scanKnowledge(s.db.QueryRowContext(ctx, "SELECT "+knowledgeColumns+knowledgeFrom+" WHERE k.id = $1", id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ticket.ErrNotFound
+	}
+	return e, err
+}
+
+func (s *Store) knowledgeList(ctx context.Context, query string, args ...any) ([]*knowledge.Entry, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list knowledge: %w", err)
+	}
+	defer rows.Close()
+	var out []*knowledge.Entry
+	for rows.Next() {
+		e, err := scanKnowledge(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// KnowledgeByIDs 实现 knowledge.Store。
+func (s *Store) KnowledgeByIDs(ctx context.Context, ids []int64) ([]*knowledge.Entry, error) {
+	return s.knowledgeList(ctx, "SELECT "+knowledgeColumns+knowledgeFrom+" WHERE k.id = ANY(($1::text)::bigint[])", textArrayInt(ids))
+}
+
+func affected(res sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ticket.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateKnowledge 实现 knowledge.Store。
+func (s *Store) UpdateKnowledge(ctx context.Context, id int64, d knowledge.Draft, tokens []string, by string) error {
+	if err := s.db.QueryRowContext(ctx, "SELECT p.key FROM lingo_knowledge k JOIN lingo_projects p ON p.id = k.project_id WHERE k.id = $1",
+		id).Scan(&d.ProjectKey); errors.Is(err, sql.ErrNoRows) {
+		return ticket.ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	_, rid, err := knowledgeRepo(ctx, s.db, d.ProjectKey, d.Repo)
+	if err != nil {
+		return err
+	}
+	return affected(s.db.ExecContext(ctx, `UPDATE lingo_knowledge SET question = $2, answer = $3, repo_id = $4,
+		search_tokens = ($5::text)::text[], embedding = NULL, embed_model = NULL, embed_locked_until = NULL, updated_by = $6,
+		updated_at = now() WHERE id = $1`, id, d.Question, d.Answer, rid, textArray(tokens), by))
+}
+
+// SetKnowledgeStatus 实现 knowledge.Store。
+func (s *Store) SetKnowledgeStatus(ctx context.Context, id int64, status, by string) error {
+	return affected(s.db.ExecContext(ctx, `UPDATE lingo_knowledge SET status = $2, updated_by = $3, updated_at = now()
+		WHERE id = $1`, id, status, by))
+}
+
+// DeleteKnowledge 实现 knowledge.Store。
+func (s *Store) DeleteKnowledge(ctx context.Context, id int64) error {
+	return affected(s.db.ExecContext(ctx, "DELETE FROM lingo_knowledge WHERE id = $1", id))
+}
+
+// DisableKnowledgeByTicket 实现 knowledge.Store。
+func (s *Store) DisableKnowledgeByTicket(ctx context.Context, ticketID int64, projects []string, by string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE lingo_knowledge k SET status = 'disabled', updated_by = $3, updated_at = now()
+		FROM lingo_projects p WHERE p.id = k.project_id AND k.source_ticket_id = $1 AND k.status = 'active'
+		AND p.key = ANY(($2::text)::text[])`, ticketID, textArray(projects), by)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// ListKnowledge 实现 knowledge.Store。
+func (s *Store) ListKnowledge(ctx context.Context, q knowledge.ListQuery) ([]*knowledge.Entry, error) {
+	order := "k.updated_at DESC, k.id DESC"
+	if q.Sort == knowledge.SortCites {
+		order = "k.cite_count DESC, k.id DESC"
+	}
+	return s.knowledgeList(ctx, "SELECT "+knowledgeColumns+knowledgeFrom+`
+		WHERE p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2) AND ($3 = '' OR k.status = $3)
+		ORDER BY `+order+" OFFSET $4 LIMIT $5", textArray(q.Projects), q.Project, q.Status, q.Offset, q.Limit)
+}
+
+func (s *Store) knowledgeHits(ctx context.Context, query string, args ...any) ([]knowledge.Hit, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: search knowledge: %w", err)
+	}
+	defer rows.Close()
+	var out []knowledge.Hit
+	for rows.Next() {
+		var score float64
+		e, err := scanKnowledge(rows, &score)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, knowledge.Hit{Entry: e, Score: score})
+	}
+	return out, rows.Err()
+}
+
+// SearchKnowledgeTokens 实现 knowledge.Store：重合度 = 重合词数 / sqrt(条目词数)，同分时新的在前。
+func (s *Store) SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, limit int) ([]knowledge.Hit, error) {
+	return s.knowledgeHits(ctx, "SELECT "+knowledgeColumns+`,
+		(SELECT count(*) FROM unnest(k.search_tokens) t WHERE t = ANY(($3::text)::text[]))::float8
+			/ sqrt(GREATEST(cardinality(k.search_tokens), 1)) AS score`+knowledgeFrom+`
+		WHERE k.status = 'active' AND k.search_tokens && ($3::text)::text[]
+		  AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
+		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(tokens), limit)
+}
+
+// SearchKnowledgeWords 实现 knowledge.Store。
+func (s *Store) SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int) ([]knowledge.Hit, error) {
+	pats := make([]string, len(words))
+	for i, w := range words {
+		pats[i] = "%" + likeEscape(w) + "%"
+	}
+	return s.knowledgeHits(ctx, "SELECT "+knowledgeColumns+`,
+		(SELECT count(*) FROM unnest(($3::text)::text[]) w WHERE k.question ILIKE w ESCAPE '\' OR k.answer ILIKE w ESCAPE '\')::float8 AS score`+
+		knowledgeFrom+`
+		WHERE k.status = 'active' AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
+		  AND EXISTS (SELECT 1 FROM unnest(($3::text)::text[]) w WHERE k.question ILIKE w ESCAPE '\' OR k.answer ILIKE w ESCAPE '\')
+		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(pats), limit)
+}
+
+// KnowledgeEmbeddings 实现 knowledge.Store。
+func (s *Store) KnowledgeEmbeddings(ctx context.Context, ids []int64, model string) (map[int64][]float32, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, embedding::text FROM lingo_knowledge
+		WHERE id = ANY(($1::text)::bigint[]) AND embed_model = $2 AND embedding IS NOT NULL`, textArrayInt(ids), model)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64][]float32{}
+	for rows.Next() {
+		var id int64
+		var txt string
+		if err := rows.Scan(&id, &txt); err != nil {
+			return nil, err
+		}
+		if v, err := parseRealArray(txt); err == nil {
+			out[id] = v
+		}
+	}
+	return out, rows.Err()
+}
+
+// AddKnowledgeCites 实现 knowledge.Store。
+func (s *Store) AddKnowledgeCites(ctx context.Context, ids []int64) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE lingo_knowledge SET cite_count = cite_count + 1 WHERE id = ANY(($1::text)::bigint[])",
+		textArrayInt(ids))
+	return err
+}
+
+// ClaimKnowledgeEmbeds 实现 knowledge.Store。
+func (s *Store) ClaimKnowledgeEmbeds(ctx context.Context, model string, limit int, lease time.Duration) ([]knowledge.Pending, error) {
+	rows, err := s.db.QueryContext(ctx, `UPDATE lingo_knowledge k SET embed_locked_until = now() + $3 * interval '1 millisecond'
+		FROM (SELECT id FROM lingo_knowledge
+		      WHERE status = 'active' AND (embedding IS NULL OR ($1 <> '' AND embed_model IS DISTINCT FROM $1))
+		        AND (embed_locked_until IS NULL OR embed_locked_until < now())
+		      ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED) c
+		WHERE k.id = c.id RETURNING k.id, k.question || E'\n' || k.answer, k.updated_at`, model, limit, lease.Milliseconds())
+	if err != nil {
+		return nil, fmt.Errorf("store: claim knowledge embeds: %w", err)
+	}
+	defer rows.Close()
+	var out []knowledge.Pending
+	for rows.Next() {
+		var p knowledge.Pending
+		if err := rows.Scan(&p.ID, &p.Text, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SaveKnowledgeEmbedding 实现 knowledge.Store。
+func (s *Store) SaveKnowledgeEmbedding(ctx context.Context, id int64, updatedAt time.Time, vec []float32, model string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE lingo_knowledge SET embedding = ($3::text)::real[], embed_model = $4, embed_locked_until = NULL
+		WHERE id = $1 AND updated_at = $2`, id, updatedAt, realArray(vec), model)
+	return err
+}
+
+func realArray(v []float32) string {
+	ss := make([]string, len(v))
+	for i, f := range v {
+		ss[i] = strconv.FormatFloat(float64(f), 'g', -1, 32)
+	}
+	return "{" + strings.Join(ss, ",") + "}"
+}
+
+func parseRealArray(s string) ([]float32, error) {
+	s = strings.TrimSuffix(strings.TrimPrefix(s, "{"), "}")
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]float32, len(parts))
+	for i, p := range parts {
+		f, err := strconv.ParseFloat(p, 32)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = float32(f)
+	}
+	return out, nil
+}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/zhouhao4221/lingo/internal/knowledge"
 	"io"
 	"log/slog"
 	"net/http"
@@ -98,6 +99,8 @@ type Lingo struct {
 	tickets   *ticket.Service
 	releases  *release.Service
 	assistant *assistant.Service
+	knowledge *knowledge.Service
+	embedKick chan struct{} // 知识条目新建 / 编辑后提醒生成向量
 	tmpls     *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
@@ -181,6 +184,10 @@ func New(cfg Config) (*Lingo, error) {
 	}
 	if l.worker, err = l.newWorker(); err != nil {
 		return nil, err
+	}
+	l.embedKick = make(chan struct{}, 1)
+	if l.knowledge, err = knowledge.New(knowledge.Options{Store: l.store, Embedder: l.knowledgeEmbedder}); err != nil {
+		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	if l.assistant, err = l.newAssistant(); err != nil {
 		return nil, err
@@ -477,6 +484,11 @@ func (l *Lingo) Run(ctx context.Context) error {
 	if !l.cfg.SkipSelfCheck {
 		selfCheck()
 	}
+	checked.Add(1)
+	go func() { // 为知识条目生成向量（REQ-006）
+		defer checked.Done()
+		l.embedKnowledge(ctx)
+	}()
 	checked.Add(1)
 	go func() { // 定时检查连接配置；Gitea 连接变化后补跑一次自检（开启自动注册时同步 Webhook 密钥）
 		defer checked.Done()

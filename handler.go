@@ -23,6 +23,9 @@ import (
 // 连接配置（模型与 Gitea，权限见 Config.AuthorizeSettings）：GET / PUT /settings/connections、
 // POST /settings/connections/test。
 //
+// 知识库（REQ-006）：GET /knowledge/search?q=&project=&limit=（所有角色）；GET /knowledge、POST /knowledge、
+// PUT / DELETE /knowledge/{id}、POST /knowledge/{id}/disable|enable、POST /knowledge/disable-by-ticket（reviewer / admin）；
+// POST /tickets/{id}/answer 可带 {"knowledge":{"question","answer"}} 把答复加入知识库。
 // 知识问答（会话只有本人可见）：POST /conversations、GET /conversations、DELETE /conversations/{id}、
 // GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream"}）、
 // POST /conversations/{id}/messages/{mid}/retry、POST /conversations/{id}/actions/{aid}/confirm|cancel。
@@ -173,12 +176,13 @@ func (l *Lingo) newRESTHandler() http.Handler {
 	})
 	triage("answer", func(r *httpapi.Request, id int64) (Ticket, error) {
 		var in struct {
-			Answer string `json:"answer"`
+			Answer    string          `json:"answer"`
+			Knowledge *KnowledgeDraft `json:"knowledge"` // 非空时加入知识库（REQ-006）
 		}
 		if err := r.Decode(&in); err != nil {
 			return Ticket{}, err
 		}
-		return l.AnswerTicket(ctx(r), user(r), id, in.Answer)
+		return l.AnswerTicketWith(ctx(r), user(r), id, TicketAnswer{Answer: in.Answer, Knowledge: in.Knowledge})
 	})
 	triage("merge", func(r *httpapi.Request, id int64) (Ticket, error) {
 		var in struct {
@@ -314,6 +318,83 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		}
 		return list(l.ListConversations(ctx(r), user(r), before, int(limit)))
 	})
+	rt.Handle("GET /knowledge/search", func(r *httpapi.Request) (any, error) {
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		es, err := l.SearchKnowledge(ctx(r), user(r), r.Query("q"), r.Query("project"), int(limit))
+		return list(es, err)
+	})
+	rt.Handle("GET /knowledge", func(r *httpapi.Request) (any, error) {
+		offset, err := r.QueryInt("offset")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		es, err := l.ListKnowledge(ctx(r), user(r), KnowledgeFilter{Project: r.Query("project"), Status: r.Query("status"),
+			Sort: r.Query("sort"), Offset: int(offset), Limit: int(limit)})
+		return list(es, err)
+	})
+	rt.Handle("POST /knowledge", func(r *httpapi.Request) (any, error) {
+		var in KnowledgeDraft
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		e, err := l.CreateKnowledge(ctx(r), user(r), in)
+		if err != nil {
+			return nil, err
+		}
+		return httpapi.Created{Value: e}, nil
+	})
+	rt.Handle("POST /knowledge/disable-by-ticket", func(r *httpapi.Request) (any, error) {
+		var in struct {
+			TicketID int64 `json:"ticket_id"`
+		}
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		n, err := l.DisableKnowledgeByTicket(ctx(r), user(r), in.TicketID)
+		if err != nil {
+			return nil, err
+		}
+		return struct {
+			Disabled int `json:"disabled"`
+		}{n}, nil
+	})
+	rt.Handle("PUT /knowledge/{id}", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		var in KnowledgeDraft
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		return l.UpdateKnowledge(ctx(r), user(r), id, in)
+	})
+	rt.Handle("DELETE /knowledge/{id}", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, l.DeleteKnowledge(ctx(r), user(r), id)
+	})
+	for name, active := range map[string]bool{"disable": false, "enable": true} {
+		rt.Handle("POST /knowledge/{id}/"+name, func(r *httpapi.Request) (any, error) {
+			id, err := r.PathID("id")
+			if err != nil {
+				return nil, err
+			}
+			if active {
+				return l.EnableKnowledge(ctx(r), user(r), id)
+			}
+			return l.DisableKnowledge(ctx(r), user(r), id)
+		})
+	}
 	rt.Handle("DELETE /conversations/{id}", func(r *httpapi.Request) (any, error) {
 		id, err := r.PathID("id")
 		if err != nil {
