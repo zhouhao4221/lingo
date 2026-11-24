@@ -40,6 +40,7 @@ func (l *Lingo) SelfCheck(ctx context.Context) []CheckResult {
 	}
 	rs := selfcheck.Run(ctx, selfcheck.Options{Gitea: l.gitea, Pings: l.store, Repos: repos, LabelPrefix: l.labelPrefix(),
 		WebhookURL: g.WebhookURL, WebhookSecret: g.WebhookSecret, AutoRegister: autoRegister,
+		PreviousWebhookURLs: l.prevWebhooks.list(),
 		// 多实例同时启动时只有一个执行（其他实例跳过），避免重复创建 Webhook 与标签
 		Lock: func(ctx context.Context) (func(), bool, error) { return l.store.TryLock(ctx, selfCheckLockKey) }})
 	out := append(make([]CheckResult, 0, len(rs)+len(pre)), pre...)

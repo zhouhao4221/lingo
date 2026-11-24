@@ -144,6 +144,90 @@ func TestSettingsWebhookSecretSyncedToGitea(t *testing.T) {
 	wait("secret-b") // 保存后补跑自检，同步新密钥
 }
 
+// PR #36 第五轮审查：改了回调地址，自检把指向旧地址的 Hook 改到新地址，不留重复的 Hook。
+func TestSettingsWebhookURLChangeMovesHook(t *testing.T) {
+	db := testDB(t, true)
+	var mu sync.Mutex
+	hook := map[string]any{"id": 9, "type": "gitea", "active": true, "events": []string{"issues"},
+		"config": map[string]any{"url": "https://old.example.com/wh", "content_type": "json"}}
+	creates, edits := 0, 0
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		p := strings.TrimPrefix(r.URL.Path, "/api/v1")
+		switch {
+		case p == "/user":
+			_, _ = w.Write([]byte(`{"id":1,"login":"lingo-bot"}`))
+		case p == "/repos/demo/api/hooks" && r.Method == "GET":
+			_ = json.NewEncoder(w).Encode([]any{hook})
+		case p == "/repos/demo/api/hooks" && r.Method == "POST":
+			creates++
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"id":10}`))
+		case p == "/repos/demo/api/hooks/9" && r.Method == "PATCH":
+			var h map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&h)
+			if c, ok := h["config"].(map[string]any); ok {
+				hook["config"] = map[string]any{"url": c["url"], "content_type": "json"}
+			}
+			edits++
+			_ = json.NewEncoder(w).Encode(hook)
+		case strings.HasSuffix(p, "/tests"):
+			w.WriteHeader(204)
+		case p == "/repos/demo/api":
+			_, _ = w.Write([]byte(`{"id":1,"name":"api","full_name":"demo/api","has_issues":true}`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	t.Cleanup(g.Close)
+	l := newBareLingo(t, db, nil, nil)
+	ctx := context.Background()
+	up := func(u string) {
+		if _, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{
+			BaseURL: sptr(g.URL), Token: sptr("t"), WebhookSecret: sptr("s"), AutoRegisterWebhook: bptr(true), WebhookURL: sptr(u)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	up("https://old.example.com/wh")
+	up("https://new.example.com/wh")
+	l.SelfCheck(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	if creates != 0 || edits == 0 || hook["config"].(map[string]any)["url"] != "https://new.example.com/wh" {
+		t.Errorf("creates=%d edits=%d hook=%v", creates, edits, hook["config"])
+	}
+}
+
+// PR #36 第五轮审查：配置行恢复到较低版本（如从备份恢复）时，各实例刷新后也会跟上。
+func TestSettingsRestoredLowerVersionApplied(t *testing.T) {
+	db := testDB(t, true)
+	gsrv := httptest.NewServer(&giteaServer{templates: "[]"})
+	t.Cleanup(gsrv.Close)
+	l := newBareLingo(t, db, nil, nil)
+	ctx := context.Background()
+	for _, s := range []string{"a", "b", "c", "d"} {
+		if _, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{
+			BaseURL: sptr(gsrv.URL), Token: sptr("t"), WebhookSecret: sptr(s)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 恢复成较旧的备份：版本 2、密钥 restored
+	if _, err := db.Exec(`UPDATE lingo_settings SET version = 2, content = jsonb_set(content, '{webhook_secret}', '"restored"'),
+		updated_at = now() - interval '1 day' WHERE category = 'gitea'`); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := l.ConnectionSettings(ctx, admin); err != nil || !s.Gitea.Applied {
+		t.Fatalf("view = %+v %v", s.Gitea, err)
+	}
+	if w := deliver(l.WebhookHandler(), "d-0", "issue_comment", commentPayload, "restored"); w.Code != http.StatusOK {
+		t.Errorf("restored secret: %d", w.Code)
+	}
+	if w := deliver(l.WebhookHandler(), "d-1", "issue_comment", commentPayload, "d"); w.Code != http.StatusUnauthorized {
+		t.Errorf("newer-but-replaced secret: %d", w.Code)
+	}
+}
+
 // PR #36 审查：数据库中的 Gitea 配置不可用时，保留原连接与原地址（Issue 链接不变），版本不前进。
 func TestSettingsRejectedGiteaKeepsPrevious(t *testing.T) {
 	db := testDB(t, true)

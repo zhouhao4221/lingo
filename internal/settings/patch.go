@@ -115,6 +115,11 @@ func applyGitea(cfg, cur Gitea, p GiteaPatch) (Gitea, []string, error) {
 			return fmt.Errorf("%w: gitea %s is configured in code", ErrConflict, name)
 		}
 		s := strings.TrimSpace(*v)
+		if name == FieldWebhookURL && s != "" {
+			if err := checkCallbackURL(s); err != nil { // 回调地址允许带查询参数（与代码配置一致）
+				return fmt.Errorf("%w: gitea %s %v", ErrInvalid, name, err)
+			}
+		}
 		if isURL && s != "" {
 			if err := checkURL(s); err != nil {
 				return fmt.Errorf("%w: gitea %s %v", ErrInvalid, name, err)
@@ -139,7 +144,7 @@ func applyGitea(cfg, cur Gitea, p GiteaPatch) (Gitea, []string, error) {
 		str(FieldToken, cfg.Token, &out.Token, p.Token, false),
 		str(FieldWebhookSecret, cfg.WebhookSecret, &out.WebhookSecret, p.WebhookSecret, false),
 		boolean(FieldAutoRegisterWebhook, cfg.AutoRegisterWebhook, &out.AutoRegisterWebhook, p.AutoRegisterWebhook),
-		str(FieldWebhookURL, cfg.WebhookURL, &out.WebhookURL, p.WebhookURL, true),
+		str(FieldWebhookURL, cfg.WebhookURL, &out.WebhookURL, p.WebhookURL, false),
 		boolean(FieldRejectRedirects, cfg.RejectRedirects, &out.RejectRedirects, p.RejectRedirects),
 	} {
 		if err != nil {
@@ -225,6 +230,18 @@ func originOf(s string) string {
 		return ""
 	}
 	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+// checkCallbackURL 只接受 http(s) 绝对地址，不含用户信息（可带查询参数）。
+func checkCallbackURL(s string) error {
+	u, err := url.Parse(s)
+	switch {
+	case err != nil, u.Scheme != "http" && u.Scheme != "https", u.Host == "":
+		return fmt.Errorf("must be an absolute http(s) address")
+	case u.User != nil:
+		return fmt.Errorf("must not contain user info")
+	}
+	return nil
 }
 
 // checkURL 只接受 http(s) 绝对地址，不含用户信息、查询与片段（错误信息不回显地址）。

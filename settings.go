@@ -45,7 +45,7 @@ type SecretSetting struct {
 }
 
 // ModelSlotSettings 是一个模型槽位（主模型或轻量模型）。来源为 config 时，模型由代码中的 Config.Model / LightModel
-// 提供，其余字段为空。
+// 提供（接口对象，读不到其中的配置），其余字段为空，APIKey.Set 也不表示是否配置了 key。
 type ModelSlotSettings struct {
 	Source   SettingSource `json:"source"`
 	Provider string        `json:"provider,omitempty"` // openai | deepseek
@@ -172,7 +172,7 @@ func (l *Lingo) ConnectionSettings(ctx context.Context, u User) (ConnectionSetti
 	if err != nil {
 		return ConnectionSettings{}, err
 	}
-	l.applySettings(st, false) // 顺带跟上其他实例保存的配置
+	l.applyLoaded(st) // 顺带跟上其他实例保存的配置（读到的是数据库中的已提交值）
 	return l.markApplied(publicSettings(settings.Resolve(l.overrides(), st), st), st), nil
 }
 
@@ -211,13 +211,18 @@ func (l *Lingo) markApplied(s ConnectionSettings, st settings.Stored) Connection
 		return s
 	}
 	want := settings.Resolve(l.overrides(), st)
-	s.Gitea.Applied = c.eff.Gitea == want.Gitea
+	// 本实例已在用同样的值，或已应用了更新的版本（保存的同时后台刷新到了别人的新保存）都算已生效
+	s.Gitea.Applied = c.eff.Gitea == want.Gitea || c.eff.GiteaMeta.Version > st.GiteaMeta.Version
+	newerModel := c.eff.ModelMeta.Version > st.ModelMeta.Version
 	s.Model.Applied = want.MainSrc == settings.SourceUnset || !isNil(c.main)
 	if want.MainSrc == settings.SourceDatabase && c.mainSlot != want.Main {
 		s.Model.Applied = false
 	}
 	if want.LightSrc == settings.SourceDatabase && c.litSlot != want.Light {
 		s.Model.Applied = false // 轻量模型没有建起来（退回主模型）
+	}
+	if newerModel {
+		s.Model.Applied = true
 	}
 	return s
 }

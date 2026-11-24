@@ -102,7 +102,7 @@ func TestSettingsUnconfiguredStartAndRecovery(t *testing.T) {
 		Gitea: &lingo.GiteaConnectionUpdate{BaseURL: sptr(gsrv.URL), Token: sptr("gitea-token-1234567890"), WebhookSecret: sptr("s")},
 		Model: &lingo.ModelConnectionUpdate{Main: &lingo.ModelSlotUpdate{Provider: sptr("openai"), BaseURL: sptr(ai.URL), APIKey: sptr("sk-1234567890abcd"), Model: sptr("m")}},
 	})
-	if err != nil || !s.Configured || s.Gitea.Token.Masked != "git****7890" || s.Model.Main.APIKey.Masked != "sk-****abcd" || s.Gitea.Version != 1 {
+	if err != nil || !s.Configured || s.Gitea.Token.Masked != "git****7890" || s.Model.Main.APIKey.Masked != "****" || s.Gitea.Version != 1 {
 		t.Fatalf("update = %+v %v", s, err)
 	}
 	if b, _ := json.Marshal(s); strings.Contains(string(b), "gitea-token-1234567890") || strings.Contains(string(b), "sk-1234567890abcd") {

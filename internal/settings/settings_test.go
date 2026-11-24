@@ -107,7 +107,7 @@ func TestApply(t *testing.T) {
 }
 
 func TestMask(t *testing.T) {
-	for in, want := range map[string]string{"": "", "short": "****", "12345678901": "****", "sk-1234567890abcd": "sk-****abcd", "123456789012": "123****9012"} {
+	for in, want := range map[string]string{"": "", "short": "****", "12345678901": "****", "abcdefghijkl": "****", "1234567890123456789": "****", "sk-1234567890abcdefgh": "sk-****efgh"} {
 		if got := Mask(in); got != want {
 			t.Errorf("Mask(%q) = %q, want %q", in, got, want)
 		}

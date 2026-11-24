@@ -476,7 +476,9 @@ func (l *Lingo) Run(ctx context.Context) error {
 		l.watchSettings(ctx, selfCheck)
 	}()
 	err := l.worker.Run(ctx)
-	checked.Wait() // 退出前等自检与配置检查结束（它们随 ctx 取消尽快返回），之后不再访问数据库
+	checked.Wait() // 退出前等自检与配置检查结束（它们随 ctx 取消尽快返回）
+	l.settingsStopped.Store(true)
+	l.settingsWG.Wait() // 以及进行中的后台刷新；之后不再访问数据库
 	return err
 }
 

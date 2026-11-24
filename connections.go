@@ -3,6 +3,8 @@ package lingo
 import (
 	"context"
 	"net/http"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -126,6 +128,9 @@ func (l *Lingo) applySettings(st settings.Stored, force bool) bool {
 	if cur != nil && key != "" && eff.Gitea != cur.eff.Gitea {
 		l.selfCheckDue.Store(true)
 	}
+	if cur != nil && cur.eff.Gitea.WebhookURL != "" && cur.eff.Gitea.WebhookURL != eff.Gitea.WebhookURL {
+		l.prevWebhooks.add(cur.eff.Gitea.WebhookURL) // 自检时把指向旧地址的 Hook 改到新地址
+	}
 	return giteaChanged
 }
 
@@ -190,18 +195,32 @@ func (l *Lingo) refreshSettings(ctx context.Context) {
 		}
 		return
 	}
-	l.applySettings(st, false)
+	l.applyLoaded(st)
+}
+
+// applyLoaded 应用刚从数据库读到的配置：已提交值就是最新，与缓存不一致（版本或修改时间不同）就应用。配置行从备份
+// 恢复到较低版本时也能跟上；读到的若恰好早于本实例刚提交的保存，下一次刷新即纠正。
+func (l *Lingo) applyLoaded(st settings.Stored) {
+	if c := l.conns.Load(); c == nil || !sameMeta(st.GiteaMeta, c.eff.GiteaMeta) || !sameMeta(st.ModelMeta, c.eff.ModelMeta) {
+		l.applySettings(st, true)
+	}
+}
+
+func sameMeta(a, b settings.Meta) bool {
+	return a.Version == b.Version && (a.UpdatedAt == nil) == (b.UpdatedAt == nil) && (a.UpdatedAt == nil || a.UpdatedAt.Equal(*b.UpdatedAt))
 }
 
 // touchSettings 在距上次检查满 connRefreshEvery 时于后台刷新一次（不阻塞请求）；Handler 与 Run 分进程部署时
 // 只运行 Handler 的进程靠它跟上其他实例保存的配置。
 func (l *Lingo) touchSettings() {
 	now := time.Now().UnixNano()
-	if now-l.settingsChecked.Load() < int64(connRefreshEvery) || !l.settingsRefreshing.CompareAndSwap(false, true) {
+	if l.settingsStopped.Load() || now-l.settingsChecked.Load() < int64(connRefreshEvery) || !l.settingsRefreshing.CompareAndSwap(false, true) {
 		return
 	}
 	l.settingsChecked.Store(now)
+	l.settingsWG.Add(1)
 	go func() {
+		defer l.settingsWG.Done()
 		defer l.settingsRefreshing.Store(false)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -274,4 +293,27 @@ type settingsState struct {
 	settingsRefreshing atomic.Bool
 	settingsChanged    chan struct{} // 保存后通知 Run 的 watchSettings
 	selfCheckDue       atomic.Bool
+	settingsStopped    atomic.Bool    // Run 已退出：不再发起后台刷新
+	settingsWG         sync.WaitGroup // 进行中的后台刷新（Run 退出前等待）
+	prevWebhooks       webhookHistory
+}
+
+// webhookHistory 记录运行时改过的旧回调地址，供自检把指向旧地址的 Hook 改到新地址。
+type webhookHistory struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+func (h *webhookHistory) add(u string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !slices.Contains(h.urls, u) {
+		h.urls = append(h.urls, u)
+	}
+}
+
+func (h *webhookHistory) list() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.urls)
 }

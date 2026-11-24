@@ -203,12 +203,13 @@ func (e Effective) GiteaConfigured() bool { return e.Gitea.BaseURL != "" && e.Gi
 // ModelConfigured 报告主模型是否已配置。
 func (e Effective) ModelConfigured() bool { return e.MainSrc != SourceUnset }
 
-// Mask 返回密钥的掩码：空串为空；不足 12 个字符为 "****"；否则为前 3 位 + "****" + 后 4 位（如 "sk-****abcd"）。
+// Mask 返回密钥的掩码：空串为空；不足 20 个字符为 "****"（短密钥露出几位就泄露了大半）；否则为前 3 位 + "****" +
+// 后 4 位（如 "sk-****abcd"）。
 func Mask(s string) string {
 	switch r := []rune(s); {
 	case len(r) == 0:
 		return ""
-	case len(r) < 12:
+	case len(r) < 20:
 		return "****"
 	default:
 		return string(r[:3]) + "****" + string(r[len(r)-4:])
