@@ -29,6 +29,8 @@ import (
 // POST /tickets/{id}/answer 与 POST /tickets/{id}/comments 可带 {"knowledge":{"question","answer"}} 把答复 / 评论加入知识库；
 // 审核：POST /knowledge/{id}/approve（可带编辑后的内容）|reject；GET /knowledge/unanswered（REQ-007）。
 // 回答反馈：POST /conversations/{id}/messages/{mid}/feedback（{"helpful":true}）。
+// 业务数据调用审计（REQ-008）：GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=（本人，及 reviewer /
+// admin 明确负责的项目）；工具暂时不可用返回 503 tool_unavailable，调用失败返回 502 tool_failed。
 // 知识问答（会话只有本人可见）：POST /conversations、GET /conversations、DELETE /conversations/{id}、
 // GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream"}）、
 // POST /conversations/{id}/messages/{mid}/retry、POST /conversations/{id}/actions/{aid}/confirm|cancel。
@@ -354,6 +356,27 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		}
 		return httpapi.Created{Value: e}, nil
 	})
+	rt.Handle("GET /data-requests", func(r *httpapi.Request) (any, error) {
+		since, err := r.QueryTime("since")
+		if err != nil {
+			return nil, err
+		}
+		until, err := r.QueryTime("until")
+		if err != nil {
+			return nil, err
+		}
+		before, err := r.QueryInt("before")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		rs, err := l.ListDataRequests(ctx(r), user(r), DataRequestFilter{Tool: r.Query("tool"), UserID: r.Query("user_id"),
+			Status: r.Query("status"), Since: since, Until: until, Before: before, Limit: int(limit)})
+		return list(rs, err)
+	})
 	rt.Handle("GET /knowledge/unanswered", func(r *httpapi.Request) (any, error) {
 		since, err := r.QueryTime("since")
 		if err != nil {
@@ -615,6 +638,10 @@ func restError(err error) (int, string) {
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, ErrNoModel):
 		return http.StatusNotImplemented, "model_not_configured"
+	case errors.Is(err, ErrToolUnavailable):
+		return http.StatusServiceUnavailable, "tool_unavailable"
+	case errors.Is(err, ErrToolFailed):
+		return http.StatusBadGateway, "tool_failed"
 	}
 	return 0, ""
 }

@@ -158,16 +158,40 @@ const (
 	ToolWrite ToolMode = "write" // 执行前需用户确认
 )
 
-// Tool 是业务数据工具：问答时以提问人员身份代其取数。
-// lingo 预校验 User.Scopes 含 Scope，Call 内由业务侧二次校验；结果仅用于本次会话、不入知识库。
+// Tool 是业务数据工具（REQ-008）：知识问答、MCP 与 CallTool 以调用人身份代其取数。本期只调用 Mode 为 ToolRead 的工具。
+//
+// 灵工只做第一道防线：调用前校验 User.Scopes 含 Scope；Call 收到的是当前用户，业务侧必须在 Call 内按该用户再次鉴权
+// 并过滤数据，并响应 ctx 取消（超时后仍未返回的 Call 会一直占用并发名额，结果被丢弃）。Call 返回的错误不会出现在
+// 日志、审计或返回内容中，但也不应携带业务数据。结果按 Sensitive 脱敏、超过 8KB 截断，只用于本次回答或返回，
+// 不写入会话、知识库、审计与日志。
+//
+// 注册校验（New 时）：Name 只含字母、数字、下划线且不超过 64 个字符；Mode 为 ToolRead；Scope 非空；InputSchema 为
+// JSON 对象；Call 非空；Timeout 不为负且不超过 60 秒。不满足的工具被忽略并记 Warn 日志（New 不因此失败）；与内置 MCP
+// 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖已有工具。
 type Tool struct {
 	Name        string
 	Description string
-	InputSchema json.RawMessage // JSON Schema
+	// InputSchema 是参数的 JSON Schema（type: object）。灵工只校验 required 与 properties 的基本类型
+	// （string / number / integer / boolean / object / array）；description 会出现在参数缺失时的追问中。
+	InputSchema json.RawMessage
 	Scope       string
 	Mode        ToolMode
-	Sensitive   []string // 返回结果中需脱敏的字段
-	Call        func(ctx context.Context, u User, input json.RawMessage) (any, error)
+	// Sensitive 是结果中需脱敏的字段路径，如 "phone"、"customer.phone"、"items.*.price"，匹配到的值替换为 "***"；
+	// 同样作用于审计中的参数摘要。
+	Sensitive []string
+	// Timeout 是调用时限：0 表示默认 10 秒，最多 60 秒（为负或超过 60 秒时忽略该工具）。
+	Timeout time.Duration
+	// Call 以 u 的身份查询数据。返回 ToolOutput（或 *ToolOutput）时可在 Project 中声明所查数据的实际归属项目，
+	// 审计记录据此归属，负责该项目的 reviewer / admin 可以看到；声明的项目未配置或 u 无权访问时结果被丢弃，
+	// 调用方得到与工具不存在相同的结果。返回其他值时视为数据本身，记录归属为空（只有调用人本人可见）。
+	Call func(ctx context.Context, u User, input json.RawMessage) (any, error)
+}
+
+// ToolOutput 是 Tool.Call 可选的返回值：Project 声明所查数据的实际归属项目（须为 Config.Projects 中的 key），
+// Data 为数据本身。
+type ToolOutput struct {
+	Project string
+	Data    any
 }
 
 // EventKind 是通知事件类型。

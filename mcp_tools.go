@@ -51,6 +51,15 @@ func (l *Lingo) newMCPHandler() http.Handler {
 	})
 }
 
+// builtinToolNames 返回内置 MCP 工具名（业务数据工具不得与之重名）。
+func builtinToolNames(ts []mcp.Tool) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
 func mcpCtx(ctx context.Context) context.Context { return ticket.WithSource(ctx, "mcp") }
 
 // tool 构造一个工具：A 为参数结构（按 JSON 解析），schema 为参数的 JSON Schema。

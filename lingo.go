@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
+	"github.com/zhouhao4221/lingo/internal/datatool"
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -100,7 +101,8 @@ type Lingo struct {
 	releases  *release.Service
 	assistant *assistant.Service
 	knowledge *knowledge.Service
-	embedKick chan struct{} // 知识条目新建 / 编辑后提醒生成向量
+	data      *datatool.Service // 业务数据工具（REQ-008）
+	embedKick chan struct{}     // 知识条目新建 / 编辑后提醒生成向量
 	tmpls     *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
@@ -190,6 +192,7 @@ func New(cfg Config) (*Lingo, error) {
 		Extractor: l.knowledgeExtractor, Tickets: l.knowledgeTicket}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
+	l.data = l.newDataTools(builtinToolNames(l.mcpTools()))
 	if l.assistant, err = l.newAssistant(); err != nil {
 		return nil, err
 	}
@@ -490,6 +493,13 @@ func (l *Lingo) Run(ctx context.Context) error {
 		defer checked.Done()
 		l.embedKnowledge(ctx)
 	}()
+	if !l.data.Empty() {
+		checked.Add(1)
+		go func() { // 业务数据调用审计：中断恢复与 180 天清理（REQ-008）
+			defer checked.Done()
+			l.maintainDataRequests(ctx)
+		}()
+	}
 	checked.Add(1)
 	go func() { // 定时检查连接配置；Gitea 连接变化后补跑一次自检（开启自动注册时同步 Webhook 密钥）
 		defer checked.Done()

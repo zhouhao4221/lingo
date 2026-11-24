@@ -6,12 +6,12 @@
 |-----|-----|
 | 编号 | REQ-008 |
 | 类型 | 后端 |
-| 状态 | 评审通过 |
+| 状态 | 开发中 |
 | 模块 | 知识问答 |
 | 优先级 | P2 |
 | 创建日期 | 2026-11-25 |
 | 负责人 | - |
-| branch | - |
+| branch | feat/REQ-008-business-data-tools |
 | issue | - |
 
 ## 生命周期
@@ -21,7 +21,7 @@
 - [x] 草稿（编写中）
 - [x] 待评审
 - [x] 评审通过
-- [ ] 开发中
+- [x] 开发中
 - [ ] 测试中
 - [ ] 已完成
 
@@ -89,13 +89,13 @@ PRD 3.2.0.5 规划了"基于人员权限的业务数据请求"：问答时灵工
 
 > 列出所有功能点，开发完成后勾选
 
-- [ ] **工具注册校验**：`New` 逐个校验 `Config.Tools`——名称非空、只含字母 / 数字 / 下划线且不超过 64 字符；`Mode` 为 `read`；`Scope` 非空；`InputSchema` 为合法 JSON 对象；`Call` 非空；`Timeout` 不为负且不超过 60 秒。不满足的工具**忽略并记 Warn**（只含序号、名称与原因代码），`New` 不因此失败；与内置 MCP 工具或先注册的有效工具同名（不区分大小写）时忽略后者，**不覆盖**任何已有工具；`Tool` 新增可选的 `Timeout`（0 表示默认 10 秒，上限 60 秒）
-- [ ] **工具调用核心**：权限预校验（`User.Scopes` 含 `Tool.Scope`）、参数轻量校验（必填与基本类型）、以当前用户调用 `Call`（默认超时 10 秒）、并发上限（超时未退出的调用仍占用名额）、按 `Sensitive` 路径脱敏、结果截断到 8KB、熔断（5 分钟内连续失败 5 次暂停 1 分钟，之后放行一次试探）
-- [ ] **审计**：迁移 `0007_data_requests.sql`；调用前先写带租约的"待完成"记录，写入失败则不调用；记录调用人、归属项目（可空，只取工具结果的声明）、工具、入口、参数摘要、结果状态与原因、耗时、时间；保留 180 天，`Run` 定期清理，并只把租约已过期的待完成记录标为中断；新增公开类型 `ToolOutput{Project, Data}` 供 `Call` 声明归属
+- [x] **工具注册校验**：`New` 逐个校验 `Config.Tools`——名称非空、只含字母 / 数字 / 下划线且不超过 64 字符；`Mode` 为 `read`；`Scope` 非空；`InputSchema` 为合法 JSON 对象；`Call` 非空；`Timeout` 不为负且不超过 60 秒。不满足的工具**忽略并记 Warn**（只含序号、名称与原因代码），`New` 不因此失败；与内置 MCP 工具或先注册的有效工具同名（不区分大小写）时忽略后者，**不覆盖**任何已有工具；`Tool` 新增可选的 `Timeout`（0 表示默认 10 秒，上限 60 秒）
+- [x] **工具调用核心**：权限预校验（`User.Scopes` 含 `Tool.Scope`）、参数轻量校验（必填与基本类型）、以当前用户调用 `Call`（默认超时 10 秒）、并发上限（超时未退出的调用仍占用名额）、按 `Sensitive` 路径脱敏、结果截断到 8KB、熔断（5 分钟内连续失败 5 次暂停 1 分钟，之后放行一次试探）
+- [x] **审计**：迁移 `0007_data_requests.sql`；调用前先写带租约的"待完成"记录，写入失败则不调用；记录调用人、归属项目（可空，只取工具结果的声明）、工具、入口、参数摘要、结果状态与原因、耗时、时间；保留 180 天，`Run` 定期清理，并只把租约已过期的待完成记录标为中断；新增公开类型 `ToolOutput{Project, Data}` 供 `Call` 声明归属
 - [ ] **问答意图**：意图解析时提供当前用户可调用的工具清单（最多 30 个、描述截断 300 字）；新增业务数据意图，模型选择工具并给出参数；结果作为数据交给模型作答；引用中只记工具名；没有可调用工具时意图解析与 v0.8.0 完全一致
 - [ ] **MCP**：`tools/list` 合并列出当前用户可调用的业务工具；`tools/call` 调用并返回脱敏结果；看不到的工具与不存在的工具返回相同错误
-- [ ] **Go 方法 `CallTool`**：接入方界面直接调用，规则同上（不接受调用方指定归属项目）
-- [ ] **审计查询**：`ListDataRequests`（REST `GET /data-requests`）：所有人看本人记录；reviewer / admin 另可看归属项目在其 `User.Projects` 中明确列出的记录；可按工具、用户、时间、状态筛选
+- [x] **Go 方法 `CallTool`**：接入方界面直接调用，规则同上（不接受调用方指定归属项目）
+- [x] **审计查询**：`ListDataRequests`（REST `GET /data-requests`）：所有人看本人记录；reviewer / admin 另可看归属项目在其 `User.Projects` 中明确列出的记录；可按工具、用户、时间、状态筛选
 - [ ] **文档**：README（中英文，含 `Call` 必须二次鉴权、必须响应 ctx、错误不应携带业务数据、模型合规提醒、被忽略工具的告警说明）、PRD 3.2.0.5 与数据模型、`Tool` / `Config.Tools` 注释
 
 ---
@@ -337,18 +337,48 @@ stateDiagram-v2
 
 ### 11.1 数据模型
 
-_开发阶段填充_
+迁移 `migrations/0007_data_requests.sql` 新增 `lingo_data_requests`（每次调用一行，不含结果与错误原文）：
+
+| 字段 | 说明 |
+|------|------|
+| `id` | bigserial，分页游标 |
+| `user_id` / `user_role` | 调用人 |
+| `project_key` | 归属项目，只取 `ToolOutput.Project` 的声明；未声明、拒绝记录为空 |
+| `tool` / `channel` | 工具名（截断 64 字）；入口 `assistant` / `mcp` / `api` |
+| `conversation_id` | 问答入口的会话（不设外键） |
+| `arg_names` / `args` | 参数名；参数名 → 截断 32 字、脱敏后的值（拒绝记录为空） |
+| `status` / `reason` | `pending` / `ok` / `denied` / `error` / `unavailable` / `interrupted`；原因代码 |
+| `duration_ms` / `truncated` | 耗时；结果是否截断 |
+| `lease_until` | pending 租约 = 数据库时间 + 工具超时 + 2 分钟 |
+| `created_at` / `finished_at` | 数据库时间 |
+
+索引：`(user_id, id DESC)`、`(project_key, id DESC)`（非空）、`(created_at)`、`(lease_until) WHERE status = 'pending'`。
 
 ### 11.2 API 设计
 
-> 基于第五章接口需求，结合项目代码和 CLAUDE.md API 风格，生成具体技术方案
-
-_开发阶段填充_
+- `Tool.Timeout time.Duration`（0 为 10 秒，上限 60 秒）；新类型 `ToolOutput{Project, Data}`
+- `CallTool(ctx, u, name, input) (ToolResult{Tool, Data, Text, Truncated}, error)`：`ErrNotFound`（不存在 / 无权 / 归属拒绝）、`ErrInvalidInput`、新错误 `ErrToolUnavailable`、`ErrToolFailed`
+- `ListDataRequests(ctx, u, DataRequestFilter{Tool, UserID, Status, Since, Until, Before, Limit}) ([]DataRequest, error)`
+- REST `GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=`；`ErrToolUnavailable` → 503 `tool_unavailable`，`ErrToolFailed` → 502 `tool_failed`
+- MCP：`tools/list` 追加调用人可调用的业务工具；看不到的与归属拒绝均返回 `unknown tool`（与不存在相同）；参数错误为 `invalid arguments`
+- 问答：意图 `data_query`（`tool`、`tool_input`）；引用 `Citations.Tools []ToolCitation{Name}`（无时省略）；用量类型 `data_answer`
 
 ### 11.3 文件改动清单
 
-_开发阶段填充_
+| 层级 | 文件 | 说明 |
+|------|------|------|
+| 迁移 | `migrations/0007_data_requests.sql` | 新增审计表 |
+| 领域 | `internal/datatool/{doc,registry,schema,mask,breaker,service}.go` 及测试 | 注册校验、参数校验、脱敏截断、熔断、并发上限、超时、审计先行、查询与维护 |
+| 存储 | `internal/store/data_requests.go` | 审计写入、更新、查询、中断、清理 |
+| MCP | `internal/mcp/server.go` 及测试 | `Tool.Visible`、`ErrUnknownTool` |
+| 问答 | `internal/assistant/{assistant,turn,data,reply}.go` 及测试；`internal/llm/assistant.go` 及测试 | 工具清单、`data_query` 意图、作答与引用 |
+| 根包 | `types.go`、`datatools.go`（新）、`lingo.go`、`handler.go`、`mcp_tools.go`、`assistant.go` | 公开类型与方法、装配、REST、MCP、问答适配 |
+| 测试 | `tests/datatool_test.go`（新）、`tests/migrate_test.go`、`tests/mcp_test.go`、`example_tool_test.go`（新） | 集成、回归与示例 |
+| 文档 | `README.md`、`README.en.md`、`docs/requirements/PRD.md`、`docs/architecture/overview.md` | 接入说明与示例 |
 
 ### 11.4 实现步骤
 
-_开发阶段填充_
+1. 核心与审计：`internal/datatool`、迁移 0007、store、根包 `CallTool` / `ListDataRequests` / REST、`Run` 维护任务
+2. MCP：`mcp.Tool.Visible` 与按调用人列出、调用业务工具
+3. 问答：工具清单进入意图解析（无工具时提示词与输入不变）、`data_query` 分派、作答与引用
+4. 文档与示例：中英文 README、PRD、架构概览、Go 示例
