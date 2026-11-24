@@ -67,7 +67,24 @@ See [examples/server](examples/server/main.go) for a complete example.
 
 ### Roles
 
-Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions; see below.
+Your `Authenticate` maps each user to one of four fixed roles: `external` (end users: their own tickets only, optionally widened read-only to teammates' with `TicketAudience`; see below), `agent` (AI developer agents: forwarded tickets in their projects), `reviewer` (triage and all tickets in their projects) and `admin`. `User.Projects` optionally limits the projects a user can access. `User.Perspective` is an optional requirement perspective unrelated to permissions; see below.
+
+### Teammate visibility (TicketAudience)
+
+By default an `external` user sees only their own tickets. Set `Config.TicketAudience` to let them also see tickets from certain submitters, by your own rules (same department, same team):
+
+```go
+TicketAudience: func(ctx context.Context, u lingo.User) (lingo.TicketAudience, error) {
+	return lingo.TicketAudience{UserIDs: directory.Teammates(u.ID)}, nil // your org data
+},
+```
+
+- **Read-only, within `User.Projects`**: viewing tickets and public comments, `ListVisibleTickets` (REST `GET /tickets/visible`, MCP `list_visible_tickets`), Q&A lookups and summaries, and a release's tickets follow it. Tickets carry `mine` to tell the caller's own apart.
+- **Not covered**: comments, attachments added later, perspectives and confirmed comment actions (teammates get `not_found`); attachments, `ListEvents` / `Notifier` (submitter only); requirement perspectives (when `AuthorizePerspective` is unset).
+- **Merged tickets** go by submitter: a teammate's ticket merged into someone else's does not make the target visible.
+- **Q&A history**: reopening a conversation re-checks cited tickets against the current audience; ones no longer visible keep only their number. Answer text already generated is left as is.
+- Called only for `external` users with an ID, at most once per read request, never cached; IDs are de-duplicated and capped at 1,000; on error Lingo falls back to own tickets only and logs a warning.
+- This is a privacy change: tell users before enabling it, e.g. "Members of your department can see the tickets you submit (title, description, progress and public replies). Attachments stay visible only to you and the people handling them."
 
 ### Requirement perspectives
 
@@ -130,7 +147,7 @@ Notes:
 Users can ask about their tickets and releases in plain language, for example "has the login bug I filed last week been fixed?", "what was released recently?" or "how many tickets in demo are waiting for triage?". They can also say "add to #12: reproduced on Chrome 120". We recommend building it as a separate chat window, with the conversation list on the left and the chat on the right.
 
 - How it works: the model only turns the question into a query intent. Lingo runs the query with the caller's role and projects (same visibility as `GetTicket`), and the model writes the answer from the results. Answers carry structured `citations` (ticket ID, title, status, issue URL; release tag and publish time) that you can render as cards or links.
-- What the model receives: the question and the last 10 turns; each ticket's number, project, repository, type, title, status, timestamps, fix version, milestone and a body excerpt; the 5 most recent comment bodies of a single ticket (within the asker's visibility, so internal developer discussion for reviewers and admins); release names, note excerpts, deployments and fixed tickets. Names, emails and user IDs of submitters and comment authors are never sent, nor are form fields, submission context or attachments. You supply the model, so choose one that meets your compliance needs.
+- What the model receives: the question and the last 10 turns; each ticket's number, project, repository, type, title, status, timestamps, fix version, milestone and a body excerpt; the 5 most recent comment bodies of a single ticket (within the asker's visibility, so internal developer discussion for reviewers and admins); release names, note excerpts, deployments and fixed tickets. Names, emails and user IDs of submitters and comment authors are never sent (exception: with `TicketAudience`, a teammate's ticket carries the submitter's name; see Teammate visibility), nor are form fields, submission context or attachments. You supply the model, so choose one that meets your compliance needs.
 - Writes need confirmation: when the user asks to comment, the assistant message carries a `pending_action`. Show confirm / cancel buttons (call confirm / cancel), or let the user simply reply "confirm". It is valid for 30 minutes and is dropped on cancel, on an unrelated message or on timeout.
 - Conversations are visible only to their owner (not even to admins). Users can continue or delete them. Lingo never purges them; retention is up to you.
 - Requires `Config.Model` (intent parsing uses `LightModel`, falling back to `Model`). Without it, sending returns `ErrNoModel` (REST 501). Models implementing `lingo.StreamModel` stream the answer; the built-in models do (note that `OpenAIConfig.HTTPClient`'s timeout bounds the whole answer, 90 s by default).
@@ -164,6 +181,7 @@ Model and Gitea connection settings (addresses, tokens / API keys, webhook secre
 |---|---|
 | `GET /projects`, `GET /ticket-types` | Projects and repositories; ticket types with issue-template form fields |
 | `POST /tickets`, `GET /tickets/mine`, `GET /tickets/{id}`, `POST /tickets/{id}/comments` | Submit, list, view (with comments and attachments) and comment |
+| `GET /tickets/visible?project=&status=&before=` | Tickets the caller can view: their own plus teammates' via `TicketAudience` (read-only) |
 | `POST` / `GET /tickets/{id}/perspectives` | Requirement perspectives: add, list grouped by perspective (see above) |
 | `GET /triage`, `GET /triage/summary`, `POST /tickets/{id}/forward\|answer\|merge\|reject` | Triage (reviewer / admin) |
 | `POST /tickets/{id}/reject-forwarded`, `GET /tickets/{id}/issue-close`, `POST /tickets/{id}/issue-close/retry` | Reject a forwarded ticket (closes only its linked issue, async and retryable), close progress / retry (reviewer / admin) |
@@ -180,7 +198,7 @@ Write requests must use `Content-Type: application/json` (CSRF protection); erro
 
 ### MCP tools
 
-`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`.
+`list_projects`, `list_ticket_types`, `create_ticket`, `get_ticket`, `list_my_tickets`, `list_visible_tickets`, `reply_ticket`, `add_perspective`, `list_perspectives`, `list_events`, `list_triage`, `forward_ticket`, `answer_ticket`, `merge_ticket`, `reject_ticket`, `reject_forwarded_ticket`, `get_issue_close`, `retry_issue_close`, `list_releases`, `get_release`, `get_llm_usage`, `ask`, `list_conversations`, `list_conversation_messages`, `confirm_action`, `cancel_action`.
 
 ### Events
 

@@ -19,7 +19,13 @@ type Principal struct {
 	Projects []string // 可访问的项目 key；为空表示不限制
 	// Perspective 是需求视角（user / business / expert / leader，为空视为 user），只用于给需求补充归类，不参与权限判断。
 	Perspective string
+	// Peers 是 external 额外可见的提交人（接入方 Config.TicketAudience 返回，REQ-004）：只用于只读的查看与检索
+	// （ticket.Readable），写操作、附件、事件流与需求视角仍按固定角色规则（ticket.Visible）。
+	Peers []string
 }
+
+// Peer 报告 userID 是否在 Peers 中。
+func (p Principal) Peer(userID string) bool { return userID != "" && slices.Contains(p.Peers, userID) }
 
 // InProject 报告调用者能否访问项目 key（User.Projects 为空时不限）。
 func (p Principal) InProject(key string) bool {

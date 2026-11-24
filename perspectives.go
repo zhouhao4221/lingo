@@ -89,7 +89,7 @@ func (l *Lingo) authorizePerspective(ctx context.Context, p auth.Principal, t *t
 	if !ok {
 		return ticket.ErrForbidden
 	}
-	err := l.cfg.AuthorizePerspective(ctx, u, l.publicTicket(t), write)
+	err := l.cfg.AuthorizePerspective(ctx, u, l.publicTicketFor(u, t), write)
 	switch {
 	case err == nil:
 		return nil

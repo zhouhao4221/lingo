@@ -54,7 +54,40 @@ func (s *Service) Messages(ctx context.Context, p auth.Principal, conversationID
 			a.Status = ActionExpired // 惰性过期：读取时按过期展示，下次写入时落库
 		}
 	}
+	if err := s.recheckCites(ctx, p, ms); err != nil {
+		return nil, err
+	}
 	return ms, nil
+}
+
+// recheckCites 按当前可读范围重新判断消息引用的工单：已不可读的（如同事已不在 TicketAudience 名单内，或项目
+// 不在调用者范围内）只保留编号，标题、状态与 Issue 地址置空。回答正文是生成时的文本，不做处理（REQ-004）。
+func (s *Service) recheckCites(ctx context.Context, p auth.Principal, ms []*Message) error {
+	var ids []int64
+	for _, m := range ms {
+		for _, r := range m.Citations.Tickets {
+			ids = append(ids, r.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	ts, err := s.o.TicketsByID(ctx, ids)
+	if err != nil {
+		return err
+	}
+	readable := make(map[int64]bool, len(ts))
+	for _, t := range ts {
+		readable[t.ID] = ticket.Readable(p, t)
+	}
+	for _, m := range ms {
+		for i := range m.Citations.Tickets {
+			if r := &m.Citations.Tickets[i]; !readable[r.ID] {
+				r.Title, r.Status, r.IssueURL = "", "", ""
+			}
+		}
+	}
+	return nil
 }
 
 // Delete 删除本人的会话（软删除：统计取自消息行，删除后不再可见）。

@@ -21,6 +21,7 @@ const (
 	textCancelled  = "好的，已取消，没有执行。"
 	textNeedTarget = "要在哪个工单留言？请带上工单号，例如：在 #12 留言：复现环境是 Chrome 120。"
 	textNeedBody   = "请直接给出要留言的原文，例如：在 #12 留言：复现环境是 Chrome 120。"
+	textReadOnly   = "这是同事提交的工单，你可以查看进展，但只能对自己提交的工单留言。"
 )
 
 var statusNames = map[string]string{

@@ -3,7 +3,7 @@
 | 字段 | 内容 |
 |-----|------|
 | 产品名称 | 灵工 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
-| 文档版本 | v1.27 |
+| 文档版本 | v1.30 |
 | 创建日期 | 2026-11-13 |
 | 最后更新 | 2026-11-22 |
 | 文档负责人 | haiqing |
@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.30 | 2026-11-24 | haiqing | 同事可见（REQ-004）：新增 `Config.TicketAudience`，按提交人放宽 external 的只读可见范围（不超出 `User.Projects`）；新增 `ListVisibleTickets`（REST `GET /tickets/visible`、MCP `list_visible_tickets`）与 `Ticket.Mine`；知识问答的查找、汇总与版本关联工单跟随放宽，同事工单带提交人姓名；写操作、附件、事件流、Notifier 与需求视角不跟随；历史会话的引用按当前范围重新判断；无迁移 |
 | v1.29 | 2026-11-24 | haiqing | 连接配置存入数据库（REQ-005）：模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册、拒绝重定向）可明文存入 `lingo_settings`（迁移 0004），经 `ConnectionSettings` / `UpdateConnectionSettings` / `TestConnectionSettings`（REST `/settings/connections`）查看、按字段修改与连通测试，权限由新增的 `Config.AuthorizeSettings` 决定（默认仅 admin）；代码配置优先；保存后当前实例立即生效、其他实例 30 秒内生效；`New` 不再要求 Gitea 地址与令牌，缺失时以未配置状态运行（Webhook 503、Gitea 任务暂缓不计失败）；改地址须同时重填密钥；LabelPrefix、ReplyMode 仍只在代码中配置 |
 | v1.28 | 2026-11-24 | haiqing | 知识问答首期（REQ-003）：会话式工单与版本问答。会话只有本人可见（软删除）；模型只把提问解析为查询意图，查询由灵工按调用者权限执行，回答附引用的工单与版本；对话中给工单留言须确认（待确认操作，30 分钟有效，可回复确认或调用确认接口）；Go 方法 `CreateConversation` / `ListConversations` / `ListConversationMessages` / `DeleteConversation` / `SendMessage(Stream)` / `RetryMessage(Stream)` / `ConfirmPendingAction` / `CancelPendingAction`，REST `/conversations`（消息可 SSE 流式），MCP `ask` 等 5 个工具；可选接口 `StreamModel`（内置模型已实现）；未配置 `Model` 时返回 `ErrNoModel`（REST 501）；迁移 0003 新增会话、消息、待确认操作三张表 |
 | v1.27 | 2026-11-22 | haiqing | 新增 `GiteaConfig.RejectRedirects`（默认关闭，行为与 v0.2.0 相同）：开启后灵工发往 Gitea 的全部认证请求（启动自检与全部业务路径）收到任何 3xx 一律不跟随、不向跳转目标发出任何请求，按不可重试的配置错误处理（待办 #701，GPCM REQ-049 依赖） |
@@ -458,11 +459,12 @@ flowchart LR
 
 | 角色 | 工单 / 会话 / 附件可见范围 | 可执行操作 |
 |-----|-----|-----|
-| `external` | 仅 `user_id` 等于本人的数据 | 提交、补充、查看本人工单与对外回复 |
+| `external` | 仅 `user_id` 等于本人的数据；配置 `Config.TicketAudience` 时另可只读查看其返回的提交人在 `User.Projects` 内的工单（REQ-004） | 提交、补充、查看本人工单与对外回复；同事的工单只能查看 |
 | `agent` | `User.Projects` 内项目的已转出工单；看不到待确认、已驳回的工单 | 读取工单上下文、回复用户 |
 | `reviewer` | `User.Projects` 内项目的全部工单 | 确认转出、答复、合并、驳回、评审 |
 | `admin` | `User.Projects` 内项目的全部工单（为空表示全部项目） | 全部操作，含修改自动转出开关 |
 
+- **同事可见（REQ-004）**：`TicketAudience` 只放宽读（查看、对外评论、可见工单列表、知识问答、版本关联工单），不放宽写（留言、补附件、补充视角）、附件、事件流 / Notifier 与需求视角；按提交人判断（合并工单的主工单不随之可见）；名单上限 1000；回调失败按未放宽处理
 - **越权返回 404**：访问不属于自己的工单、附件时返回“不存在”，不暴露其存在
 - **存储层强制带范围**：store 层查询函数必须接收访问范围（用户 ID / 项目集合），不提供不带范围的列表查询；测试覆盖越权场景
 - **对 Gitea 脱敏**：Issue 与评论中不写提交人姓名、邮箱、手机号与业务系统账号，只写工单号（`lingo:ticket=<id>`）；例外：需求视角区块在 Issue 中标注补充人 `User.Name` 与首段提交人姓名（不含邮箱与 `User.ID`，见 3.2.2.1）；研发需要联系提交人时通过灵工评论往来。附件转出前由后台人员勾选（3.2.1.2）
@@ -1104,7 +1106,7 @@ flowchart LR
 | REQ-001 | 需求多视角分层补充 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
 | REQ-002 | 转研发后驳回与迁移就绪检查 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
 | REQ-003 | 知识问答 Agent：工单与版本问答 | 知识问答 | 已完成 | 2026-11-24 | 2026-11-24 |
-| REQ-004 | 工单可见性回调 | 工单 | 评审通过 | 2026-11-24 | - |
+| REQ-004 | 工单可见性回调 | 工单 | 测试中 | 2026-11-24 | - |
 | REQ-005 | 模型与 Gitea 配置存入数据库 | 系统配置 | 已完成 | 2026-11-24 | 2026-11-24 |
 
 ---

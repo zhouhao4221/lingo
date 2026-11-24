@@ -132,6 +132,16 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 			}) (any, error) {
 				return list(l.ListMyTickets(ctx, u, a.Status, a.Before, a.Limit))
 			}),
+		tool("list_visible_tickets", "列出当前用户可查看的工单（新的在前）：本人提交的，加上接入方放宽可见的同事的（只读，mine 为 false），可按项目、状态过滤；before 为上一页最后一条的 id。",
+			`{"type":"object","properties":{"project":{"type":"string"},"status":{"type":"string"},"before":{"type":"integer"},"limit":{"type":"integer"}}}`,
+			func(ctx context.Context, u User, a struct {
+				Project string
+				Status  string
+				Before  int64
+				Limit   int
+			}) (any, error) {
+				return list(l.ListVisibleTickets(ctx, u, VisibleTicketFilter{Project: a.Project, Status: a.Status, BeforeID: a.Before, Limit: a.Limit}))
+			}),
 		tool("reply_ticket", "在工单上留言，对提交人可见：提交人补充说明、后台人员答复，或研发 Agent 回复提交人（同步到 Gitea Issue 并通知提交人）。",
 			`{"type":"object","required":["id","body"],"properties":{"id":{"type":"integer"},"body":{"type":"string"}}}`,
 			func(ctx context.Context, u User, a struct {

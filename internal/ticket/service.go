@@ -444,6 +444,28 @@ func (s *Service) Get(ctx context.Context, p auth.Principal, id int64) (*Ticket,
 	return t, nil
 }
 
+// View 返回调用者可读的工单（Readable，含 external 被放宽可见的同事工单）；不可读与不存在一样返回 ErrNotFound。
+// 只用于只读的查看，写操作用 Get。
+func (s *Service) View(ctx context.Context, p auth.Principal, id int64) (*Ticket, error) {
+	t, err := s.o.Store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !Readable(p, t) {
+		return nil, ErrNotFound
+	}
+	return t, nil
+}
+
+// Readable 是只读的可见范围：Visible，或 external 查看项目内被放宽可见的提交人（Principal.Peers，REQ-004）的工单。
+// 写操作（留言、补附件、补充视角）、附件、事件流与需求视角仍用 Visible。
+func Readable(p auth.Principal, t *Ticket) bool {
+	if Visible(p, t) {
+		return true
+	}
+	return p.Role == auth.RoleExternal && p.ID != "" && p.Peer(t.UserID) && p.InProject(t.ProjectKey)
+}
+
 // Visible 实现 PRD 3.2.0.6 的可见范围：external 只看本人；agent 看项目内已转出的；reviewer / admin 看项目内全部。
 func Visible(p auth.Principal, t *Ticket) bool {
 	switch p.Role {
