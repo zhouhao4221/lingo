@@ -355,9 +355,10 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	if err != nil {
 		return nil, err
 	}
-	tc := &turnCtx{p: p, loc: loc, now: s.o.Now(), history: hist, question: user.Content, onDelta: onDelta}
+	tc := &turnCtx{p: p, loc: loc, now: s.o.Now(), history: hist, question: user.Content, onDelta: onDelta, convID: conv.ID,
+		tools: s.intentTools(ctx)}
 	in, err := s.brainOf(ctx).Intent(ctx, IntentInput{Today: today(tc.now, loc), Projects: s.o.Projects(p), History: hist,
-		Question: user.Content, NeedTitle: conv.Title == ""})
+		Question: user.Content, NeedTitle: conv.Title == "", Tools: tc.tools})
 	if err != nil {
 		return nil, modelError{err}
 	}
@@ -418,6 +419,8 @@ func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired
 		return s.askKnowledge(ctx, tc, in)
 	case IntentOutOfScope:
 		return &reply{content: textOutOfScope, outcome: OutcomeOutOfScope}, nil
+	case IntentDataQuery:
+		return s.queryData(ctx, tc, in)
 	}
 	txt := strings.TrimSpace(in.Clarify)
 	if txt == "" {

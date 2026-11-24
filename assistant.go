@@ -10,6 +10,7 @@ import (
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
 	"github.com/zhouhao4221/lingo/internal/auth"
+	"github.com/zhouhao4221/lingo/internal/datatool"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/store"
 )
@@ -46,6 +47,13 @@ type Citations struct {
 	Tickets   []TicketCitation    `json:"tickets"`
 	Releases  []ReleaseCitation   `json:"releases"`
 	Knowledge []KnowledgeCitation `json:"knowledge"` // 知识条目（REQ-006）
+	// Tools 是回答调用的业务数据工具（REQ-008），只有工具名；没有调用时省略
+	Tools []ToolCitation `json:"tools,omitempty"`
+}
+
+// ToolCitation 是回答调用的业务数据工具（不含结果）。
+type ToolCitation struct {
+	Name string `json:"name"`
 }
 
 // KnowledgeCitation 是回答引用的知识条目。Question 为空表示条目已停用、删除或不再可访问（只保留编号）；
@@ -164,7 +172,7 @@ func (l *Lingo) SendMessageStream(ctx context.Context, u User, conversationID in
 	if err := l.ensureProjects(ctx); err != nil {
 		return ConversationMessage{}, err
 	}
-	m, err := l.assistant.Send(ctx, l.viewer(ctx, u), conversationID, in.Content, in.TimeZone, onDelta)
+	m, err := l.assistant.Send(withDataCaller(ctx, u), l.viewer(ctx, u), conversationID, in.Content, in.TimeZone, onDelta)
 	if err != nil {
 		return ConversationMessage{}, assistantErr(err)
 	}
@@ -181,7 +189,7 @@ func (l *Lingo) RetryMessageStream(ctx context.Context, u User, conversationID, 
 	if err := l.ensureProjects(ctx); err != nil {
 		return ConversationMessage{}, err
 	}
-	m, err := l.assistant.Retry(ctx, l.viewer(ctx, u), conversationID, messageID, timeZone, onDelta)
+	m, err := l.assistant.Retry(withDataCaller(ctx, u), l.viewer(ctx, u), conversationID, messageID, timeZone, onDelta)
 	if err != nil {
 		return ConversationMessage{}, assistantErr(err)
 	}
@@ -237,6 +245,9 @@ func publicCitations(c assistant.Citations) Citations {
 	out := Citations{Tickets: []TicketCitation{}, Releases: []ReleaseCitation{}, Knowledge: []KnowledgeCitation{}}
 	for _, k := range c.Knowledge {
 		out.Knowledge = append(out.Knowledge, KnowledgeCitation(k))
+	}
+	for _, t := range c.Tools {
+		out.Tools = append(out.Tools, ToolCitation{Name: t.Name})
 	}
 	for _, t := range c.Tickets {
 		out.Tickets = append(out.Tickets, TicketCitation(t))
@@ -302,11 +313,53 @@ func (l *Lingo) newAssistant() (*assistant.Service, error) {
 	}
 	o.BrainFor = l.brainFor // 每轮提问取当前的模型（连接配置可在运行时修改）
 	o.Knowledge = l.knowledge
+	if !l.data.Empty() {
+		o.DataTools = assistantData{l}
+	}
 	s, err := assistant.New(o)
 	if err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	return s, nil
+}
+
+type dataCallerKey struct{}
+
+// withDataCaller 把提问人放进 ctx，供问答调用业务数据工具时使用（assistant 包只拿到 auth.Principal）。
+func withDataCaller(ctx context.Context, u User) context.Context {
+	return context.WithValue(ctx, dataCallerKey{}, u)
+}
+
+// assistantData 把业务数据工具适配给知识问答：调用人取自 ctx。
+type assistantData struct{ l *Lingo }
+
+func (a assistantData) caller(ctx context.Context) (datatool.Caller, bool) {
+	u, ok := ctx.Value(dataCallerKey{}).(User)
+	if !ok {
+		return datatool.Caller{}, false
+	}
+	c, err := dataCaller(u)
+	return c, err == nil
+}
+
+func (a assistantData) Visible(ctx context.Context) []assistant.ToolInfo {
+	c, ok := a.caller(ctx)
+	if !ok {
+		return nil
+	}
+	var out []assistant.ToolInfo
+	for _, t := range a.l.data.Visible(c) {
+		out = append(out, assistant.ToolInfo{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+	}
+	return out
+}
+
+func (a assistantData) Run(ctx context.Context, name string, input json.RawMessage, convID int64) (*datatool.Result, error) {
+	c, ok := a.caller(ctx)
+	if !ok {
+		return nil, datatool.ErrNotFound
+	}
+	return a.l.data.Run(ctx, c, name, input, datatool.ChannelAssistant, convID)
 }
 
 // recordUsage 记录知识问答的模型用量（写库失败只记日志）。
