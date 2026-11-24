@@ -283,7 +283,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				if strings.TrimSpace(a.Question) == "" {
 					return nil, &mcp.ArgError{Msg: "question is required"}
 				}
-				id := a.ConversationID
+				id, created := a.ConversationID, false
 				if id == 0 {
 					if isNil(l.cfg.Model) { // 先校验，避免失败的调用留下空会话
 						return nil, ErrNoModel
@@ -292,10 +292,13 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 					if err != nil {
 						return nil, err
 					}
-					id = c.ID
+					id, created = c.ID, true
 				}
 				m, err := l.SendMessage(ctx, u, id, MessageInput{Content: a.Question, TimeZone: a.TimeZone})
 				if err != nil {
+					if created { // 提问没有保存（参数不合法等）：删掉刚建的空会话
+						_ = l.DeleteConversation(context.WithoutCancel(ctx), u, id)
+					}
 					return nil, err
 				}
 				return struct {

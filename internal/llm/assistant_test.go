@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,6 +100,26 @@ func TestOpenAIChatStreamPlainJSON(t *testing.T) {
 	out, u, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, func(d string) { parts = append(parts, d) })
 	if err != nil || out != "整段" || len(parts) != 1 || u.Model != "m-2" || u.Input != 3 {
 		t.Errorf("plain = %q %v %+v %v", out, parts, u, err)
+	}
+}
+
+func TestOpenAIChatStreamWithoutStreamOptions(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if strings.Contains(string(b), "stream_options") {
+			http.Error(w, `{"error":{"message":"unknown field stream_options"}}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"好\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	c, _ := NewOpenAI(OpenAIOptions{BaseURL: srv.URL, Model: "m"})
+	out, _, err := c.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, func(string) {})
+	if err != nil || out != "好" || len(bodies) != 2 {
+		t.Errorf("fallback = %q %v, requests %d", out, err, len(bodies))
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
@@ -298,4 +299,35 @@ func (x assistantTx) ResolveAction(ctx context.Context, a *assistant.Action) err
 		return fmt.Errorf("store: resolve action %d: %w", a.ID, err)
 	}
 	return nil
+}
+
+var savepointRe = regexp.MustCompile(`^[a-z_]+$`)
+
+func (x assistantTx) Savepoint(ctx context.Context, name string) error {
+	if !savepointRe.MatchString(name) {
+		return fmt.Errorf("store: invalid savepoint %q", name)
+	}
+	if _, err := x.tx.ExecContext(ctx, "SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("store: savepoint: %w", err)
+	}
+	return nil
+}
+
+func (x assistantTx) RollbackToSavepoint(ctx context.Context, name string) error {
+	if !savepointRe.MatchString(name) {
+		return fmt.Errorf("store: invalid savepoint %q", name)
+	}
+	if _, err := x.tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("store: rollback to savepoint: %w", err)
+	}
+	return nil
+}
+
+func (x assistantTx) UserMessageBetween(ctx context.Context, conversationID, after, before int64) (bool, error) {
+	var ok bool
+	if err := x.tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM lingo_assistant_messages
+		WHERE conversation_id = $1 AND role = 'user' AND id > $2 AND id < $3)`, conversationID, after, before).Scan(&ok); err != nil {
+		return false, fmt.Errorf("store: user message between: %w", err)
+	}
+	return ok, nil
 }

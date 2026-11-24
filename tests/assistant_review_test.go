@@ -241,6 +241,67 @@ func TestAssistantMCPAskNoModelNoConversation(t *testing.T) {
 	}
 }
 
+// 第三轮审查：回答失败的那轮之后又发了新消息，之前的待确认操作作废，不会被"好的"之类的回复确认。
+func TestAssistantFailedTurnVoidsPendingAction(t *testing.T) {
+	m := &scriptModel{}
+	l, db := newAssistantLingo(t, m)
+	ctx := context.Background()
+	id := seedTicketRow(t, db, "u1", "", "api", "bug", "登录页白屏", "in_progress", 12)
+	conv, _ := l.CreateConversation(ctx, alice, "")
+	m.intents = []string{fmt.Sprintf(`{"intent":"comment","ticket_ids":[%d],"comment_body":"复现环境是 Chrome 120"}`, id)}
+	p := send(t, l, alice, conv.ID, fmt.Sprintf("在 #%d 留言：复现环境是 Chrome 120", id)).PendingAction
+	m.fail = 1
+	if f, err := l.SendMessage(ctx, alice, conv.ID, lingo.MessageInput{Content: "#5 怎么样"}); err != nil || f.Status != "failed" {
+		t.Fatalf("failed turn = %+v %v", f, err)
+	}
+	m.decisions = []string{"confirm"} // 不应被调用：操作已作废
+	m.intents = []string{`{"intent":"clarify"}`}
+	send(t, l, alice, conv.ID, "好的")
+	var st string
+	if err := db.QueryRow(`SELECT status FROM lingo_assistant_actions WHERE id = $1`, p.ID).Scan(&st); err != nil || st != "cancelled" {
+		t.Errorf("action status = %q %v", st, err)
+	}
+	if cs, _ := l.ListTicketComments(ctx, alice, id); len(cs) != 0 {
+		t.Errorf("comments = %d", len(cs))
+	}
+}
+
+// 第三轮审查：按钮确认被拒时在同一事务中记为 failed 并追加说明。
+func TestAssistantButtonConfirmRejected(t *testing.T) {
+	m := &scriptModel{}
+	l, db := newAssistantLingo(t, m)
+	ctx := context.Background()
+	id := seedTicketRow(t, db, "u1", "", "api", "bug", "登录页白屏", "in_progress", 12)
+	other := seedTicketRow(t, db, "u1", "", "api", "bug", "另一张", "in_progress", 13)
+	conv, _ := l.CreateConversation(ctx, alice, "")
+	m.intents = []string{fmt.Sprintf(`{"intent":"comment","ticket_ids":[%d],"comment_body":"复现环境是 Chrome 120"}`, id)}
+	p := send(t, l, alice, conv.ID, fmt.Sprintf("在 #%d 留言：复现环境是 Chrome 120", id)).PendingAction
+	if _, err := db.Exec(`UPDATE lingo_tickets SET status = 'merged', merged_into_ticket_id = $2 WHERE id = $1`, id, other); err != nil {
+		t.Fatal(err)
+	}
+	r, err := l.ConfirmPendingAction(ctx, alice, conv.ID, p.ID)
+	if err != nil || r.Action.Status != "failed" || r.Message == nil || !strings.Contains(r.Message.Content, "不允许留言") {
+		t.Fatalf("rejected confirm = %+v %v", r, err)
+	}
+	if cs, _ := l.ListTicketComments(ctx, alice, other); len(cs) != 0 {
+		t.Errorf("comments = %d", len(cs))
+	}
+}
+
+// 第三轮审查：MCP ask 参数不合法时删掉刚建的会话。
+func TestAssistantMCPAskInvalidLeavesNoConversation(t *testing.T) {
+	l, _ := newAssistantLingo(t, &scriptModel{})
+	mc := mcpClient{t: t, h: l.MCPHandler()}
+	for _, args := range []map[string]any{{"question": strings.Repeat("长", 4001)}, {"question": "hi", "time_zone": "Foo/Bar"}} {
+		if res, ok := mc.call("u1", "external", "ask", args); ok {
+			t.Fatalf("ask %v: %v", args["time_zone"], res)
+		}
+	}
+	if cs, _ := l.ListConversations(context.Background(), alice, 0, 0); len(cs) != 0 {
+		t.Errorf("conversations = %d", len(cs))
+	}
+}
+
 // 版本说明里的 Gitea 编号改写为 "Issue N" 交给模型，模型照抄时回答不会被当成编造。
 func TestAssistantReleaseNotesIssueRefs(t *testing.T) {
 	m := &scriptModel{}

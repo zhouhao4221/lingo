@@ -23,7 +23,7 @@ CREATE TABLE lingo_assistant_messages (
     role            text        NOT NULL CHECK (role IN ('user', 'assistant')),
     content         text        NOT NULL DEFAULT '',
     status          text        NOT NULL DEFAULT 'done' CHECK (status IN ('done', 'failed')),
-    error           text        NOT NULL DEFAULT '',  -- 失败类别：model_error | timeout | canceled（不存模型原文）
+    error           text        NOT NULL DEFAULT '',  -- 失败类别：model_error | timeout | canceled | internal_error（不存模型原文）
     reply_to        bigint      REFERENCES lingo_assistant_messages (id) ON DELETE CASCADE, -- 助手消息所回答的用户消息
     intent          text        NOT NULL DEFAULT '',  -- 助手消息：解析出的意图（统计用）
     outcome         text        NOT NULL DEFAULT '',  -- 助手消息：结果分类（统计用），如 answered / not_found / action_executed

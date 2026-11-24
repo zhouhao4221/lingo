@@ -70,12 +70,9 @@ func rejectText(a *Action, err error) string {
 	}
 }
 
-// errRejected 让执行事务回滚后，再以 failed 落库。
-type errRejected struct{ err error }
-
-func (e errRejected) Error() string { return e.err.Error() }
-
-// executeTx 在事务中锁定并执行操作 id，结果写入 msg（未落库）。返回 errRejected 时调用方应回滚并调用 failTx。
+// executeTx 在事务中锁定并执行操作 id，结果写入 msg（未落库）。执行器在保存点内运行：被拒（无权限、工单状态
+// 不允许）时回滚到保存点，在同一事务中把操作置为 failed 并写入说明，不需要另开事务（期间租约不会被别人取得）。
+// 操作已不在等待中（已取消、已过期、已失败）时返回 ticket.ErrConflict 与该操作。
 func (s *Service) executeTx(ctx context.Context, tx Tx, p auth.Principal, convID, id int64, msg *Message) (*Action, *execResult, error) {
 	a, err := tx.LockAction(ctx, convID, id)
 	if err != nil {
@@ -95,16 +92,34 @@ func (s *Service) executeTx(ctx context.Context, tx Tx, p auth.Principal, convID
 		msg.Content, msg.Outcome = textExpired, OutcomeActionExpired
 		return a, nil, nil
 	}
-	exec := s.execs[a.Kind]
-	if exec == nil {
-		return nil, nil, errRejected{fmt.Errorf("%w: unknown action kind %q", ticket.ErrInvalid, a.Kind)}
-	}
-	res, err := exec(ctx, tx, p, a)
-	if err != nil {
-		if rejected(err) {
-			return nil, nil, errRejected{err}
+	var res *execResult
+	if exec := s.execs[a.Kind]; exec == nil {
+		err = fmt.Errorf("%w: unknown action kind %q", ticket.ErrInvalid, a.Kind)
+	} else {
+		if err := tx.Savepoint(ctx, "assistant_exec"); err != nil {
+			return nil, nil, err
 		}
-		return nil, nil, err
+		if res, err = exec(ctx, tx, p, a); err != nil && rejected(err) {
+			if rerr := tx.RollbackToSavepoint(ctx, "assistant_exec"); rerr != nil {
+				return nil, nil, rerr
+			}
+		}
+	}
+	switch {
+	case err != nil && rejected(err):
+		reason := strings.TrimPrefix(err.Error(), "ticket: ")
+		if errors.Is(err, ticket.ErrNotFound) {
+			reason = "not found" // 不区分无权与不存在
+		}
+		a.Status, a.ResolvedAt = ActionFailed, &now
+		a.Result, _ = json.Marshal(map[string]string{"error": reason})
+		if err := tx.ResolveAction(ctx, a); err != nil {
+			return nil, nil, err
+		}
+		msg.Content, msg.Outcome = rejectText(a, err), OutcomeActionFailed
+		return a, nil, nil
+	case err != nil:
+		return nil, nil, err // 临时错误：整个事务回滚，操作保持 pending
 	}
 	if a.Result, err = json.Marshal(res.Result); err != nil {
 		return nil, nil, err
@@ -115,29 +130,6 @@ func (s *Service) executeTx(ctx context.Context, tx Tx, p auth.Principal, convID
 	}
 	msg.Content, msg.Outcome, msg.Citations = res.Content, OutcomeActionExecuted, res.Cites
 	return a, res, nil
-}
-
-// failTx 把被拒的操作置为 failed，并把说明写入 msg（未落库）。
-func (s *Service) failTx(ctx context.Context, tx Tx, convID, id int64, cause error, msg *Message) (*Action, error) {
-	a, err := tx.LockAction(ctx, convID, id)
-	if err != nil {
-		return nil, err
-	}
-	if a.Status != ActionPending {
-		return a, fmt.Errorf("%w: action is %s", ticket.ErrConflict, a.Status)
-	}
-	now := s.o.Now()
-	reason := strings.TrimPrefix(cause.Error(), "ticket: ")
-	if errors.Is(cause, ticket.ErrNotFound) {
-		reason = "not found" // 不区分无权与不存在
-	}
-	a.Status, a.ResolvedAt = ActionFailed, &now
-	a.Result, _ = json.Marshal(map[string]string{"error": reason})
-	if err := tx.ResolveAction(ctx, a); err != nil {
-		return nil, err
-	}
-	msg.Content, msg.Outcome = rejectText(a, cause), OutcomeActionFailed
-	return a, nil
 }
 
 // Confirm 确认执行待确认操作（确认按钮）：成功时追加结果消息；对已执行的操作再次确认返回原结果，不重复执行；
@@ -171,20 +163,6 @@ func (s *Service) Confirm(ctx context.Context, p auth.Principal, convID, actionI
 		}
 		return nil
 	})
-	var rej errRejected
-	if errors.As(err, &rej) {
-		err = s.buttonTx(ctx, p, convID, func(tx Tx) error {
-			a, err := s.failTx(ctx, tx, convID, actionID, rej.err, msg)
-			if err != nil {
-				return err
-			}
-			if err := s.appendMessage(ctx, tx, msg); err != nil {
-				return err
-			}
-			out = &ActionResult{Action: a, Message: msg}
-			return nil
-		})
-	}
 	if err != nil {
 		return nil, err
 	}

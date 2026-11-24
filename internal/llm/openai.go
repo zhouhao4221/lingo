@@ -189,10 +189,25 @@ func (c *OpenAI) ChatStream(ctx context.Context, messages []Message, onDelta fun
 	if err != nil {
 		return "", Usage{}, err
 	}
+	// 不认识 stream_options 的兼容接口会返回 400：去掉它再试一次（只是拿不到用量）
+	plain, err := json.Marshal(struct {
+		Model       string   `json:"model"`
+		Messages    []msg    `json:"messages"`
+		Temperature *float64 `json:"temperature,omitempty"`
+		Stream      bool     `json:"stream"`
+	}{req.Model, req.Messages, req.Temperature, true})
+	if err != nil {
+		return "", Usage{}, err
+	}
 	u := Usage{Model: c.o.Model}
 	var resp *http.Response
 	for attempt := 0; ; attempt++ {
 		resp, err = c.open(ctx, "/chat/completions", body, "text/event-stream")
+		var ae *APIError
+		if errors.As(err, &ae) && ae.StatusCode == http.StatusBadRequest && !bytes.Equal(body, plain) {
+			body = plain
+			resp, err = c.open(ctx, "/chat/completions", body, "text/event-stream")
+		}
 		var ra *retryAfter
 		if !errors.As(err, &ra) {
 			break

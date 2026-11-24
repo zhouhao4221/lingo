@@ -81,7 +81,8 @@ const (
 	MaxTickets      = 20               // 单次交给模型的工单上限
 	MaxReleases     = 10               // 单次交给模型的版本上限
 	turnTimeout     = 2 * time.Minute  // 一轮提问（含模型调用）的时限
-	turnLease       = turnTimeout + 30*time.Second
+	// turnLease 是生成租约：回答时限，加上时限到达时可能还在进行的一次推送（SSE 写期限 30 秒）与落库（10 秒），再留余量
+	turnLease = turnTimeout + 80*time.Second
 )
 
 // Conversation 是一个问答会话，只有创建者本人可访问。
@@ -199,6 +200,11 @@ type Tx interface {
 	InsertAction(ctx context.Context, a *Action) error
 	// ResolveAction 保存操作的状态、结果与处理时间。
 	ResolveAction(ctx context.Context, a *Action) error
+	// Savepoint / RollbackToSavepoint 在事务中设置保存点与回滚到保存点（执行器被拒时撤销其部分写入）。
+	Savepoint(ctx context.Context, name string) error
+	RollbackToSavepoint(ctx context.Context, name string) error
+	// UserMessageBetween 报告会话中 ID 在 (after, before) 之间是否有用户消息。
+	UserMessageBetween(ctx context.Context, conversationID, after, before int64) (bool, error)
 }
 
 // ProjectInfo 是调用者可访问的项目，供意图解析选择项目与仓库。

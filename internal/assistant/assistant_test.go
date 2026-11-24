@@ -83,7 +83,8 @@ func TestErrKind(t *testing.T) {
 		{ctx, fmt.Errorf("llm: read stream: %w", timeoutErr{}), ErrKindTimeout},
 		{ctx, context.DeadlineExceeded, ErrKindTimeout},
 		{canceled, errors.New("x"), ErrKindCanceled},
-		{ctx, errors.New("model down"), ErrKindModel},
+		{ctx, modelError{errors.New("model down")}, ErrKindModel},
+		{ctx, errors.New("db down"), ErrKindInternal},
 	} {
 		if got := errKind(c.ctx, c.err); got != c.want {
 			t.Errorf("errKind(%v) = %s, want %s", c.err, got, c.want)

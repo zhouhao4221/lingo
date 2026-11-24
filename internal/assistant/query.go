@@ -381,7 +381,7 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 	}
 	out, err := s.o.Brain.Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, onDelta)
 	if err != nil {
-		return nil, err
+		return nil, modelError{err}
 	}
 	ok := grounded(out, ids)
 	if !ok {

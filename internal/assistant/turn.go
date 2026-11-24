@@ -50,7 +50,7 @@ func (s *Service) Send(ctx context.Context, p auth.Principal, convID int64, cont
 		if err := tx.InsertMessage(ctx, user); err != nil {
 			return err
 		}
-		act, expired, err = s.liveAction(ctx, tx, convID)
+		act, expired, err = s.liveAction(ctx, tx, convID, user.ID)
 		return err
 	})
 	if err != nil {
@@ -94,7 +94,7 @@ func (s *Service) Retry(ctx context.Context, p auth.Principal, convID, messageID
 		if user, err = tx.GetMessage(ctx, convID, failed.ReplyTo); err != nil {
 			return err
 		}
-		act, expired, err = s.liveAction(ctx, tx, convID)
+		act, expired, err = s.liveAction(ctx, tx, convID, user.ID)
 		return err
 	})
 	if err != nil {
@@ -115,15 +115,25 @@ func (s *Service) claim(ctx context.Context, tx Tx, p auth.Principal, convID int
 	return conv, nil
 }
 
-// liveAction 返回会话中仍有效的待确认操作；刚过期的落库为 expired，并报告 expired。
-func (s *Service) liveAction(ctx context.Context, tx Tx, convID int64) (*Action, bool, error) {
+// liveAction 返回会话中仍有效的待确认操作；刚过期的落库为 expired，并报告 expired。userMsgID 是本轮回答的用户消息：
+// 操作提出之后、这条消息之前如果还有别的用户消息（如中间那轮回答失败了），说明用户已经转而问了别的，操作作废。
+func (s *Service) liveAction(ctx context.Context, tx Tx, convID, userMsgID int64) (*Action, bool, error) {
 	a, err := tx.PendingAction(ctx, convID)
 	if err != nil || a == nil {
 		return nil, false, err
 	}
-	if now := s.o.Now(); !now.Before(a.ExpiresAt) {
+	now := s.o.Now()
+	if !now.Before(a.ExpiresAt) {
 		a.Status, a.ResolvedAt = ActionExpired, &now
 		return nil, true, tx.ResolveAction(ctx, a)
+	}
+	between, err := tx.UserMessageBetween(ctx, convID, a.MessageID, userMsgID)
+	if err != nil {
+		return nil, false, err
+	}
+	if between {
+		a.Status, a.ResolvedAt = ActionCancelled, &now
+		return nil, false, tx.ResolveAction(ctx, a)
 	}
 	return a, false, nil
 }
@@ -148,7 +158,16 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	}
 	origID := msg.ID // 重试时为原消息 ID；落库事务回滚后，InsertMessage 回填的 ID 已失效
 	tctx, cancel := context.WithTimeout(ctx, turnTimeout)
-	r, err := s.respond(tctx, p, conv, user, act, expired, loc, onDelta)
+	deliver := onDelta
+	if onDelta != nil {
+		// 超过回答时限后不再推送片段：每次推送可能阻塞到 SSE 写期限，租约要能覆盖到落库结束（见 turnLease）
+		deliver = func(d string) {
+			if tctx.Err() == nil {
+				onDelta(d)
+			}
+		}
+	}
+	r, err := s.respond(tctx, p, conv, user, act, expired, loc, deliver)
 	cancel()
 	// 落库不随请求取消：客户端断开时也要记下失败并释放租约
 	fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -187,15 +206,24 @@ func (s *Service) salvage(ctx context.Context, conv *Conversation, msg *Message,
 	return msg, nil
 }
 
+// modelError 标记来自模型调用（Brain）的错误，以便与数据库等内部错误区分。
+type modelError struct{ err error }
+
+func (e modelError) Error() string { return e.err.Error() }
+func (e modelError) Unwrap() error { return e.err }
+
 func errKind(ctx context.Context, err error) string {
 	var timeout interface{ Timeout() bool }
+	var me modelError
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
 		return ErrKindCanceled
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
 		return ErrKindTimeout
+	case errors.As(err, &me):
+		return ErrKindModel
 	}
-	return ErrKindModel
+	return ErrKindInternal
 }
 
 // saveMessage 写入（或原地更新）助手消息并刷新会话的最近活动；title 非空且会话还没有标题时写入标题。
@@ -241,17 +269,6 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 			}
 			return save(tx)
 		})
-		var rej errRejected
-		if errors.As(err, &rej) {
-			a = nil
-			err = s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
-				var err error
-				if a, err = s.failTx(ctx, tx, conv.ID, r.execute.ID, rej.err, msg); err != nil {
-					return err
-				}
-				return save(tx)
-			})
-		}
 		if errors.Is(err, ticket.ErrConflict) {
 			// 执行前操作已不在等待中（如同时点了取消按钮）：如实说明，照常落库并释放租约
 			msg.Content, msg.Outcome, msg.Citations = notPendingText(a), OutcomeNoAction, Citations{}
@@ -299,7 +316,7 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	if act != nil {
 		d, err := s.o.Brain.Confirm(ctx, ConfirmInput{Summary: act.Summary, Message: user.Content})
 		if err != nil {
-			return nil, err
+			return nil, modelError{err}
 		}
 		switch d {
 		case IntentConfirm:
@@ -317,7 +334,7 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	in, err := s.o.Brain.Intent(ctx, IntentInput{Today: today(tc.now, loc), Projects: s.o.Projects(p), History: hist,
 		Question: user.Content, NeedTitle: conv.Title == ""})
 	if err != nil {
-		return nil, err
+		return nil, modelError{err}
 	}
 	if cancelled != nil {
 		// 确认判断没认出来（如输出不合格），但意图解析认为是确认 / 取消：按用户的意思处理仍在等待的操作
