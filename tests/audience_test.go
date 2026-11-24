@@ -209,8 +209,22 @@ func TestTicketAudienceAssistant(t *testing.T) {
 		!strings.Contains(got.Content, "只能对自己提交的工单留言") {
 		t.Errorf("peer comment: %+v", got)
 	}
-	// 同事不在名单后：历史引用按当前范围重新判断
+	// 其他角色：不发送提交人姓名
+	rc, _ := l.CreateConversation(ctx, rita, "")
+	before := len(m.allPrompts())
+	m.intents = []string{`{"intent":"ticket_summary","keywords":["登录"]}`}
+	send(t, l, rita, rc.ID, "登录相关的工单")
+	if p := m.allPrompts()[before:]; strings.Contains(p, "submitter") {
+		t.Errorf("reviewer prompt has submitter:\n%s", p)
+	}
+	// 同事不在名单后：历史引用按当前范围重新判断（含送给模型的历史）
 	a.set("u1")
+	before = len(m.allPrompts())
+	m.intents = []string{`{"intent":"out_of_scope"}`}
+	send(t, l, alice, conv.ID, "谢谢")
+	if p := m.allPrompts()[before:]; strings.Contains(p, "登录超时") || !strings.Contains(p, "登录页白屏") {
+		t.Errorf("history not rechecked:\n%s", p)
+	}
 	ms, err := l.ListConversationMessages(ctx, alice, conv.ID, 0, 0)
 	if err != nil {
 		t.Fatal(err)

@@ -72,8 +72,8 @@ type factTicket struct {
 	Milestone    string        `json:"milestone,omitempty"`
 	DueDate      string        `json:"due_date,omitempty"`
 	Summary      string        `json:"summary,omitempty"`
-	Mine         bool          `json:"mine"`                // 是否提问人本人提交
-	Submitter    string        `json:"submitter,omitempty"` // 非本人提交时的提交人姓名（同事的工单，REQ-004）
+	Mine         bool          `json:"mine,omitempty"`      // 提问人本人提交
+	Submitter    string        `json:"submitter,omitempty"` // 同事的工单（external 经 TicketAudience 放宽可见，REQ-004）的提交人姓名；其他情况不发送
 	Comments     []factComment `json:"recent_comments,omitempty"`
 }
 
@@ -135,8 +135,8 @@ func (s *Service) factOf(p auth.Principal, t *ticket.Ticket, loc *time.Location,
 	f := factTicket{Mine: p.ID != "" && t.UserID == p.ID, ID: t.ID, Project: t.ProjectKey, Repo: t.Repo, Type: typeName(t.Type), Title: plainRefs(oneLine(t.Title)),
 		Status: statusName(string(t.Status)), CreatedAt: fmtTime(t.CreatedAt, loc), UpdatedAt: fmtTime(t.UpdatedAt, loc),
 		FixedVersion: t.FixedTag, Milestone: t.Milestone, Summary: plainRefs(textutil.ClipEllipsis(t.Body, bodyRunes))}
-	if !f.Mine {
-		f.Submitter = oneLine(t.UserName)
+	if !f.Mine && p.Role == auth.RoleExternal && p.Peer(t.UserID) {
+		f.Submitter = oneLine(t.UserName) // 只对同事的工单发送姓名，其他角色、其他工单不发送提交人身份
 	}
 	if t.DeployedAt != nil {
 		f.DeployedAt = fmtTime(*t.DeployedAt, loc)

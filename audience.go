@@ -18,17 +18,17 @@ func (l *Lingo) viewer(ctx context.Context, u User) auth.Principal {
 		l.log.Warn("lingo: TicketAudience failed; showing only the caller's own tickets", "user", u.ID, "err", err)
 		return p
 	}
-	p.Peers = audienceIDs(u.ID, a.UserIDs)
-	if len(p.Peers) == MaxTicketAudience && len(a.UserIDs) > MaxTicketAudience {
+	var truncated bool
+	p.Peers, truncated = audienceIDs(u.ID, a.UserIDs)
+	if truncated {
 		l.log.Warn("lingo: TicketAudience returned too many users; extra ones ignored", "user", u.ID, "returned", len(a.UserIDs),
 			"max", MaxTicketAudience)
 	}
 	return p
 }
 
-// audienceIDs 去重、去掉空串与调用者本人，最多保留前 MaxTicketAudience 个。
-func audienceIDs(self string, ids []string) []string {
-	var out []string
+// audienceIDs 去重、去掉空串与调用者本人，最多保留前 MaxTicketAudience 个；truncated 报告是否丢弃了超出上限的 ID。
+func audienceIDs(self string, ids []string) (out []string, truncated bool) {
 	seen := make(map[string]bool, min(len(ids), MaxTicketAudience))
 	for _, id := range ids {
 		if id == "" || id == self || seen[id] {
@@ -36,9 +36,9 @@ func audienceIDs(self string, ids []string) []string {
 		}
 		seen[id] = true
 		if len(out) == MaxTicketAudience {
-			break
+			return out, true
 		}
 		out = append(out, id)
 	}
-	return out
+	return out, false
 }

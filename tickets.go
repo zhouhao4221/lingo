@@ -164,8 +164,9 @@ func (l *Lingo) ListMyTickets(ctx context.Context, u User, status string, before
 	return l.ticketList(u, ts, err)
 }
 
-// ListVisibleTickets 返回 u 本人提交的工单，加上 Config.TicketAudience 放宽可见的提交人在 u 项目内的工单（新的在前，
-// 只读；同事的工单 Mine 为 false）。未配置 TicketAudience 或非 external 时与 ListMyTickets 相同（可按项目筛选）。
+// ListVisibleTickets 返回 u 在 User.Projects 内可查看的工单：本人提交的，加上 Config.TicketAudience 放宽可见的提交人的
+// （新的在前，只读；同事的工单 Mine 为 false），可按项目与状态筛选。与 ListMyTickets 不同，结果限定在 User.Projects 内
+// （ListMyTickets 返回本人的全部工单）；未配置 TicketAudience 或非 external 时只含本人的。
 func (l *Lingo) ListVisibleTickets(ctx context.Context, u User, f VisibleTicketFilter) ([]Ticket, error) {
 	ts, err := l.tickets.ListVisible(ctx, l.viewer(ctx, u), f.Project,
 		ticket.VisibleQuery{Status: f.Status, BeforeID: f.BeforeID, Limit: f.Limit})

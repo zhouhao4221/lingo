@@ -351,7 +351,7 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 		}
 		cancelled = act // 用户转而问了别的：操作作废，按新问题回答
 	}
-	hist, err := s.history(ctx, conv.ID, user.ID)
+	hist, err := s.history(ctx, p, conv.ID, user.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -428,10 +428,13 @@ func (s *Service) accessible(p auth.Principal, key string) bool {
 	return false
 }
 
-// history 返回当前提问之前的最近 HistoryTurns 轮已完成消息。
-func (s *Service) history(ctx context.Context, convID, beforeID int64) ([]HistoryItem, error) {
+// history 返回当前提问之前的最近 HistoryTurns 轮已完成消息；引用的工单按当前可读范围重新判断（见 recheckCites）。
+func (s *Service) history(ctx context.Context, p auth.Principal, convID, beforeID int64) ([]HistoryItem, error) {
 	ms, err := s.o.Store.RecentDone(ctx, convID, beforeID, 2*HistoryTurns)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.recheckCites(ctx, p, ms); err != nil {
 		return nil, err
 	}
 	out := make([]HistoryItem, 0, len(ms))
