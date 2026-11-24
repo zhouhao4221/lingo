@@ -70,6 +70,9 @@ func TestParseDataIntent(t *testing.T) {
 	if in := parseIntentTools(`{"intent":"data_query","tool":"get_order","tool_input":"1024"}`, testProjects, tools); string(in.ToolInput) != "{}" {
 		t.Errorf("non-object input = %s", in.ToolInput)
 	}
+	if in := parseIntentTools(`{"intent":"data_query","tool":"get_order","title":"模型标题","clarify":"x"}`, testProjects, nil); in.Kind != assistant.IntentClarify || in.Title != "" || in.Clarify != "" {
+		t.Errorf("no tools: fallback differs from v0.8.0: %+v", in)
+	}
 	if in := parseIntent(`{"intent":"data_query","tool":"get_order"}`, testProjects); in.Kind != assistant.IntentClarify {
 		t.Errorf("parseIntent accepts data_query: %+v", in)
 	}

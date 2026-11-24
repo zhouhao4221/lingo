@@ -166,13 +166,20 @@ func (l *Lingo) newDataTools(builtin []string) *connector.Service {
 	return s
 }
 
-// maintainDataRequests 定期把租约过期的待完成审计标为中断、清理超过 180 天的审计；只在有可用工具时运行。
+// maintainDataRequests 定期把租约过期的待完成审计标为中断、清理超过 180 天的审计；与是否注册了工具无关。
+// 同一错误连续出现时只记一次 Warn（如尚未执行迁移 0007），恢复后再出错会重新记录。
 func (l *Lingo) maintainDataRequests(ctx context.Context) {
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
+	last := ""
 	for {
-		if err := l.data.Maintain(ctx); err != nil && ctx.Err() == nil {
+		err := l.data.Maintain(ctx)
+		switch {
+		case err != nil && ctx.Err() == nil && err.Error() != last:
 			l.log.Warn("lingo: maintain data request audit failed", "err", err)
+			last = err.Error()
+		case err == nil:
+			last = ""
 		}
 		select {
 		case <-ctx.Done():

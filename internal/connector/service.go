@@ -51,7 +51,8 @@ const (
 	ReasonInterrupted  = "interrupted"
 )
 
-// Record 是一条审计记录，不含结果与错误原文。Args 为 nil 表示不记参数值（拒绝记录）。
+// Record 是一条审计记录，不含结果与错误原文。ArgNames / Args 只含 InputSchema 声明的参数；Args 为 nil 表示不记参数值
+// （拒绝记录）。
 type Record struct {
 	ID             int64
 	UserID         string
@@ -178,25 +179,26 @@ func (s *Service) Run(ctx context.Context, c Caller, name string, input json.Raw
 	args := decodeObject(input)
 	t := s.byName[name]
 	if t == nil || !c.has(t.Scope) {
-		reason := ReasonNotFound
+		// 审计只记 InputSchema 声明的参数名：工具不存在时没有可信的声明，不记参数
+		reason, names := ReasonNotFound, map[string]any(nil)
 		if t != nil {
-			reason = ReasonForbidden
+			reason, names = ReasonForbidden, t.declared(args)
 		}
-		s.record(ctx, rec, args, StatusDenied, reason, start, false)
+		s.record(ctx, rec, names, StatusDenied, reason, start, false)
 		return nil, ErrNotFound
 	}
 	if err := t.schema.validate(args); err != nil {
-		s.record(ctx, rec, args, StatusDenied, ReasonInvalidInput, start, false)
+		s.record(ctx, rec, t.declared(args), StatusDenied, ReasonInvalidInput, start, false)
 		return nil, err
 	}
-	masked := mask(decodeObject(input), t.sensitive).(map[string]any)
-	ok, probe := t.br.allow(s.o.Now())
+	masked := t.declared(mask(decodeObject(input), t.sensitive).(map[string]any))
+	tk, ok := t.br.allow(s.o.Now())
 	if !ok {
 		s.record(ctx, rec, masked, StatusUnavailable, ReasonCircuitOpen, start, true)
 		return nil, ErrUnavailable
 	}
 	if !s.acquire(t) {
-		t.br.neutral(probe)
+		t.br.neutral(tk)
 		s.record(ctx, rec, masked, StatusUnavailable, ReasonOverloaded, start, true)
 		return nil, ErrUnavailable
 	}
@@ -204,7 +206,7 @@ func (s *Service) Run(ctx context.Context, c Caller, name string, input json.Raw
 	rec.Status = StatusPending
 	if err := s.o.Audit.InsertDataRequest(ctx, rec, t.timeout+leaseGrace); err != nil {
 		s.release(t)
-		t.br.neutral(probe)
+		t.br.neutral(tk)
 		s.o.Logger.Error("lingo: data tool audit failed, call skipped", "tool", t.Name, "code", dbCode(err))
 		return nil, ErrUnavailable
 	}
@@ -213,26 +215,27 @@ func (s *Service) Run(ctx context.Context, c Caller, name string, input json.Raw
 	var err error
 	switch {
 	case reason == ReasonCanceled:
-		t.br.neutral(probe)
+		t.br.neutral(tk)
 		err = ErrFailed
 	case reason != "":
-		s.fail(t)
+		s.fail(t, tk)
 		err = ErrFailed
 	case out.Project != "" && (!s.configured(out.Project) || !c.canAccess(out.Project)):
 		// 声明的归属项目不存在或不可访问：丢弃结果，与工具不存在相同；记录不带归属与参数值
-		t.br.neutral(probe)
+		t.br.neutral(tk)
 		reason, rec.Args = ReasonForbidden, nil
 		s.finish(ctx, rec, StatusDenied, reason, start)
 		return nil, ErrNotFound
 	default:
-		data, text, truncated, encErr := encodeResult(out.Data, t.sensitive)
+		data, text, truncated, encErr := safeEncode(out.Data, t.sensitive)
 		if encErr != nil {
+			// 编码或脱敏失败（含 panic）：结果丢弃，按失败收尾审计与熔断；错误内容可能含业务数据，不记录
 			reason = ReasonEncode
-			s.fail(t)
+			s.fail(t, tk)
 			err = ErrFailed
 			break
 		}
-		t.br.success()
+		t.br.success(tk)
 		rec.Project, rec.Truncated = out.Project, truncated
 		res = &Result{Tool: t.Name, Description: t.Description, Data: data, Text: text, Truncated: truncated, Project: out.Project}
 	}
@@ -244,8 +247,8 @@ func (s *Service) Run(ctx context.Context, c Caller, name string, input json.Raw
 	return res, nil
 }
 
-func (s *Service) fail(t *tool) {
-	if t.br.failure(s.o.Now()) {
+func (s *Service) fail(t *tool, tk ticket) {
+	if t.br.failure(tk, s.o.Now()) {
 		s.o.Logger.Warn("lingo: data tool circuit opened", "tool", t.Name, "pause", openFor.String())
 	}
 }
@@ -306,6 +309,10 @@ func (s *Service) call(ctx context.Context, t *tool, c Caller, input json.RawMes
 	}()
 	select {
 	case r := <-done:
+		// 超时边界：结果在时限到达之后才取到时按超时处理并丢弃，与 Done 分支一致（不因调度先后而不同）
+		if ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+			return Output{}, ReasonTimeout
+		}
 		switch {
 		case r.panicked:
 			s.o.Logger.Error("lingo: data tool panicked", "tool", t.Name)

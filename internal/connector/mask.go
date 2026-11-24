@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"unicode/utf8"
 )
@@ -86,6 +87,22 @@ func encodeResult(data any, paths [][]string) (out json.RawMessage, text string,
 	}
 	return nil, string(cut), true, nil
 }
+
+// safeEncode 同 encodeResult，并把编码过程中的 panic（如数据的 MarshalJSON 出错）转为错误；错误内容不外传。
+func safeEncode(data any, paths [][]string) (out json.RawMessage, text string, truncated bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, text, truncated, err = nil, "", false, errEncode
+		}
+	}()
+	out, text, truncated, err = encodeResult(data, paths)
+	if err != nil {
+		err = errEncode // 不保留原错误：其中可能含数据内容
+	}
+	return out, text, truncated, err
+}
+
+var errEncode = errors.New("result encoding failed")
 
 // 参数摘要的限制。
 const (

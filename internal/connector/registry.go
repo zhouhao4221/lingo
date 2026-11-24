@@ -110,6 +110,17 @@ type tool struct {
 	inflight  atomic.Int32
 }
 
+// declared 只保留 InputSchema 中声明的参数（审计不记录未声明字段的名称或值）。
+func (t *tool) declared(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if _, ok := t.schema.props[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // register 校验并接受工具：不合格的忽略；与内置工具或先注册的有效工具同名时忽略后者，不覆盖。

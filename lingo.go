@@ -495,13 +495,11 @@ func (l *Lingo) Run(ctx context.Context) error {
 		defer checked.Done()
 		l.embedKnowledge(ctx)
 	}()
-	if !l.data.Empty() {
-		checked.Add(1)
-		go func() { // 业务数据调用审计：中断恢复与 180 天清理（REQ-008）
-			defer checked.Done()
-			l.maintainDataRequests(ctx)
-		}()
-	}
+	checked.Add(1)
+	go func() { // 业务数据调用审计：中断恢复与 180 天清理（REQ-008）；不依赖当前是否注册了工具（移除工具后历史审计仍按期清理）
+		defer checked.Done()
+		l.maintainDataRequests(ctx)
+	}()
 	checked.Add(1)
 	go func() { // 定时检查连接配置；Gitea 连接变化后补跑一次自检（开启自动注册时同步 Webhook 密钥）
 		defer checked.Done()

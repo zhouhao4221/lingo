@@ -206,7 +206,8 @@ func parseIntentTools(out string, projects []assistant.ProjectInfo, tools []assi
 			offered = offered || t.Name == r.Tool
 		}
 		if !offered {
-			return &assistant.Intent{Kind: assistant.IntentClarify, Title: textutil.Clip(oneLine(r.Title), 30)}
+			// 与 v0.8.0 中未知意图的处理相同：只返回追问，不带模型给的标题与追问语（会话标题仍取自提问）
+			return &assistant.Intent{Kind: assistant.IntentClarify}
 		}
 		in := &assistant.Intent{Kind: r.Intent, Tool: r.Tool, ToolInput: json.RawMessage("{}"), Title: textutil.Clip(oneLine(r.Title), 30)}
 		if t := strings.TrimSpace(string(r.ToolInput)); strings.HasPrefix(t, "{") {

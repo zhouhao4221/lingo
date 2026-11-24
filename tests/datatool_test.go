@@ -224,21 +224,24 @@ func TestDataToolInterruptRecovery(t *testing.T) {
 	}
 }
 
+// 审计维护不依赖当前是否注册了工具：移除全部工具后，历史审计仍按期清理、过期的待完成记录仍标为中断。
 func TestDataToolPurge(t *testing.T) {
 	db := testDB(t, true)
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `INSERT INTO lingo_data_requests (user_id, user_role, tool, channel, status, created_at) VALUES
-		('u1', 'external', 'get_order', 'api', 'ok', now() - interval '181 days'),
-		('u1', 'external', 'get_order', 'api', 'ok', now() - interval '179 days')`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO lingo_data_requests (user_id, user_role, tool, channel, status, created_at, lease_until) VALUES
+		('u1', 'external', 'get_order', 'api', 'ok', now() - interval '181 days', NULL),
+		('u1', 'external', 'get_order', 'api', 'ok', now() - interval '179 days', NULL),
+		('u1', 'external', 'get_order', 'api', 'pending', now() - interval '1 day', now() - interval '1 hour')`); err != nil {
 		t.Fatal(err)
 	}
-	l := newToolLingo(t, db, orderTool(""))
+	l := newToolLingo(t, db) // 不注册任何工具
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_ = l.Run(rctx)
-	var n int
-	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM lingo_data_requests").Scan(&n); err != nil || n != 1 {
-		t.Errorf("rows after purge = %d, %v", n, err)
+	var n, interrupted int
+	if err := db.QueryRowContext(ctx, "SELECT count(*), count(*) FILTER (WHERE status = 'interrupted') FROM lingo_data_requests").Scan(&n, &interrupted); err != nil ||
+		n != 2 || interrupted != 1 {
+		t.Errorf("rows after purge = %d (interrupted %d), %v", n, interrupted, err)
 	}
 }
 
@@ -498,5 +501,39 @@ func TestDataToolAssistant(t *testing.T) {
 	a, b := m.intentCalls(), m2.intentCalls()
 	if last := a[len(a)-1]; last != b[len(b)-1] {
 		t.Errorf("intent prompt for user without scope differs from no-tool instance:\n%s\n---\n%s", last[1], b[len(b)-1][1])
+	}
+}
+
+// 无工具时：模型即使输出 data_query，也与 v0.8.0 一样按追问处理，会话标题取自提问而不是模型给的标题。
+func TestDataToolNoToolsIntentFallback(t *testing.T) {
+	db := testDB(t, true)
+	ctx := context.Background()
+	m := &toolModel{intents: []string{`{"intent":"data_query","tool":"get_order","tool_input":{},"title":"模型给的标题","clarify":"模型给的追问"}`}}
+	l, err := lingo.New(lingo.Config{DB: db, Model: m, Projects: toolProjects, Authenticate: scopedHeaderUser,
+		SkipSelfCheck: true, ReconcileInterval: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := lingo.User{ID: "u1", Role: lingo.RoleExternal, Scopes: []string{"order:read"}}
+	c, err := l.CreateConversation(ctx, u, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := "订单 1024 为什么审批失败"
+	msg, err := l.SendMessage(ctx, u, c.ID, lingo.MessageInput{Content: q})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "没太理解你的问题，能换个说法，或者说明是哪个工单、哪个项目吗？" || len(msg.Citations.Tools) != 0 {
+		t.Errorf("reply = %+v", msg)
+	}
+	cs, err := l.ListConversations(ctx, u, 0, 10)
+	if err != nil || len(cs) != 1 || cs[0].Title != q {
+		t.Errorf("title = %+v, %v", cs, err)
+	}
+	var n int
+	_ = db.QueryRowContext(ctx, "SELECT count(*) FROM lingo_data_requests").Scan(&n)
+	if n != 0 {
+		t.Errorf("audit rows without tools = %d", n)
 	}
 }

@@ -150,7 +150,7 @@ lingo.Config{
 - 写操作须确认：要求留言时，助手消息带 `pending_action`；窗口可显示“确认 / 取消”按钮（调用 confirm / cancel），用户也可以直接回复“确认”。30 分钟内有效，取消、问别的或超时后作废。
 - 会话只有本人可见（admin 也不行），可续聊、删除；灵工不自动清理，保留多久由接入方决定。
 - 需要 `Config.Model`（意图解析用 `LightModel`，为空时用 `Model`）；未配置时发送返回 `ErrNoModel`（REST 501）。模型实现 `lingo.StreamModel` 时逐字输出，内置模型已实现（注意 `OpenAIConfig.HTTPClient` 的超时是整个回答的时限，默认 90 秒）。
-- 回答工单、版本与知识类问题（使用方法、原因、怎么办，见下节「知识库」）；业务数据 `Tool` 后续提供。
+- 回答工单、版本与知识类问题（使用方法、原因、怎么办，见下节「知识库」），以及经注册的工具查询提问人本人的业务数据（见「业务数据工具」）。
 
 ```go
 c, _ := l.CreateConversation(ctx, u, "")
@@ -237,11 +237,14 @@ l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leave
 - **注册校验**：`Name` 只含字母、数字、下划线（不超过 64 个字符），`Mode` 为 `ToolRead`，`Scope` 非空，`InputSchema` 为 JSON 对象，`Call` 非空，`Timeout` 不为负且不超过 60 秒。不满足的工具**被忽略并记 Warn 日志**（`New` 不会因此失败）；与内置 MCP 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖已有工具。升级后请检查启动日志中的 `Config.Tools entry ignored`。
 - **参数**：只校验 `required` 与 `properties` 的基本类型；不合法时问答按参数的 `description` 追问，MCP / Go 返回参数错误（只含参数名与期望类型）。
 - **结果**：按 `Sensitive` 路径（`phone`、`customer.phone`、`items.*.price`）脱敏，超过 8KB 截断（`truncated`）；**原始结果不写入会话、知识库、审计与日志**，回答正文照常作为会话消息保存。业务数据类回答被标为有帮助时不进入知识库候选。
-- **超时、并发与熔断**：默认 10 秒；超时后仍未返回的 `Call` 继续占用并发名额（每个工具 8 个、合计 64 个），名额满时返回 `ErrToolUnavailable`；同一工具 5 分钟内连续失败 5 次暂停 1 分钟（只在当前实例内）。
-- **审计**：每次调用先写一条待完成记录再执行（写不进就不调用），记录人员、工具、入口、参数摘要（参数名与截断、脱敏后的值；拒绝记录只有参数名）、状态与原因、耗时，不含结果与错误原文，保留 180 天。`ListDataRequests`（REST `GET /data-requests`）：每个人都能看到本人的记录；reviewer / admin 另可看到归属项目在其 `User.Projects` 中**明确列出**的记录——`User.Projects` 为空**不**授予跨用户审计，未声明归属的记录只有本人可见。
+- **超时、并发与熔断**：默认 10 秒；超时后仍未返回的 `Call` 继续占用并发名额（每个工具 8 个、合计 64 个），名额满时返回 `ErrToolUnavailable`；同一工具 5 分钟内连续失败 5 次暂停 1 分钟（只在当前实例内）；暂停前已在途、之后才返回的调用不会关闭或重开熔断。时限到达后才取到的结果按超时丢弃。结果编码或脱敏失败按失败计入，记录不含错误原文。
+- **审计**：每次调用先写一条待完成记录再执行（写不进就不调用），记录人员、工具、入口、参数摘要（只含 `InputSchema` 声明的参数：参数名与截断、脱敏后的值；拒绝记录只有参数名；未声明的字段不记录）、状态与原因、耗时，不含结果与错误原文，保留 180 天。`ListDataRequests`（REST `GET /data-requests`）：每个人都能看到本人的记录；reviewer / admin 另可看到归属项目在其 `User.Projects` 中**明确列出**的记录——`User.Projects` 为空**不**授予跨用户审计，未声明归属的记录只有本人可见。
 - **合规提醒**：业务数据会发给你配置的模型组织回答，请按数据合规要求选择模型服务，并用 `Sensitive` 去掉不应外发的字段。工具结果被当作数据而不是指令，但仍应避免让工具返回不可信的长文本。
 - 错误：`ErrToolUnavailable`（REST 503 `tool_unavailable`）、`ErrToolFailed`（超时、`Call` 出错或 panic；REST 502 `tool_failed`），都不含错误原文。
-- 需要迁移 `0007_data_requests.sql`；只读，`write` 类工具与转工单时附带业务数据留待后续版本。
+- 需要迁移 `0007_data_requests.sql`；即使没有注册工具，`Run` 也会把租约过期的待完成记录标为中断、清理 180 天前的记录。只读，`write` 类工具与转工单时附带业务数据留待后续版本。
+- **升级后的行为变化**：
+  1. 以前写在 `Config.Tools` 中、从未被调用的工具，升级后会被问答、MCP 与 `CallTool` **真实调用**（产生真实的业务查询与审计记录），前提是提问人的 `User.Scopes` 含其 `Scope`。
+  2. 不满足注册校验的工具（含 `write` 类、`Scope` 为空、`Timeout` 超过 60 秒）**被忽略并记 Warn 日志**，不再保留在配置中生效；`New` 照常成功。请检查启动日志中的 `Config.Tools entry ignored`。
 
 ### 连接配置（存数据库）
 
