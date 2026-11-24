@@ -312,10 +312,11 @@ type ConfirmInput struct {
 
 // HistoryItem 是带给模型的一条历史消息。
 type HistoryItem struct {
-	Role    string      `json:"role"`
-	Content string      `json:"content"`
-	Tickets []TicketRef `json:"tickets,omitempty"`
-	Tags    []string    `json:"releases,omitempty"`
+	Role      string         `json:"role"`
+	Content   string         `json:"content"`
+	Tickets   []TicketRef    `json:"tickets,omitempty"`
+	Knowledge []KnowledgeRef `json:"knowledge,omitempty"`
+	Tags      []string       `json:"releases,omitempty"`
 }
 
 // IntentInput 是意图解析的输入。

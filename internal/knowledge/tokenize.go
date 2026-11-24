@@ -57,11 +57,11 @@ func Tokens(s string) []string {
 	return out
 }
 
-// words 返回关键词兜底用的片段：按空白与标点切开、至少 2 个字符的片段，最多 5 个。
+// words 返回关键词兜底用的片段：按空白与标点切开、至少 2 个字符（单个中日韩文字也算）的片段，最多 5 个。
 func words(s string) []string {
 	var out []string
 	for _, w := range strings.FieldsFunc(s, func(r rune) bool { return !(cjk(r) || unicode.IsLetter(r) || unicode.IsDigit(r)) }) {
-		if len([]rune(w)) >= 2 && len(out) < 5 {
+		if r := []rune(w); (len(r) >= 2 || cjk(r[0])) && len(out) < 5 {
 			out = append(out, w)
 		}
 	}
@@ -70,11 +70,12 @@ func words(s string) []string {
 
 var (
 	emailRe = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
-	phoneRe = regexp.MustCompile(`(?:\+?86[\s\-]?)?1[3-9]\d[\s\-]?\d{4}[\s\-]?\d{4}`)
+	// 前后不能是数字（Go 的正则没有环视，边界字符经分组保留），避免误伤订单号、时间戳等长数字
+	phoneRe = regexp.MustCompile(`(^|[^\d])((?:\+?86[\s\-]?)?1[3-9]\d[\s\-]?\d{4}[\s\-]?\d{4})($|[^\d])`)
 )
 
 // Scrub 清理文本中的邮箱与手机号（入库前兜底；改写为通用内容由后台人员负责）。
 func Scrub(s string) string {
 	s = emailRe.ReplaceAllString(s, "[邮箱]")
-	return phoneRe.ReplaceAllString(s, "[手机号]")
+	return phoneRe.ReplaceAllString(s, "${1}[手机号]${3}")
 }

@@ -333,7 +333,7 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, project, query s
 	case limit > MaxSearchLimit:
 		limit = MaxSearchLimit
 	}
-	toks := Tokens(query + " " + strings.Join(keywords, " "))
+	toks := Tokens(strings.Join(keywords, " ") + " " + query) // 关键词在前：截断时保留意图给出的关键词
 	if len(toks) > MaxQueryTokens {
 		toks = toks[:MaxQueryTokens]
 	}

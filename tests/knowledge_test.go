@@ -273,6 +273,17 @@ func TestKnowledgeAssistant(t *testing.T) {
 	}
 	es, _ := l.ListKnowledge(ctx, rita, lingo.KnowledgeFilter{})
 	kid := es[0].ID
+	// 另一条也能被"导出报表"检索到，但模型只引用 kid：只引用、只计数 kid
+	noise, err := l.CreateKnowledge(ctx, rita, lingo.KnowledgeDraft{Project: "demo", Question: "导出报表的格式", Answer: "支持 CSV 与 Excel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.answer = func(data string) string {
+		if strings.Contains(data, fmt.Sprintf("K%d", kid)) {
+			return fmt.Sprintf("可以参考 K%d：检查筛选条件。", kid)
+		}
+		return "好的"
+	}
 	intent := `{"intent":"knowledge_ask","keywords":["导出报表"]}`
 
 	conv, _ := l.CreateConversation(ctx, bob, "")
@@ -284,6 +295,9 @@ func TestKnowledgeAssistant(t *testing.T) {
 	}
 	if n := countRows(t, db, "SELECT cite_count FROM lingo_knowledge WHERE id = $1", kid); n != 1 {
 		t.Errorf("cite_count = %d", n)
+	}
+	if n := countRows(t, db, "SELECT cite_count FROM lingo_knowledge WHERE id = $1", noise.ID); n != 0 {
+		t.Errorf("unreferenced entry counted: %d", n)
 	}
 	if n := countRows(t, db, "SELECT count(*) FROM lingo_llm_usage WHERE kind = 'knowledge_answer'"); n != 1 {
 		t.Errorf("knowledge_answer usage = %d", n)
@@ -303,11 +317,25 @@ func TestKnowledgeAssistant(t *testing.T) {
 	if ids := ticketIDs(got); len(ids) != 1 || ids[0] != src {
 		t.Errorf("alice ticket cites = %v", ids)
 	}
-	// 编造知识编号：改用确定性回答
-	m.answer = func(string) string { return "参考 K99999" }
+	// 编造知识编号：改用确定性回答，不计数；流式输出不推送编造的编号
+	m.answer = func(string) string { return "参考 K99999 处理" }
 	m.intents = []string{intent}
-	if got := send(t, l, bob, conv.ID, "导出报表空白"); strings.Contains(got.Content, "K99999") || !strings.Contains(got.Content, "知识库中的相关内容") {
-		t.Errorf("fabricated = %q", got.Content)
+	var deltas strings.Builder
+	got, err = l.SendMessageStream(ctx, bob, conv.ID, lingo.MessageInput{Content: "导出报表空白"}, func(d string) { deltas.WriteString(d) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.Content, "K99999") || !strings.Contains(got.Content, "知识库中的相关内容") || strings.Contains(deltas.String(), "K99999") {
+		t.Errorf("fabricated = %q, streamed %q", got.Content, deltas.String())
+	}
+	if n := countRows(t, db, "SELECT cite_count FROM lingo_knowledge WHERE id = $1", kid); n != 2 { // 第 1 次 bob、第 2 次 alice
+		t.Errorf("cite_count after fallback = %d", n)
+	}
+	// 普通工单回答中的 "K3"（产品型号）不当作知识编号
+	m.answer = func(string) string { return fmt.Sprintf("#%d 的 K3 型号问题已答复", src) }
+	m.intents = []string{fmt.Sprintf(`{"intent":"ticket_find","ticket_ids":[%d]}`, src)}
+	if got := send(t, l, alice, ac.ID, fmt.Sprintf("#%d 怎么样了", src)); !strings.Contains(got.Content, "K3 型号") {
+		t.Errorf("ticket answer with K3 replaced: %q", got.Content)
 	}
 	// 无命中
 	m.intents = []string{`{"intent":"knowledge_ask","keywords":["打印机"]}`}
@@ -325,9 +353,16 @@ func TestKnowledgeAssistant(t *testing.T) {
 	seen := false
 	for _, msg := range ms {
 		for _, k := range msg.Citations.Knowledge {
-			seen = true
-			if k.ID != kid || k.Question != "" {
-				t.Errorf("stale knowledge citation: %+v", k)
+			switch k.ID {
+			case kid: // 已停用：只保留编号
+				seen = true
+				if k.Question != "" {
+					t.Errorf("stale knowledge citation: %+v", k)
+				}
+			case noise.ID: // 仍生效（确定性回答列出了全部检索结果）
+				if k.Question == "" {
+					t.Errorf("active citation cleared: %+v", k)
+				}
 			}
 		}
 	}

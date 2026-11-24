@@ -39,6 +39,8 @@ type reply struct {
 	cancel  *Action // 作废的操作（取消，或用户转而问了别的）
 	// streamed 表示回答已由模型逐片段回调过；固定回复由 run 在落库后整段回调一次
 	streamed bool
+	// fallback 表示模型回答引用了数据之外的编号，已改用确定性回答
+	fallback bool
 }
 
 func jsonRaw(v any) (json.RawMessage, error) {
@@ -389,21 +391,27 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 	}
 	// 允许的工单号：本轮数据中的，加上提问与历史引用中出现过的（如"没有找到 #13""和之前的 #5 一样"）
 	ids := append(factIDs(f), tc.knownIDs()...)
+	// 知识回答另校验 K 编号：本轮数据中的，加上提问与历史引用中出现过的；其他回答中的 "K3" 之类是普通文字（如产品型号）
+	var kids []int64
+	checkK := f.Kind == "knowledge"
+	if checkK {
+		kids = append(knowledgeFactIDs(f), tc.knownKnowledgeIDs()...)
+	}
 	var gs *groundedStream
 	var onDelta func(string)
 	if tc.onDelta != nil {
-		gs = &groundedStream{ids: ids, out: tc.onDelta}
+		gs = &groundedStream{ids: ids, kids: kids, checkK: checkK, out: tc.onDelta}
 		onDelta = gs.write
 	}
 	out, err := s.brainOf(ctx).Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, onDelta)
 	if err != nil {
 		return nil, modelError{err}
 	}
-	ok := grounded(out, ids) && groundedKnowledge(out, f.Knowledge)
+	ok := grounded(out, ids) && (!checkK || groundedKnowledge(out, kids))
 	if !ok {
 		out = fallback()
 	}
-	r := &reply{content: out, outcome: OutcomeAnswered, cites: cites}
+	r := &reply{content: out, outcome: OutcomeAnswered, cites: cites, fallback: !ok}
 	switch {
 	case gs == nil:
 	case ok && !gs.bad:
@@ -459,14 +467,46 @@ func grounded(out string, ids []int64) bool {
 
 var knowledgeNumRe = regexp.MustCompile(`\bK(\d+)\b`)
 
-// groundedKnowledge 报告回答中的知识条目编号（K12）都在本轮数据中。
-func groundedKnowledge(out string, ks []factKnowledge) bool {
-	for _, m := range knowledgeNumRe.FindAllStringSubmatch(out, -1) {
-		if !slices.ContainsFunc(ks, func(k factKnowledge) bool { return k.ID == "K"+m[1] }) {
+// knowledgeRefs 返回文本中的知识条目编号（K12 → 12）。
+func knowledgeRefs(s string) []int64 {
+	var out []int64
+	for _, m := range knowledgeNumRe.FindAllStringSubmatch(s, -1) {
+		if n, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// groundedKnowledge 报告回答中的知识条目编号（K12）都在允许的编号中。
+func groundedKnowledge(out string, ids []int64) bool {
+	for _, n := range knowledgeRefs(out) {
+		if !slices.Contains(ids, n) {
 			return false
 		}
 	}
 	return true
+}
+
+func knowledgeFactIDs(f facts) []int64 {
+	var ids []int64
+	for _, k := range f.Knowledge {
+		if n, err := strconv.ParseInt(strings.TrimPrefix(k.ID, "K"), 10, 64); err == nil {
+			ids = append(ids, n)
+		}
+	}
+	return ids
+}
+
+// knownKnowledgeIDs 是提问中写到的与历史回答引用过的知识条目编号。
+func (tc *turnCtx) knownKnowledgeIDs() []int64 {
+	ids := knowledgeRefs(tc.question)
+	for _, h := range tc.history {
+		for _, k := range h.Knowledge {
+			ids = append(ids, k.ID)
+		}
+	}
+	return ids
 }
 
 // 知识问答的数量与截断。
@@ -499,7 +539,6 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 	}
 	f := facts{Kind: "knowledge", Total: len(hits) + len(ts), Shown: len(hits) + len(ts)}
 	var cites Citations
-	ids := make([]int64, 0, len(hits))
 	for _, h := range hits {
 		f.Knowledge = append(f.Knowledge, factKnowledge{ID: "K" + strconv.FormatInt(h.ID, 10), Question: plainRefs(oneLine(h.Question)),
 			Answer: plainRefs(textutil.ClipEllipsis(h.Answer, knowledgeRunes)), UpdatedAt: fmtTime(h.UpdatedAt, tc.loc)})
@@ -508,7 +547,6 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 			ref.SourceTicketID = h.SourceTicketID
 		}
 		cites.Knowledge = append(cites.Knowledge, ref)
-		ids = append(ids, h.ID)
 	}
 	for _, t := range ts {
 		f.Tickets = append(f.Tickets, s.factOf(tc.p, t, tc.loc, listBodyRunes))
@@ -518,7 +556,23 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 	if err != nil {
 		return nil, err
 	}
-	_ = s.o.Knowledge.Cite(ctx, ids) // 引用次数是统计数据：失败不影响回答
+	// 引用与引用次数只算回答中实际写到的条目（检索可能因"怎么""为什么"等常用词命中无关条目）；回答没有写编号时引用
+	// 全部检索结果但不计数；改用确定性回答时同样不计数
+	used := knowledgeRefs(r.content)
+	var refs []KnowledgeRef
+	var counted []int64
+	for _, k := range r.cites.Knowledge {
+		if slices.Contains(used, k.ID) {
+			refs = append(refs, k)
+			counted = append(counted, k.ID)
+		}
+	}
+	if len(refs) > 0 {
+		r.cites.Knowledge = refs
+	}
+	if !r.fallback && len(counted) > 0 {
+		_ = s.o.Knowledge.Cite(ctx, counted) // 引用次数是统计数据：失败不影响回答
+	}
 	return r, nil
 }
 
@@ -546,11 +600,13 @@ func (s *Service) readableSources(ctx context.Context, p auth.Principal, hits []
 
 // groundedStream 转发模型的流式片段：末尾可能还没写完的 "#数字" 先扣住，完整的工单号在事实之外时停止转发。
 type groundedStream struct {
-	ids  []int64
-	out  func(string)
-	buf  strings.Builder
-	sent int // 已转发的字节数
-	bad  bool
+	ids    []int64
+	kids   []int64 // 允许的知识条目编号（checkK 时）
+	checkK bool
+	out    func(string)
+	buf    strings.Builder
+	sent   int // 已转发的字节数
+	bad    bool
 }
 
 func (g *groundedStream) write(d string) {
@@ -563,7 +619,12 @@ func (g *groundedStream) write(d string) {
 	if i := strings.LastIndexByte(s, '#'); i >= 0 && strings.Trim(s[i+1:], "0123456789") == "" {
 		safe = i // "#" 后面可能还有数字没到
 	}
-	if !grounded(s[:safe], g.ids) {
+	if g.checkK {
+		if i := strings.LastIndexByte(s, 'K'); i >= 0 && i < safe && strings.Trim(s[i+1:], "0123456789") == "" {
+			safe = i // "K" 后面可能还有数字没到
+		}
+	}
+	if !grounded(s[:safe], g.ids) || (g.checkK && !groundedKnowledge(s[:safe], g.kids)) {
 		g.bad = true
 		return
 	}

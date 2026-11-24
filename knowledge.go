@@ -3,6 +3,7 @@ package lingo
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/knowledge"
@@ -104,7 +105,7 @@ func (l *Lingo) SearchKnowledge(ctx context.Context, u User, query, project stri
 	if len(srcs) > 0 {
 		ts, err := l.store.GetMany(ctx, srcs)
 		if err != nil {
-			return nil, err
+			return nil, publicErr(err)
 		}
 		for _, t := range ts {
 			readable[t.ID] = ticket.Readable(p, t)
@@ -185,12 +186,13 @@ func (l *Lingo) AnswerTicketWith(ctx context.Context, u User, id int64, a Ticket
 		if !ok {
 			return errors.New("lingo: store does not support knowledge")
 		}
-		d := knowledge.Draft{ProjectKey: t.ProjectKey, Repo: kd.Repo, Question: kd.Question, Answer: kd.Answer}
+		d := knowledge.Draft{ProjectKey: t.ProjectKey, Repo: kd.Repo, Question: strings.TrimSpace(kd.Question), Answer: strings.TrimSpace(kd.Answer)}
+		// 缺省值先脱敏再截断：截断点落在邮箱、手机号中间时也能清理掉
 		if d.Question == "" {
-			d.Question = textutil.ClipEllipsis(oneLineText(t.Title+"："+t.Body), knowledge.MaxQuestionRunes)
+			d.Question = textutil.ClipEllipsis(knowledge.Scrub(oneLineText(t.Title+"："+t.Body)), knowledge.MaxQuestionRunes)
 		}
 		if d.Answer == "" {
-			d.Answer = textutil.ClipEllipsis(answer, knowledge.MaxAnswerRunes)
+			d.Answer = textutil.ClipEllipsis(knowledge.Scrub(answer), knowledge.MaxAnswerRunes)
 		}
 		d, err := knowledge.Prepare(d)
 		if err != nil {

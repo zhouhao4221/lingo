@@ -74,7 +74,6 @@ func candidatesText(ts []*ticket.Ticket, total int) string {
 	return strings.TrimSpace(b.String())
 }
 
-// ticketsText 是模型回答不可用时，按事实直接列出工单的回答。
 // knowledgeText 是知识问答的确定性回答（模型输出不可用时）：列出检索到的条目与同类工单。
 func knowledgeText(hits []knowledge.Hit, ts []*ticket.Ticket, loc *time.Location) string {
 	var b strings.Builder
@@ -93,6 +92,7 @@ func knowledgeText(hits []knowledge.Hit, ts []*ticket.Ticket, loc *time.Location
 	return strings.TrimSpace(b.String())
 }
 
+// ticketsText 是模型回答不可用时，按事实直接列出工单的回答。
 func ticketsText(ts []*ticket.Ticket, loc *time.Location) string {
 	var b strings.Builder
 	for _, t := range ts {

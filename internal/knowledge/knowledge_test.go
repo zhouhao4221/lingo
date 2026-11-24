@@ -21,7 +21,7 @@ func TestTokens(t *testing.T) {
 	if got := Tokens("导出 导出"); !slices.Equal(got, []string{"导出"}) {
 		t.Errorf("dedupe = %v", got)
 	}
-	if got := words("导出报表，为什么是空的? a"); !slices.Equal(got, []string{"导出报表", "为什么是空的"}) {
+	if got := words("导出报表，为什么是空的? a 卡"); !slices.Equal(got, []string{"导出报表", "为什么是空的", "卡"}) {
 		t.Errorf("words = %v", got)
 	}
 }
@@ -30,6 +30,10 @@ func TestPrepareScrubsAndValidates(t *testing.T) {
 	d, err := Prepare(Draft{Question: " 联系 a.b@example.com ", Answer: "打 138 1234 5678 或 +86-13912345678"})
 	if err != nil || d.Question != "联系 [邮箱]" || strings.Contains(d.Answer, "138") || strings.Contains(d.Answer, "139") {
 		t.Errorf("prepare = %+v %v", d, err)
+	}
+	// 手机号须前后不是数字：订单号、时间戳等长数字不受影响
+	if s := Scrub("订单号 2024113912345678，电话 13912345678。"); s != "订单号 2024113912345678，电话 [手机号]。" {
+		t.Errorf("scrub = %q", s)
 	}
 	for _, d := range []Draft{{Question: "q"}, {Answer: "a"}, {Question: strings.Repeat("问", MaxQuestionRunes+1), Answer: "a"},
 		{Question: "q", Answer: strings.Repeat("答", MaxAnswerRunes+1)}} {

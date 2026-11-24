@@ -446,7 +446,8 @@ func (s *Service) history(ctx context.Context, p auth.Principal, convID, beforeI
 	}
 	out := make([]HistoryItem, 0, len(ms))
 	for _, m := range ms {
-		h := HistoryItem{Role: m.Role, Content: textutil.ClipEllipsis(m.Content, historyRunes), Tickets: m.Citations.Tickets}
+		h := HistoryItem{Role: m.Role, Content: textutil.ClipEllipsis(m.Content, historyRunes), Tickets: m.Citations.Tickets,
+			Knowledge: m.Citations.Knowledge}
 		for _, r := range m.Citations.Releases {
 			h.Tags = append(h.Tags, r.Repo+" "+r.Tag)
 		}
