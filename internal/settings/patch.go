@@ -48,7 +48,15 @@ func DefaultBaseURL(provider string) string {
 
 // Apply 把修改应用到数据库中保存的值，返回新值与涉及的字段；只有含字段的类别需要回写。修改代码配置（Overrides）中
 // 已有的项返回 ErrConflict；格式不合法、改了地址却没同时提交对应密钥（避免把已存的密钥发往新地址）返回 ErrInvalid。
-func Apply(ov Overrides, st Stored, p Patch) (Stored, Changed, error) {
+func Apply(ov Overrides, st Stored, p Patch) (Stored, Changed, error) { return apply(ov, st, p, true) }
+
+// Preview 同 Apply，但不做保存时才需要的组合校验（自动注册须有回调地址与密钥），供连通测试使用：测试不保存任何值。
+func Preview(ov Overrides, st Stored, p Patch) (Stored, error) {
+	out, _, err := apply(ov, st, p, false)
+	return out, err
+}
+
+func apply(ov Overrides, st Stored, p Patch, forSave bool) (Stored, Changed, error) {
 	out, changed := st, Changed{}
 	if gp := p.Gitea; gp != nil {
 		g, fields, err := applyGitea(ov.Gitea, st.Gitea, *gp)
@@ -87,7 +95,7 @@ func Apply(ov Overrides, st Stored, p Patch) (Stored, Changed, error) {
 	}
 	// 修改了 Gitea 时，生效后的自动注册须有回调地址与密钥（只改模型时不因 Gitea 配置被拒）
 	eff := Resolve(ov, out)
-	if p.Gitea != nil && eff.Gitea.AutoRegisterWebhook && (eff.Gitea.WebhookURL == "" || eff.Gitea.WebhookSecret == "") {
+	if forSave && p.Gitea != nil && eff.Gitea.AutoRegisterWebhook && (eff.Gitea.WebhookURL == "" || eff.Gitea.WebhookSecret == "") {
 		return Stored{}, nil, fmt.Errorf("%w: webhook_url and webhook_secret are required when auto_register_webhook is set", ErrInvalid)
 	}
 	return out, changed, nil

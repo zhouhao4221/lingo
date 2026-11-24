@@ -23,6 +23,7 @@ type TemplateCache struct {
 	once sync.Once
 	c    *cache.Cache[string, cachedTemplates]
 	gen  atomic.Uint64 // Reset 时递增：进行中的读取结果属于旧连接，不写入缓存
+	mu   sync.Mutex    // 代次检查与写入、Reset 互斥
 }
 
 type cachedTemplates struct {
@@ -52,6 +53,8 @@ func (c *TemplateCache) Get(ctx context.Context, g TemplateLister, owner, name s
 	}
 	gen := c.gen.Load()
 	ts, err := g.ListIssueTemplates(ctx, owner, name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.gen.Load() != gen {
 		return ts, err // 期间连接已更换（Reset）：结果属于旧连接，不写入缓存
 	}
@@ -68,6 +71,8 @@ func (c *TemplateCache) Get(ctx context.Context, g TemplateLister, owner, name s
 
 // Reset 丢弃全部缓存并作废进行中的读取（Gitea 连接更换后调用）。
 func (c *TemplateCache) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.gen.Add(1)
 	c.cache().DeleteFunc(func(string) bool { return true })
 }

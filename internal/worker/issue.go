@@ -967,6 +967,7 @@ type labelCache struct {
 	once  sync.Once
 	c     *cache.Cache[string, map[string]int64]
 	gen   atomic.Uint64 // reset 时递增：进行中的查询结果属于旧连接，不写入缓存
+	genMu sync.Mutex    // 代次检查与写入、reset 互斥
 	locks sync.Map      // 仓库 → *sync.Mutex：同一仓库的“列出再创建”串行，避免并发建出同名标签
 }
 
@@ -1001,12 +1002,16 @@ func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, lab
 }
 
 func (c *labelCache) reset() {
+	c.genMu.Lock()
+	defer c.genMu.Unlock()
 	c.gen.Add(1)
 	c.cache().DeleteFunc(func(string) bool { return true })
 }
 
 // put 写入缓存；查询期间连接已更换（代次变化）时丢弃。
 func (c *labelCache) put(gen uint64, key string, ids map[string]int64) {
+	c.genMu.Lock()
+	defer c.genMu.Unlock()
 	if c.gen.Load() == gen {
 		c.cache().Put(key, ids)
 	}

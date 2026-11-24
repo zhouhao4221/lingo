@@ -39,7 +39,14 @@ func (l *Lingo) overrides() settings.Overrides {
 	}
 }
 
-func (l *Lingo) conn() *connState { return l.conns.Load() }
+// conn 返回当前生效的连接；距上次检查满 connRefreshEvery 时在后台刷新一次（只调用 Go 方法、不挂载 Handler 与 Run
+// 的进程也能跟上其他实例保存的配置）。
+func (l *Lingo) conn() *connState {
+	if l.settings != nil {
+		l.touchSettings()
+	}
+	return l.conns.Load()
+}
 
 // applySettings 按数据库中保存的配置重建生效连接。force 为假时只有版本更高才重建（防止并发的旧读覆盖新值）。
 // 返回 Gitea 连接是否变化。
@@ -122,12 +129,16 @@ func (l *Lingo) applySettings(st settings.Stored, force bool) bool {
 	return giteaChanged
 }
 
-// newer 报告 m 是否比 cur 新：版本更高，或修改时间更晚（配置行被补建后版本从 1 重新开始）。
+// newer 报告 m 是否比 cur 新：按版本号判断。唯一的例外是配置行被补建：版本从 1 重新开始，此时版本为 1 且修改时间
+// 更晚才算更新。修改时间是事务开始的时间、不随提交顺序，所以其他情况都不用它（并发保存时较旧的结果不会覆盖较新的）。
 func newer(m, cur settings.Meta) bool {
-	if m.Version > cur.Version {
+	switch {
+	case m.Version > cur.Version:
 		return true
+	case m.Version == 1 && cur.Version > 1:
+		return m.UpdatedAt != nil && (cur.UpdatedAt == nil || m.UpdatedAt.After(*cur.UpdatedAt))
 	}
-	return m.UpdatedAt != nil && (cur.UpdatedAt == nil || m.UpdatedAt.After(*cur.UpdatedAt))
+	return false
 }
 
 func (l *Lingo) slotModel(cfg Model, src settings.Source, slot settings.Slot, cur *connState, main bool) (Model, settings.Slot) {

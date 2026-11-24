@@ -227,6 +227,11 @@ func TestSettingsModelSaveIgnoresGiteaAutoRegister(t *testing.T) {
 	if _, err := l.TestConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{}); err != nil {
 		t.Errorf("empty test: %v", err)
 	}
+	// 测试 Gitea 地址与令牌：不保存，不做自动注册的组合校验
+	if _, err := l.TestConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{
+		BaseURL: sptr("https://git.example.invalid"), Token: sptr("t")}}); err != nil {
+		t.Errorf("gitea test with auto-register on: %v", err)
+	}
 }
 
 // PR #36 第三轮审查：令牌在代码、地址在数据库时可以保存地址；之后改地址需改代码。

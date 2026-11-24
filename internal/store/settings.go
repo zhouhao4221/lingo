@@ -46,6 +46,10 @@ func (s *Store) MutateSettings(ctx context.Context, by string, fn func([]setting
 		return nil, fmt.Errorf("store: begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // 提交后回滚为空操作
+	// 行缺失（误删、部分恢复）时先补建空行，FOR UPDATE 才锁得住：并发保存不同字段不会互相覆盖
+	if _, err := tx.ExecContext(ctx, `INSERT INTO lingo_settings (category) VALUES ('model'), ('gitea') ON CONFLICT (category) DO NOTHING`); err != nil {
+		return nil, fmt.Errorf("store: ensure settings rows: %w", err)
+	}
 	rows, err := tx.QueryContext(ctx, "SELECT "+settingsColumns+" FROM lingo_settings ORDER BY category FOR UPDATE")
 	if err != nil {
 		return nil, fmt.Errorf("store: lock settings: %w", err)

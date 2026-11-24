@@ -234,7 +234,7 @@ func (l *Lingo) TestConnectionSettings(ctx context.Context, u User, in Connectio
 		return ConnectionTestResult{}, err
 	}
 	ov := l.overrides()
-	next, _, err := settings.Apply(ov, st, settingsPatch(in))
+	next, err := settings.Preview(ov, st, settingsPatch(in))
 	if err != nil {
 		return ConnectionTestResult{}, settingsErr(err)
 	}
