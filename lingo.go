@@ -373,7 +373,7 @@ func (l *Lingo) newWebhookHandler() http.Handler {
 		l.touchSettings()
 		c := l.conn()
 		if c == nil || c.webhook == nil || !l.gitea.Configured() {
-			l.log.Error("lingo: webhook received but Gitea or its webhook secret is not configured")
+			l.log.Warn("lingo: webhook rejected: Gitea or its webhook secret is not configured")
 			http.Error(w, "webhook not configured", http.StatusServiceUnavailable)
 			return
 		}

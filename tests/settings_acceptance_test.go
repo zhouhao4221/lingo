@@ -171,22 +171,60 @@ func TestSettingsRejectedGiteaKeepsPrevious(t *testing.T) {
 	if before.IssueURL == "" || after.IssueURL != before.IssueURL {
 		t.Errorf("issue url changed: %q -> %q", before.IssueURL, after.IssueURL)
 	}
-	if !strings.HasPrefix(after.IssueURL, gsrv.URL) || s.Gitea.Version != 2 {
-		t.Errorf("view version = %d, url %q", s.Gitea.Version, after.IssueURL)
+	if !strings.HasPrefix(after.IssueURL, gsrv.URL) || s.Gitea.Version != 2 || s.Gitea.Applied {
+		t.Errorf("view version = %d applied=%v, url %q", s.Gitea.Version, s.Gitea.Applied, after.IssueURL)
 	}
 }
 
 // PR #36 审查：配置行缺失时保存会补建，不会静默丢失。
 func TestSettingsMissingRowRecreated(t *testing.T) {
 	db := testDB(t, true)
+	gsrv := httptest.NewServer(&giteaServer{templates: "[]"})
+	t.Cleanup(gsrv.Close)
 	l := newBareLingo(t, db, nil, nil)
+	other := newBareLingo(t, db, nil, nil)
 	ctx := context.Background()
+	// 先保存几次，版本前进到 3，两个实例都已应用
+	for _, s := range []string{"a", "b", "c"} {
+		if _, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{
+			BaseURL: sptr(gsrv.URL), Token: sptr("t"), WebhookSecret: sptr(s)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := other.ConnectionSettings(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`DELETE FROM lingo_settings WHERE category = 'gitea'`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{WebhookSecret: sptr("s")}})
-	if err != nil || !s.Gitea.WebhookSecret.Set || s.Gitea.Version != 1 {
-		t.Errorf("recreated = %+v %v", s.Gitea, err)
+	time.Sleep(10 * time.Millisecond)
+	s, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Gitea: &lingo.GiteaConnectionUpdate{
+		BaseURL: sptr(gsrv.URL), Token: sptr("t"), WebhookSecret: sptr("fresh")}})
+	if err != nil || s.Gitea.Version != 1 || !s.Gitea.Applied {
+		t.Fatalf("recreated = %+v %v", s.Gitea, err)
+	}
+	// 补建后版本回到 1：保存的实例与其他实例都按修改时间判断为更新，改用新密钥
+	if s, err := other.ConnectionSettings(ctx, admin); err != nil || !s.Gitea.Applied {
+		t.Fatalf("other = %+v %v", s.Gitea, err)
+	}
+	for name, h := range map[string]http.Handler{"saver": l.WebhookHandler(), "other": other.WebhookHandler()} {
+		if w := deliver(h, "d-"+name, "issue_comment", commentPayload, "fresh"); w.Code != http.StatusOK {
+			t.Errorf("%s with new secret: %d", name, w.Code)
+		}
+	}
+}
+
+// PR #36 审查：代码中开启了自动注册而密钥未配置时，只改模型的保存与测试不受影响。
+func TestSettingsModelSaveIgnoresGiteaAutoRegister(t *testing.T) {
+	db := testDB(t, true)
+	l := newBareLingo(t, db, nil, func(c *lingo.Config) { c.Gitea.AutoRegisterWebhook = true })
+	ctx := context.Background()
+	in := lingo.ConnectionSettingsUpdate{Model: &lingo.ModelConnectionUpdate{Main: &lingo.ModelSlotUpdate{Provider: sptr("deepseek"), APIKey: sptr("k")}}}
+	if s, err := l.UpdateConnectionSettings(ctx, admin, in); err != nil || !s.Model.Configured || !s.Model.Applied || s.Model.Main.Model != "deepseek-chat" {
+		t.Errorf("model save = %+v %v", s.Model, err)
+	}
+	if _, err := l.TestConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{}); err != nil {
+		t.Errorf("empty test: %v", err)
 	}
 }
 

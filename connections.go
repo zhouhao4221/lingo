@@ -47,7 +47,7 @@ func (l *Lingo) applySettings(st settings.Stored, force bool) bool {
 	l.connMu.Lock()
 	defer l.connMu.Unlock()
 	cur := l.conns.Load()
-	if cur != nil && !force && st.GiteaMeta.Version <= cur.eff.GiteaMeta.Version && st.ModelMeta.Version <= cur.eff.ModelMeta.Version {
+	if cur != nil && !force && !newer(st.GiteaMeta, cur.eff.GiteaMeta) && !newer(st.ModelMeta, cur.eff.ModelMeta) {
 		return false
 	}
 	eff := settings.Resolve(l.overrides(), st)
@@ -83,6 +83,9 @@ func (l *Lingo) applySettings(st settings.Stored, force bool) bool {
 		if giteaChanged {
 			l.resetBot()
 			l.tmpls.Reset()
+			if l.worker != nil {
+				l.worker.ResetLabels()
+			}
 			if cur != nil && (cur.giteaKey == "") != (key == "") {
 				l.log.Info("lingo: gitea connection state changed", "configured", key != "")
 			}
@@ -117,6 +120,14 @@ func (l *Lingo) applySettings(st settings.Stored, force bool) bool {
 		l.selfCheckDue.Store(true)
 	}
 	return giteaChanged
+}
+
+// newer 报告 m 是否比 cur 新：版本更高，或修改时间更晚（配置行被补建后版本从 1 重新开始）。
+func newer(m, cur settings.Meta) bool {
+	if m.Version > cur.Version {
+		return true
+	}
+	return m.UpdatedAt != nil && (cur.UpdatedAt == nil || m.UpdatedAt.After(*cur.UpdatedAt))
 }
 
 func (l *Lingo) slotModel(cfg Model, src settings.Source, slot settings.Slot, cur *connState, main bool) (Model, settings.Slot) {

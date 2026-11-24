@@ -85,9 +85,9 @@ func Apply(ov Overrides, st Stored, p Patch) (Stored, Changed, error) {
 	if len(modelFields) > 0 {
 		changed[CategoryModel] = modelFields
 	}
-	// 生效后的自动注册须有回调地址与密钥（与 New 对代码配置的校验一致）
+	// 修改了 Gitea 时，生效后的自动注册须有回调地址与密钥（只改模型时不因 Gitea 配置被拒）
 	eff := Resolve(ov, out)
-	if eff.Gitea.AutoRegisterWebhook && (eff.Gitea.WebhookURL == "" || eff.Gitea.WebhookSecret == "") {
+	if p.Gitea != nil && eff.Gitea.AutoRegisterWebhook && (eff.Gitea.WebhookURL == "" || eff.Gitea.WebhookSecret == "") {
 		return Stored{}, nil, fmt.Errorf("%w: webhook_url and webhook_secret are required when auto_register_webhook is set", ErrInvalid)
 	}
 	return out, changed, nil

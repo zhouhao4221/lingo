@@ -116,6 +116,7 @@ func (w *Worker) handleTask(ctx context.Context, t store.Task) {
 	tctx, cancel := w.taskContext(ctx)
 	err := w.runTask(context.WithValue(tctx, parentCtxKey{}, ctx), t)
 	cancel()
+	err = deferUnconfigured(w.o.Now(), err)
 	fctx, fcancel := finishContext(ctx)
 	defer fcancel()
 	log := w.log.With("task", t.OutboxID, "op", t.Op, "ticket", t.TicketID, "attempt", t.Attempts, "failures", t.Failures)
@@ -994,6 +995,10 @@ func (c *labelCache) lookup(ctx context.Context, g IssueWriter, owner, name, lab
 	c.cache().Put(key, ids)
 	id, ok := ids[strings.ToLower(label)]
 	return id, ok, nil
+}
+
+func (c *labelCache) reset() {
+	c.cache().DeleteFunc(func(string) bool { return true })
 }
 
 func (c *labelCache) forget(owner, name string) {

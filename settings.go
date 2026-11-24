@@ -63,15 +63,19 @@ type SettingsMeta struct {
 
 // ModelConnection 是模型连接配置。Configured 表示主模型已配置（问答可用）；轻量模型未配置时用主模型。
 type ModelConnection struct {
-	Configured bool              `json:"configured"`
-	Main       ModelSlotSettings `json:"main"`
-	Light      ModelSlotSettings `json:"light"`
+	Configured bool `json:"configured"`
+	// Applied 表示本实例正在使用这份配置；为假时配置保存了但没有生效（如模型创建失败），详见日志
+	Applied bool              `json:"applied"`
+	Main    ModelSlotSettings `json:"main"`
+	Light   ModelSlotSettings `json:"light"`
 	SettingsMeta
 }
 
 // GiteaConnection 是 Gitea 连接配置。Configured 表示地址与令牌都有值。
 type GiteaConnection struct {
-	Configured          bool          `json:"configured"`
+	Configured bool `json:"configured"`
+	// Applied 表示本实例正在使用这份配置；为假时配置保存了但没有生效（如地址不可用，仍用原连接），详见日志
+	Applied             bool          `json:"applied"`
 	BaseURL             StringSetting `json:"base_url"`
 	Token               SecretSetting `json:"token"`
 	WebhookSecret       SecretSetting `json:"webhook_secret"`
@@ -169,7 +173,7 @@ func (l *Lingo) ConnectionSettings(ctx context.Context, u User) (ConnectionSetti
 		return ConnectionSettings{}, err
 	}
 	l.applySettings(st, false) // 顺带跟上其他实例保存的配置
-	return publicSettings(settings.Resolve(l.overrides(), st), st), nil
+	return l.markApplied(publicSettings(settings.Resolve(l.overrides(), st), st), st), nil
 }
 
 // UpdateConnectionSettings 按字段修改并保存连接配置（明文存入数据库），当前实例立即生效，其他实例 30 秒内生效；
@@ -191,13 +195,28 @@ func (l *Lingo) UpdateConnectionSettings(ctx context.Context, u User, in Connect
 		l.log.Info("lingo: connection settings updated", "by", u.ID, "category", string(cat), "fields", fields, "version", meta.Version)
 	}
 	if len(changed) > 0 {
-		l.applySettings(st, false)
-		select { // 通知 Run：Gitea 连接变化时补跑自检
+		l.applySettings(st, true) // 刚提交的就是最新值：直接应用（不依赖版本比较）
+		select {                  // 通知 Run：Gitea 连接变化时补跑自检
 		case l.settingsChanged <- struct{}{}:
 		default:
 		}
 	}
-	return publicSettings(settings.Resolve(l.overrides(), st), st), nil
+	return l.markApplied(publicSettings(settings.Resolve(l.overrides(), st), st), st), nil
+}
+
+// markApplied 按本实例实际生效的连接标出各类配置是否已生效。
+func (l *Lingo) markApplied(s ConnectionSettings, st settings.Stored) ConnectionSettings {
+	c := l.conn()
+	if c == nil {
+		return s
+	}
+	want := settings.Resolve(l.overrides(), st)
+	s.Gitea.Applied = c.eff.Gitea == want.Gitea
+	s.Model.Applied = want.MainSrc == settings.SourceUnset || !isNil(c.main)
+	if want.MainSrc == settings.SourceDatabase && c.mainSlot != want.Main {
+		s.Model.Applied = false
+	}
+	return s
 }
 
 // TestConnectionSettings 测试连接（不保存）：in 中的字段覆盖当前值（可为空，测试当前配置）。Gitea 读取机器人账号与

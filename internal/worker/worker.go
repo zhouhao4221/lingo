@@ -288,6 +288,20 @@ func (e *permanentError) Unwrap() error { return e.err }
 
 func permanent(err error) error { return &permanentError{err: err} }
 
+// unconfiguredRetry 是 Gitea 未配置时推迟的时长。
+const unconfiguredRetry = 30 * time.Second
+
+// deferUnconfigured 把"Gitea 未配置"（处理中途连接被清空）转为推迟：不计失败、不放弃，配置好后重新处理。
+func deferUnconfigured(now time.Time, err error) error {
+	if errors.Is(err, gitea.ErrNotConfigured) {
+		return &ticket.DeferError{Until: now.Add(unconfiguredRetry), Reason: "gitea not configured"}
+	}
+	return err
+}
+
+// ResetLabels 丢弃标签缓存（Gitea 连接更换后调用：标签 ID 属于原实例）。
+func (w *Worker) ResetLabels() { w.labels.reset() }
+
 // finishTimeout 是写回处理结果的时限，与任务本身的时限分开，任务耗尽时限后结果仍能保存。
 const finishTimeout = 10 * time.Second
 
