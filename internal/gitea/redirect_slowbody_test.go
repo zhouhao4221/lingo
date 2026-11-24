@@ -144,7 +144,7 @@ func TestSendFallbackDoesNotReadBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.hc = &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	c.cfg.Load().hc = &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	start := time.Now()
 	_, err = c.GetVersion(context.Background())
 	if time.Since(start) > 2*time.Second || !errors.Is(err, ErrRedirect) || IsRetryable(err) {

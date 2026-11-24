@@ -16,7 +16,14 @@ const selfCheckLockKey = 0x6c696e676f02
 // 能到达 WebhookHandler（最多等 10 秒）；Repo.Templates 中的模板与 Repo.Deploy.Workflow 存在。
 // 会写入 Gitea 的只有标签与（开启自动注册时的）Webhook。多实例同时执行时只有一个实例真正检查，其他实例返回一条
 // item=lock 的结果。
+//
+// Gitea 未配置（地址或令牌为空）时只返回一条 item=config 的警告，不做其他检查。
 func (l *Lingo) SelfCheck(ctx context.Context) []CheckResult {
+	c := l.conn()
+	if c == nil || !l.gitea.Configured() {
+		return []CheckResult{{Item: "config", Level: string(selfcheck.Warn), Message: "Gitea 未配置（地址或令牌为空），已跳过自检"}}
+	}
+	g := c.eff.Gitea
 	var repos []selfcheck.Repo
 	for _, p := range l.cfg.Projects {
 		for _, r := range p.Repos {
@@ -24,7 +31,7 @@ func (l *Lingo) SelfCheck(ctx context.Context) []CheckResult {
 		}
 	}
 	rs := selfcheck.Run(ctx, selfcheck.Options{Gitea: l.gitea, Pings: l.store, Repos: repos, LabelPrefix: l.labelPrefix(),
-		WebhookURL: l.cfg.Gitea.WebhookURL, WebhookSecret: l.cfg.Gitea.WebhookSecret, AutoRegister: l.cfg.Gitea.AutoRegisterWebhook,
+		WebhookURL: g.WebhookURL, WebhookSecret: g.WebhookSecret, AutoRegister: g.AutoRegisterWebhook,
 		// 多实例同时启动时只有一个执行（其他实例跳过），避免重复创建 Webhook 与标签
 		Lock: func(ctx context.Context) (func(), bool, error) { return l.store.TryLock(ctx, selfCheckLockKey) }})
 	out := make([]CheckResult, 0, len(rs))

@@ -19,6 +19,9 @@ const botRetry = 30 * time.Second
 
 // ProcessWebhooks 领取并处理一批 Webhook 投递，返回领取到的条数。
 func (w *Worker) ProcessWebhooks(ctx context.Context) (int, error) {
+	if !w.ready() {
+		return 0, nil
+	}
 	claimed := time.Now()
 	ds, err := w.o.Deliveries.ClaimDeliveries(ctx, w.o.BatchSize, w.o.Lease)
 	if err != nil {

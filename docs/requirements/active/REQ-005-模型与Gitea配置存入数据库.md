@@ -6,12 +6,12 @@
 |-----|-----|
 | 编号 | REQ-005 |
 | 类型 | 后端 |
-| 状态 | 评审通过 |
+| 状态 | 测试中 |
 | 模块 | 系统配置 |
 | 优先级 | P1 |
 | 创建日期 | 2026-11-24 |
 | 负责人 | - |
-| branch | - |
+| branch | feat/REQ-005-connection-settings-db |
 | issue | - |
 
 ## 生命周期
@@ -21,8 +21,8 @@
 - [x] 草稿（编写中）
 - [x] 待评审
 - [x] 评审通过
-- [ ] 开发中
-- [ ] 测试中
+- [x] 开发中
+- [x] 测试中
 - [ ] 已完成
 
 ---
@@ -60,7 +60,7 @@
 
 - **本期包含**：
   - 模型配置：主模型、轻量模型各一套（类型 OpenAI 兼容 / DeepSeek、BaseURL、模型名、向量模型名、API Key），轻量模型可以留空，留空时用主模型
-  - Gitea 配置：地址、机器人 token、Webhook 密钥、自动注册 Webhook 的开关与回调地址、标签前缀、回复模式
+  - Gitea 配置：地址、机器人 token、Webhook 密钥、自动注册 Webhook 的开关与回调地址、拒绝重定向（标签前缀、回复模式仍只在代码中配置）
   - 配置存数据库（明文），全局一套；新增迁移 0004
   - 查看（密钥只返回掩码，并标出每项的来源）、按字段修改、连通测试
   - 修改权限回调 `Config.AuthorizeSettings`；未配置时只允许 admin
@@ -93,18 +93,18 @@
 
 > 列出所有功能点，开发完成后勾选
 
-- [ ] **配置存储**：新增迁移 0004，配置表按类别（model / gitea）各存一行：内容（jsonb）、版本号、修改人、修改时间
-- [ ] **查看配置**：返回模型与 Gitea 的全部字段；API Key、token、Webhook 密钥只返回掩码（如 `sk-****abcd`）和"是否已设置"；每项标出来源（config / database / unset）；同时返回当前是否已配置齐全
-- [ ] **修改配置**：按字段修改，不传的字段保持不变；密钥字段不传则保留原值，传空串则清除；来源为 config 的项修改时返回冲突；校验格式（地址须为 http(s)、类型须为已支持的取值）；记录修改人和时间
-- [ ] **连通测试**：模型发一次简短对话；Gitea 读取当前用户与版本。可以测试待保存的值（未传的字段用当前值），返回成功或失败原因（不含密钥）
-- [ ] **修改权限回调**：新增 `Config.AuthorizeSettings(ctx, u, write)`，查看（write=false）与修改、测试（write=true）都经过它；未配置时只允许 admin
-- [ ] **热更新**：保存后当前实例立即重建模型与 Gitea 客户端；各实例每 30 秒检查版本号，发现变化就刷新；进行中的请求继续用旧配置
-- [ ] **"未配置"状态**：`lingo.New` 不再强制要求 Gitea 地址与 token。缺少 Gitea 配置时 Webhook 返回 503，建 Issue 等 Gitea 任务延后（不计入失败次数），对账与自检跳过；缺少模型时建单按原内容进行，问答返回 `ErrNoModel`；配置填好后自动恢复
-- [ ] **Config 优先**：`Config.Gitea`、`Config.Model` / `LightModel` 中传入的项优先使用；未传的项读数据库
-- [ ] **各组件改为读取当前配置**：Gitea 客户端（建单、评论同步、关闭 Issue、对账、自检、版本读取）、Webhook 验签密钥、Issue 链接地址、建单整理模型、知识问答模型
-- [ ] **审计与日志**：每次修改写一条审计日志（修改人、类别、修改了哪些字段，不含值）；日志与错误信息中不出现密钥原文
-- [ ] **REST 接口**：`GET` / `PUT /settings/connections`、`POST /settings/connections/test`
-- [ ] **文档与示例**：接入文档说明配置方式、优先级、明文风险与权限建议；`examples/server` 改为只传数据库也能启动
+- [x] **配置存储**：新增迁移 0004，配置表按类别（model / gitea）各存一行：内容（jsonb）、版本号、修改人、修改时间
+- [x] **查看配置**：返回模型与 Gitea 的全部字段；API Key、token、Webhook 密钥只返回掩码（如 `sk-****abcd`）和"是否已设置"；每项标出来源（config / database / unset）；同时返回当前是否已配置齐全
+- [x] **修改配置**：按字段修改，不传的字段保持不变；密钥字段不传则保留原值，传空串则清除；来源为 config 的项修改时返回冲突；校验格式（地址须为 http(s)、类型须为已支持的取值）；记录修改人和时间
+- [x] **连通测试**：模型发一次简短对话；Gitea 读取当前用户与版本。可以测试待保存的值（未传的字段用当前值），返回成功或失败原因（不含密钥）
+- [x] **修改权限回调**：新增 `Config.AuthorizeSettings(ctx, u, write)`，查看（write=false）与修改、测试（write=true）都经过它；未配置时只允许 admin
+- [x] **热更新**：保存后当前实例立即重建模型与 Gitea 客户端；各实例每 30 秒检查版本号，发现变化就刷新；进行中的请求继续用旧配置
+- [x] **"未配置"状态**：`lingo.New` 不再强制要求 Gitea 地址与 token。缺少 Gitea 配置时 Webhook 返回 503，建 Issue 等 Gitea 任务延后（不计入失败次数），对账与自检跳过；缺少模型时建单按原内容进行，问答返回 `ErrNoModel`；配置填好后自动恢复
+- [x] **Config 优先**：`Config.Gitea`、`Config.Model` / `LightModel` 中传入的项优先使用；未传的项读数据库
+- [x] **各组件改为读取当前配置**：Gitea 客户端（建单、评论同步、关闭 Issue、对账、自检、版本读取）、Webhook 验签密钥、Issue 链接地址、建单整理模型、知识问答模型
+- [x] **审计与日志**：每次修改写一条审计日志（修改人、类别、修改了哪些字段，不含值）；日志与错误信息中不出现密钥原文
+- [x] **REST 接口**：`GET` / `PUT /settings/connections`、`POST /settings/connections/test`
+- [x] **文档与示例**：接入文档说明配置方式、优先级、明文风险与权限建议；`examples/server` 改为只传数据库也能启动
 
 ---
 
@@ -117,13 +117,17 @@
 | 数据校验 | 地址格式 | 模型 BaseURL、Gitea 地址、Webhook 回调地址须为 http(s) 绝对地址 |
 | 数据校验 | 模型类型 | 取值 `openai`（OpenAI 兼容）、`deepseek`；主模型的模型名必填（DeepSeek 默认 deepseek-chat） |
 | 数据校验 | 自动注册 Webhook | 开启时须同时有回调地址和 Webhook 密钥，与现有 `New` 的校验一致 |
-| 数据校验 | 回复模式 | 取值 `marked` / `all` |
 | 状态转换 | 已配置的判定 | Gitea 已配置 = 地址和 token 都有值；模型已配置 = 主模型的类型和模型名都有值（API Key 可空，兼容本地服务） |
 | 状态转换 | 生效 | 保存成功后，当前实例立即生效；其他实例在下次检查（最多 30 秒）时生效；进行中的请求与任务使用开始时的配置 |
 | 优先级 | Config 优先 | 字段级：`Config` 中有值的字段以 `Config` 为准，来源标为 config，修改返回 `ErrConflict`；无值的读数据库 |
 | 安全 | 密钥不外露 | 接口只返回掩码（前缀加最后 4 位，长度不足时全部掩码），日志、错误、审计里都不出现原文；连通测试的失败原因只含类别和状态码 |
 | 安全 | 明文存储 | 密钥以明文保存在配置表中，能读取该表的数据库账号即可获得密钥（已确认接受） |
 | 安全 | 连通测试 | 会向填写的地址发请求，只对有修改权限的人开放 |
+| 安全 | 改地址须重填密钥 | Gitea 或模型的地址换了主机（含换模型类型）而没同时提交令牌 / API Key 时，保存与测试都返回参数错误，避免把已存的密钥发往新地址 |
+| 优先级 | 模型按槽位 | `Config.Model` / `LightModel` 是接口对象，按槽位整体判定来源：代码中设置了该槽位即为 config |
+| 优先级 | 布尔项 | 代码中为 true 时锁定为 config；为 false 时读数据库（代码中无法强制关闭） |
+| 运维 | 审计 | 每次保存写一条应用日志（修改人、类别、字段名、版本），不建审计表 |
+| 运维 | 对账 | 未配置期间 Gitea 推送失败的 Webhook 不会重投，由定时对账补齐；对账关闭（`ReconcileInterval < 0`）时补不回 |
 | 运维 | 改 Webhook 密钥 | Gitea 端未同步前，按旧密钥签名的投递会验签失败；开启自动注册时，灵工在保存后的下一次自检中同步 Gitea 端的密钥 |
 | 运维 | 改 Gitea 地址 | 只用于同一实例的地址变更（域名、协议）；换成另一个 Gitea 实例会使已有工单的 Issue 关联失效，文档中明确提示 |
 | 非功能约束 | 兼容 | 只新增方法、字段与回调；`New` 放宽校验（缺少 Gitea 配置时不再报错）；代码里传入配置的接入方行为不变 |
@@ -216,29 +220,29 @@
 
 ### 6.1 技术测试
 
-- [ ] 存储与读取：保存后重新读取一致；密钥只返回掩码，任何接口都不返回原文
-- [ ] 按字段修改：未传的字段不变；密钥不传保留、传空串清除；版本号递增，记录修改人
-- [ ] Config 优先：`Config` 中有值的字段来源为 config，修改返回冲突；无值的读数据库
-- [ ] 权限：未配置回调时只有 admin 可以查看和修改；配置回调后按回调结果；MCP 中没有配置相关工具
-- [ ] 校验：非法地址、非法模型类型、自动注册缺回调地址或密钥时返回参数错误
-- [ ] 热更新：当前实例保存后立即使用新配置（建单和问答使用新模型、新 token）；另一个实例在 30 秒内切换；进行中的请求不受影响
-- [ ] 未配置状态：只传 DB 也能 `New` 和 `Run`；Webhook 返回 503；建 Issue 任务延后且不计入失败次数；问答返回 `ErrNoModel`；填好配置后任务自动执行
-- [ ] Webhook 密钥切换：保存后用新密钥验签；开启自动注册时下次自检更新 Gitea 端密钥
-- [ ] 连通测试：成功与失败（401、地址不通）各自返回原因，原因中不含密钥
-- [ ] 日志与审计：修改写审计日志（含字段名、不含值）；日志与错误中搜不到密钥原文
-- [ ] 兼容：代码里传入完整 `Config` 的现有测试全部通过
-- [ ] 迁移：0004 可以在已执行 0001–0003 的库上增量执行
+- [x] 存储与读取：保存后重新读取一致；密钥只返回掩码，任何接口都不返回原文
+- [x] 按字段修改：未传的字段不变；密钥不传保留、传空串清除；版本号递增，记录修改人
+- [x] Config 优先：`Config` 中有值的字段来源为 config，修改返回冲突；无值的读数据库
+- [x] 权限：未配置回调时只有 admin 可以查看和修改；配置回调后按回调结果；MCP 中没有配置相关工具
+- [x] 校验：非法地址、非法模型类型、自动注册缺回调地址或密钥时返回参数错误
+- [x] 热更新：当前实例保存后立即使用新配置（建单和问答使用新模型、新 token）；另一个实例在 30 秒内切换；进行中的请求不受影响
+- [x] 未配置状态：只传 DB 也能 `New` 和 `Run`；Webhook 返回 503；建 Issue 任务延后且不计入失败次数；问答返回 `ErrNoModel`；填好配置后任务自动执行
+- [x] Webhook 密钥切换：保存后用新密钥验签；开启自动注册时下次自检更新 Gitea 端密钥
+- [x] 连通测试：成功与失败（401、地址不通）各自返回原因，原因中不含密钥
+- [x] 日志与审计：修改写审计日志（含字段名、不含值）；日志与错误中搜不到密钥原文
+- [x] 兼容：代码里传入完整 `Config` 的现有测试全部通过
+- [x] 迁移：0004 可以在已执行 0001–0003 的库上增量执行
 
 ### 6.2 验收标准
 
 > 产品/业务方验收时的确认项，描述可观测的业务结果
 
-- [ ] 代码只传数据库时服务能启动；填好 Gitea 配置后，提交的 Bug 能自动建出 Issue
-- [ ] 在配置页填入 DeepSeek key 并保存后，不重启服务，知识问答即可回答
-- [ ] 更换 Gitea token 后，不重启服务，新建的 Issue 由新 token 创建
-- [ ] 查看配置时只能看到掩码，看不到完整的 key 和 token
-- [ ] 代码中已配置的项在配置页显示为只读，修改被拒绝
-- [ ] 无权限的用户无法查看和修改配置
+- [x] 代码只传数据库时服务能启动；填好 Gitea 配置后，提交的 Bug 能自动建出 Issue
+- [x] 在配置页填入 DeepSeek key 并保存后，不重启服务，知识问答即可回答
+- [x] 更换 Gitea token 后，不重启服务，新建的 Issue 由新 token 创建
+- [x] 查看配置时只能看到掩码，看不到完整的 key 和 token
+- [x] 代码中已配置的项在配置页显示为只读，修改被拒绝
+- [x] 无权限的用户无法查看和修改配置
 
 ### 6.3 手动测试用例
 
@@ -307,6 +311,7 @@ stateDiagram-v2
 | 日期 | 变更内容 | 影响范围 |
 |-----|---------|---------|
 | 2026-11-24 | 初始版本 | - |
+| 2026-11-24 | 落实评审结论（标签前缀、回复模式移出范围，审计写日志，对账提示）与开发时确认的规则（改地址须重填密钥、模型按槽位、布尔项锁定、New 同步读一次） | 1.5、三 |
 
 ---
 
@@ -333,18 +338,74 @@ stateDiagram-v2
 
 ### 11.1 数据模型
 
-_开发阶段填充_
+新增迁移 `migrations/0004_settings.sql`（0001–0003 已发布，不改）：
+
+| 表 | 字段 | 说明 |
+|----|------|------|
+| `lingo_settings` | category（PK，`model` / `gitea`）、content（jsonb，明文）、version（每次保存 +1，0 表示从未保存）、updated_by、updated_at | 迁移中预置两行。保存时 `SELECT … FOR UPDATE` 锁行读改写，按字段修改不丢并发更新 |
+
+- `gitea` 内容：`base_url`、`token`、`webhook_secret`、`auto_register_webhook`、`webhook_url`、`reject_redirects`。LabelPrefix、ReplyMode 不入库（评审结论）
+- `model` 内容：`{"main":{provider,base_url,api_key,model},"light":{…}}`，provider 取 `openai` / `deepseek`
+- 不含向量模型、Temperature、Headers（本期不加，之后增加兼容）
 
 ### 11.2 API 设计
 
-> 基于第五章接口需求，结合项目代码和 CLAUDE.md API 风格，生成具体技术方案
+**根包（`settings.go`）**
 
-_开发阶段填充_
+- `Config.AuthorizeSettings func(ctx, u User, write bool) error`：未配置时只允许 admin
+- `ConnectionSettings(ctx, u)`、`UpdateConnectionSettings(ctx, u, in)`、`TestConnectionSettings(ctx, u, in)`
+- 视图：每项标来源（config / database / unset）；密钥只返回是否已设置与掩码（长度 ≥ 12 时为前 3 位 + `****` + 后 4 位，否则 `****`）；各类别返回版本号、修改人、修改时间，以及是否已配置
+- 输入：指针字段，nil 表示不改，指向空串表示清除；改 config 来源的项返回 `ErrConflict`
+- 连通测试：不落库；Gitea 读当前用户与版本（10 秒），模型发一次 ping（30 秒，不重试）；结果按错误类别给出脱敏的 code / status / message
+
+**来源与优先级（已确认）**
+
+- Gitea 字符串项：Config 非空为 config，否则数据库非空为 database，否则 unset
+- Gitea 布尔项：Config 为 true 时锁定为 config；为 false 时读数据库
+- 模型按槽位：`Config.Model` / `LightModel` 非空时该槽位整体为 config，否则读数据库
+- 改地址保护：Gitea 或模型的地址 host 变了而没同时提交对应密钥时，保存与测试都返回 `ErrInvalidInput`
+
+**领域包 `internal/settings`**：类型、`Resolve`（合并 Config 与数据库）、`Apply`（按字段修改、校验）、`Mask`、`Service`；仓储接口 `LoadSettings`、`MutateSettings`
+
+**热更新（根包 `connections.go`）**
+
+- 当前连接放在原子替换的快照中：Gitea 客户端、Webhook 验签处理器、问答模型、建单整理模型、机器人账号缓存
+- 保存后当前实例立即替换；各实例每 30 秒检查版本号（Handler 侧按需后台刷新，Run 侧定时刷新），只有版本更高才重建
+- `New` 同步加载一次（5 秒超时，失败只告警，按 Config 运行）
+- worker 任务、Webhook 投递、对账、问答在开始时取定一份连接，过程中不变
+
+**未配置状态**
+
+- `New` 不再要求 Gitea 地址与 token；Webhook 返回 503
+- worker 未配置时不领取任务（不计失败），配置后下一次轮询恢复；对账与自检跳过；机器人账号不获取
+- 问答返回 `ErrNoModel`；建单按原内容
+
+**Webhook 密钥与地址**：保存后立即用新密钥验签；Gitea 配置变化且开启自动注册时，后台补跑一次自检同步 Gitea 端密钥（`SkipSelfCheck=true` 时不同步，文档注明）
+
+**审计**：保存成功写一条应用日志（修改人、类别、字段名、版本），不含值
+
+**REST**：`GET` / `PUT /settings/connections`、`POST /settings/connections/test`；不提供 MCP
 
 ### 11.3 文件改动清单
 
-_开发阶段填充_
+| 层 | 文件 | 新增/修改 | 说明 |
+|----|------|----------|------|
+| Migration | `migrations/0004_settings.sql` | 新增 | 配置表与两行预置 |
+| Domain | `internal/settings/{doc,settings,patch,service}.go` 及测试 | 新增 | 合并、修改、校验、掩码 |
+| Store | `internal/store/settings.go` | 新增 | LoadSettings、MutateSettings |
+| Async | `internal/worker/{worker,issue,webhook,reconcile,release,close,perspective}.go` | 修改 | 连接按任务绑定；未配置不领取 |
+| Domain | `internal/assistant/{assistant,turn,query}.go` | 修改 | 模型按次取（BrainFor） |
+| API | `connections.go`、`settings.go` | 新增 | 快照与刷新；公开方法、鉴权、视图、测试 |
+| API | `lingo.go`、`assistant.go`、`selfcheck.go`、`tickets.go`、`mcp_tools.go`、`handler.go`、`types.go` | 修改 | 装配、未配置处理、路由 |
+| 测试 | `settings_test.go`、`tests/settings_test.go` 等 | 新增 | 单测与集成测试 |
+| 文档 | `README*.md`、`examples/server/main.go`、`docs/architecture/*`、PRD | 修改 | 配置方式、优先级、明文风险、权限建议 |
 
 ### 11.4 实现步骤
 
-_开发阶段填充_
+1. 迁移 0004。验收：迁移测试与集成迁移测试通过
+2. `internal/settings` 及单测。验收：`go test ./internal/settings`
+3. Store。验收：集成测试并发按字段修改不丢、版本各加 1
+4. worker 与 assistant 的连接绑定。验收：现有单测全过；未配置时不领取任务
+5. 根包装配。验收：`go build ./... && go vet ./...`；现有集成测试全过；只传 DB 时可启动、Webhook 503、任务不计失败
+6. API 与 REST。验收：`tests/settings_test.go` 覆盖场景 1–4、权限、冲突、多实例生效、日志不含密钥
+7. 文档与示例。验收：`go run ./examples/server` 只配数据库能启动

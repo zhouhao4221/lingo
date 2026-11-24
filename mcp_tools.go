@@ -286,7 +286,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				}
 				id, created := a.ConversationID, false
 				if id == 0 {
-					if isNil(l.cfg.Model) { // 先校验，避免失败的调用留下空会话
+					if isNil(l.mainModel()) { // 先校验，避免失败的调用留下空会话
 						return nil, ErrNoModel
 					}
 					c, err := l.CreateConversation(ctx, u, "")

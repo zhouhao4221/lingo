@@ -108,6 +108,11 @@ const (
 )
 
 // GiteaConfig 是 Gitea 连接配置；要求 Gitea ≥ 1.22。
+//
+// BaseURL、Token、WebhookSecret、AutoRegisterWebhook、WebhookURL、RejectRedirects 都可以不在代码中配置，改为存入数据库，
+// 经 UpdateConnectionSettings（REST PUT /settings/connections）修改、无需重启即生效；代码中给了值的项优先，且不能经接口
+// 修改（布尔项为 true 时以代码为准，为 false 时读数据库）。地址或令牌都没有时灵工以"未配置"状态运行：Webhook 返回 503，
+// 建单等 Gitea 任务暂不执行（不计失败），配置后自动恢复。LabelPrefix 与 ReplyMode 只能在代码中配置。
 type GiteaConfig struct {
 	BaseURL       string
 	Token         string // 机器人账号 token，最小 scope：write:issue、read:repository、read:user
@@ -280,7 +285,7 @@ type Attachment struct {
 // CheckResult 是一项启动自检结果；Repo 为空表示实例级检查。Level 为 ok / warn（功能受限）/ error（该仓库无法对接）。
 type CheckResult struct {
 	Repo    string `json:"repo,omitempty"`
-	Item    string `json:"item"` // version | attachments | repo | permission | labels | webhook | delivery | templates | workflow
+	Item    string `json:"item"` // config | version | attachments | repo | permission | labels | webhook | delivery | templates | workflow
 	Level   string `json:"level"`
 	Message string `json:"message"`
 }

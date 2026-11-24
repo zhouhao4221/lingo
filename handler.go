@@ -20,6 +20,8 @@ import (
 // GET /tickets/{id}/issue-close、POST /tickets/{id}/issue-close/retry（关闭关联 Issue 的进度与重试）、
 // GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
+// 连接配置（模型与 Gitea，权限见 Config.AuthorizeSettings）：GET / PUT /settings/connections、
+// POST /settings/connections/test。
 //
 // 知识问答（会话只有本人可见）：POST /conversations、GET /conversations、DELETE /conversations/{id}、
 // GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream"}）、
@@ -395,6 +397,23 @@ func (l *Lingo) newRESTHandler() http.Handler {
 	})
 	action("cancel", func(r *httpapi.Request, id, aid int64) (ActionResult, error) {
 		return l.CancelPendingAction(ctx(r), user(r), id, aid)
+	})
+	rt.Handle("GET /settings/connections", func(r *httpapi.Request) (any, error) {
+		return l.ConnectionSettings(ctx(r), user(r))
+	})
+	rt.Handle("PUT /settings/connections", func(r *httpapi.Request) (any, error) {
+		var in ConnectionSettingsUpdate
+		if err := r.Decode(&in); err != nil {
+			return nil, err
+		}
+		return l.UpdateConnectionSettings(ctx(r), user(r), in)
+	})
+	rt.Handle("POST /settings/connections/test", func(r *httpapi.Request) (any, error) {
+		var in ConnectionSettingsUpdate
+		if err := r.DecodeOptional(&in); err != nil {
+			return nil, err
+		}
+		return l.TestConnectionSettings(ctx(r), user(r), in)
 	})
 	rt.Handle("GET /settings/auto-forward", func(r *httpapi.Request) (any, error) {
 		ss, err := l.AutoForwardSettings(ctx(r), user(r))

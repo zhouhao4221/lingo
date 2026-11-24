@@ -25,6 +25,7 @@
 | v1.7 | 2026-11-13 | haiqing | 新增系统在线升级（可插拔执行器）；明确可扩展部署约定 |
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
+| v1.29 | 2026-11-24 | haiqing | 连接配置存入数据库（REQ-005）：模型与 Gitea 的连接配置（地址、令牌 / API Key、Webhook 密钥、自动注册、拒绝重定向）可明文存入 `lingo_settings`（迁移 0004），经 `ConnectionSettings` / `UpdateConnectionSettings` / `TestConnectionSettings`（REST `/settings/connections`）查看、按字段修改与连通测试，权限由新增的 `Config.AuthorizeSettings` 决定（默认仅 admin）；代码配置优先；保存后当前实例立即生效、其他实例 30 秒内生效；`New` 不再要求 Gitea 地址与令牌，缺失时以未配置状态运行（Webhook 503、Gitea 任务暂缓不计失败）；改地址须同时重填密钥；LabelPrefix、ReplyMode 仍只在代码中配置 |
 | v1.28 | 2026-11-24 | haiqing | 知识问答首期（REQ-003）：会话式工单与版本问答。会话只有本人可见（软删除）；模型只把提问解析为查询意图，查询由灵工按调用者权限执行，回答附引用的工单与版本；对话中给工单留言须确认（待确认操作，30 分钟有效，可回复确认或调用确认接口）；Go 方法 `CreateConversation` / `ListConversations` / `ListConversationMessages` / `DeleteConversation` / `SendMessage(Stream)` / `RetryMessage(Stream)` / `ConfirmPendingAction` / `CancelPendingAction`，REST `/conversations`（消息可 SSE 流式），MCP `ask` 等 5 个工具；可选接口 `StreamModel`（内置模型已实现）；未配置 `Model` 时返回 `ErrNoModel`（REST 501）；迁移 0003 新增会话、消息、待确认操作三张表 |
 | v1.27 | 2026-11-22 | haiqing | 新增 `GiteaConfig.RejectRedirects`（默认关闭，行为与 v0.2.0 相同）：开启后灵工发往 Gitea 的全部认证请求（启动自检与全部业务路径）收到任何 3xx 一律不跟随、不向跳转目标发出任何请求，按不可重试的配置错误处理（待办 #701，GPCM REQ-049 依赖） |
 | v1.26 | 2026-11-21 | haiqing | 产品中文名由「灵问」改为「灵工」（英文名 Lingo 不变）；新增可由接入方配色的 Logo（`assets/logo/`） |
@@ -922,6 +923,7 @@ flowchart LR
 | lingo_llm_usage | 模型调用用量 | kind, model, ticket_id, input, output, cached, ok, latency_ms |
 | lingo_assistant_conversations | 问答会话（0003），只有创建者可见，软删除 | user_id, title, activity_seq(最近活动序号，列表排序与游标), last_active_at, turn_until(生成租约), deleted_at |
 | lingo_assistant_messages | 问答消息（0003） | conversation_id, role(user/assistant), content, status(done/failed), error, reply_to, intent, outcome(统计用), citations(jsonb：引用快照) |
+| lingo_settings | 连接配置（0004），每类一行，明文 | category(model/gitea), content(jsonb), version, updated_by, updated_at |
 | lingo_assistant_actions | 待确认操作（0003），通用结构，每个会话最多一个 pending | conversation_id, message_id, user_id, kind(ticket_comment), payload, summary, status(pending/executed/cancelled/expired/failed), result, expires_at |
 
 知识库、需求评审、业务数据请求审计与多仓库拆单的表在对应功能实现时经新迁移加入。
@@ -1103,7 +1105,7 @@ flowchart LR
 | REQ-002 | 转研发后驳回与迁移就绪检查 | 工单 | 已完成 | 2026-11-21 | 2026-11-21 |
 | REQ-003 | 知识问答 Agent：工单与版本问答 | 知识问答 | 已完成 | 2026-11-24 | 2026-11-24 |
 | REQ-004 | 工单可见性回调 | 工单 | 草稿 | 2026-11-24 | - |
-| REQ-005 | 模型与 Gitea 配置存入数据库 | 系统配置 | 评审通过 | 2026-11-24 | - |
+| REQ-005 | 模型与 Gitea 配置存入数据库 | 系统配置 | 测试中 | 2026-11-24 | - |
 
 ---
 

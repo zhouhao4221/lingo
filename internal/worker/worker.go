@@ -67,7 +67,11 @@ type Options struct {
 	Forwarding Forwarding
 	// Drafter 非空时建 Issue 前用轻量模型整理工单内容（失败时按原内容建单）。
 	Drafter Drafter
-	Usage   UsageRecorder // 模型调用用量；为空时只写日志
+	// DrafterFor 非空时每次整理前调用，取当前的整理模型（运行时可更换模型），返回 nil 表示按原内容建单；优先于 Drafter。
+	DrafterFor func() Drafter
+	// Ready 非空且返回假时（Gitea 尚未配置），不领取 Webhook 投递与 Gitea 任务、不对账：不计失败，配置好后下一次轮询恢复。
+	Ready func() bool
+	Usage UsageRecorder // 模型调用用量；为空时只写日志
 	// FetchAttachment 非空时读取附件内容上传为 Gitea 附件；为空时只把附件地址写进 Issue。
 	FetchAttachment func(ctx context.Context, a ticket.Attachment) (io.ReadCloser, error)
 	Repos           func(repo string) RepoConfig // 仓库建单配置；为空时不指派、不指定模板
@@ -180,6 +184,9 @@ func New(o Options) (*Worker, error) {
 	}
 	return &Worker{o: o, log: o.Logger.With("component", "lingo.worker"), templates: tc}, nil
 }
+
+// ready 报告 Gitea 是否已配置（未设置 Ready 时视为已配置）。
+func (w *Worker) ready() bool { return w.o.Ready == nil || w.o.Ready() }
 
 // Run 运行各处理循环直到 ctx 取消；取消后处理完在途的一条再返回，已领取未开始的条目立即释放。
 func (w *Worker) Run(ctx context.Context) error {

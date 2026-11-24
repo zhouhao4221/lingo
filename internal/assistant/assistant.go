@@ -230,6 +230,8 @@ type Options struct {
 	TicketsByID func(ctx context.Context, ids []int64) ([]*ticket.Ticket, error)
 	// Brain 是模型调用；为空时发送与重试返回 ErrNoModel。
 	Brain Brain
+	// BrainFor 非空时每轮提问开始时调用，取当前的模型（运行时可更换模型），返回 nil 表示未配置；优先于 Brain。
+	BrainFor func() Brain
 	// Projects 返回调用者可访问的项目（仅当前 Config 中声明的）。
 	Projects func(p auth.Principal) []ProjectInfo
 	// ProjectOfRepo 返回仓库（"owner/name"）所属项目 key。

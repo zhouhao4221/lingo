@@ -287,7 +287,7 @@ func (l *Lingo) TicketTypes(ctx context.Context, u User, projectKey, repo string
 		return nil, fmt.Errorf("%w: repo %q is not in project %q", ErrInvalidInput, repo, projectKey)
 	}
 	var tmpls []*gitea.IssueTemplate
-	if owner, name, ok := strings.Cut(repo, "/"); ok {
+	if owner, name, ok := strings.Cut(repo, "/"); ok && l.gitea.Configured() {
 		var err error
 		if tmpls, err = l.tmpls.Get(ctx, l.gitea, owner, name); err != nil {
 			l.log.Warn("lingo: list issue templates failed", "repo", repo, "err", err)

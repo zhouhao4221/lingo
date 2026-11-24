@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -33,8 +34,13 @@ type Options struct {
 	RejectRedirects bool
 }
 
-// Client 是 Gitea API 客户端，可并发使用。
+// Client 是 Gitea API 客户端，可并发使用。连接配置可经 Reconfigure 原子替换（运行时修改地址、令牌）：
+// 每个请求在发出时取一次当前配置，进行中的请求不受影响。
 type Client struct {
+	cfg atomic.Pointer[clientConfig] // 为 nil 时未配置，请求返回 ErrNotConfigured
+}
+
+type clientConfig struct {
 	base  string // 含 /api/v1，无结尾斜杠
 	token string
 	hc    *http.Client
@@ -43,8 +49,38 @@ type Client struct {
 	noRedirect bool
 }
 
+// ErrNotConfigured 表示客户端尚未配置 Gitea 地址与令牌。
+var ErrNotConfigured = errors.New("gitea: not configured")
+
+// NewUnconfigured 创建尚未配置的客户端：请求一律返回 ErrNotConfigured，之后可用 Reconfigure 配置。
+func NewUnconfigured() *Client { return &Client{} }
+
+// Configured 报告客户端是否已配置。
+func (c *Client) Configured() bool { return c.cfg.Load() != nil }
+
+// Reconfigure 校验并原子替换连接配置；o 无效时返回错误、保持原配置。
+func (c *Client) Reconfigure(o Options) error {
+	cfg, err := newConfig(o)
+	if err != nil {
+		return err
+	}
+	c.cfg.Store(cfg)
+	return nil
+}
+
+// Unconfigure 清除连接配置，之后的请求返回 ErrNotConfigured。
+func (c *Client) Unconfigure() { c.cfg.Store(nil) }
+
 // New 校验配置并创建客户端。
 func New(o Options) (*Client, error) {
+	c := &Client{}
+	if err := c.Reconfigure(o); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func newConfig(o Options) (*clientConfig, error) {
 	if o.BaseURL == "" {
 		return nil, errors.New("gitea: BaseURL is required")
 	}
@@ -71,7 +107,7 @@ func New(o Options) (*Client, error) {
 	if ua == "" {
 		ua = "lingo"
 	}
-	return &Client{base: u.String() + "/api/v1", token: o.Token, hc: hc, ua: ua, noRedirect: o.RejectRedirects}, nil
+	return &clientConfig{base: u.String() + "/api/v1", token: o.Token, hc: hc, ua: ua, noRedirect: o.RejectRedirects}, nil
 }
 
 // ErrNotFound 表示资源不存在（HTTP 404），可用 errors.Is 判断。
@@ -303,9 +339,17 @@ func repoPath(owner, repo string) string {
 	return "/repos/" + esc(owner) + "/" + esc(repo)
 }
 
+type configKey struct{}
+
 func (c *Client) newRequest(ctx context.Context, method, path string, q url.Values, body io.Reader, contentType string) (*http.Request, error) {
+	cfg := c.cfg.Load()
+	if cfg == nil {
+		return nil, ErrNotConfigured
+	}
+	// 请求带上发出时的配置，send 用同一份（期间被 Reconfigure 替换也不受影响）
+	ctx = context.WithValue(ctx, configKey{}, cfg)
 	// path 由各方法用 esc 拼接，已是转义后的形式
-	s := c.base + path
+	s := cfg.base + path
 	if len(q) > 0 {
 		s += "?" + q.Encode()
 	}
@@ -313,9 +357,9 @@ func (c *Client) newRequest(ctx context.Context, method, path string, q url.Valu
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "token "+c.token)
+	req.Header.Set("Authorization", "token "+cfg.token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.ua)
+	req.Header.Set("User-Agent", cfg.ua)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -342,7 +386,13 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 }
 
 func (c *Client) send(req *http.Request, out any) (*Response, error) {
-	resp, err := c.hc.Do(req)
+	cfg, _ := req.Context().Value(configKey{}).(*clientConfig)
+	if cfg == nil {
+		if cfg = c.cfg.Load(); cfg == nil {
+			return nil, ErrNotConfigured
+		}
+	}
+	resp, err := cfg.hc.Do(req)
 	if err != nil {
 		// 拒绝的重定向不带 *url.Error 包装返回：后者含请求地址，脱敏说明只需要方法、路径与状态码
 		var re *RedirectError
@@ -353,7 +403,7 @@ func (c *Client) send(req *http.Request, out any) (*Response, error) {
 	}
 	defer resp.Body.Close()
 	r := parseResponse(resp)
-	if c.noRedirect && resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+	if cfg.noRedirect && resp.StatusCode >= 300 && resp.StatusCode <= 399 {
 		resp.Body.Close() // 不读取响应体，原因同 rejectRedirectTransport
 		kind := "unknown"
 		if loc, err := resp.Location(); err == nil {

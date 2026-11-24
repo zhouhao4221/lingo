@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
@@ -18,6 +19,7 @@ import (
 	"github.com/zhouhao4221/lingo/internal/notify"
 	"github.com/zhouhao4221/lingo/internal/project"
 	"github.com/zhouhao4221/lingo/internal/release"
+	"github.com/zhouhao4221/lingo/internal/settings"
 	"github.com/zhouhao4221/lingo/internal/store"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 	"github.com/zhouhao4221/lingo/internal/webhook"
@@ -54,6 +56,9 @@ type Config struct {
 	// u.Projects 内。为空时按工单可见范围：external 只能是本人的需求，agent 只能是已转出的，reviewer / admin 为项目内全部。
 	// 要让业务方、专家、决策者参与他人的需求，在这里按接入方自己的规则放行。
 	AuthorizePerspective func(ctx context.Context, u User, t Ticket, write bool) error
+	// AuthorizeSettings 判断 u 能否查看（write 为假）或修改、测试（write 为真）连接配置（ConnectionSettings 等，
+	// Go 方法与 REST 都经过它）；返回 nil 允许，ErrForbidden / ErrNotFound 拒绝。为空时只允许 admin。
+	AuthorizeSettings func(ctx context.Context, u User, write bool) error
 	// TriageRemindAfter 是待确认工单的提醒间隔：超过该时长未处理发出 triage.overdue，之后按同样间隔重复；
 	// 0 表示默认 24 小时，负数关闭提醒（接入方可用 ListTriage 的 PendingBefore 自行实现）。
 	TriageRemindAfter time.Duration
@@ -71,14 +76,17 @@ type Config struct {
 
 // Lingo 是一个灵工实例。
 type Lingo struct {
-	cfg       Config
-	log       *slog.Logger
-	gitea     *gitea.Client
-	store     *store.Store
-	webhook   http.Handler
-	rest      http.Handler
-	mcp       http.Handler
-	worker    *worker.Worker
+	cfg     Config
+	log     *slog.Logger
+	gitea   *gitea.Client
+	store   *store.Store
+	webhook http.Handler
+	rest    http.Handler
+	mcp     http.Handler
+	worker  *worker.Worker
+	settingsState
+	connMu sync.Mutex
+
 	tickets   *ticket.Service
 	releases  *release.Service
 	assistant *assistant.Service
@@ -98,8 +106,6 @@ func New(cfg Config) (*Lingo, error) {
 	switch {
 	case cfg.DB == nil:
 		return nil, errors.New("lingo: Config.DB is required")
-	case cfg.Gitea.BaseURL == "" || cfg.Gitea.Token == "":
-		return nil, errors.New("lingo: Config.Gitea.BaseURL and Token are required")
 	case cfg.Authenticate == nil:
 		return nil, errors.New("lingo: Config.Authenticate is required")
 	case len(cfg.Projects) == 0:
@@ -116,12 +122,17 @@ func New(cfg Config) (*Lingo, error) {
 		return nil, err
 	}
 	l := &Lingo{cfg: cfg, log: cfg.Logger, tmpls: &gitea.TemplateCache{}}
+	l.settingsChanged = make(chan struct{}, 1)
 	if l.log == nil {
 		l.log = slog.Default()
 	}
 	var err error
-	if l.gitea, err = gitea.New(giteaOptions(cfg.Gitea)); err != nil {
-		return nil, fmt.Errorf("lingo: %w", err)
+	// Gitea 地址与令牌可不在代码中配置（存数据库、经 UpdateConnectionSettings 修改）；代码中给了就先校验
+	l.gitea = gitea.NewUnconfigured()
+	if cfg.Gitea.BaseURL != "" && cfg.Gitea.Token != "" {
+		if l.gitea, err = gitea.New(giteaOptions(cfg.Gitea)); err != nil {
+			return nil, fmt.Errorf("lingo: %w", err)
+		}
 	}
 	var opts []store.Option
 	if cfg.Notifier != nil {
@@ -130,9 +141,16 @@ func New(cfg Config) (*Lingo, error) {
 	if l.store, err = store.New(cfg.DB, opts...); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
-	if l.webhook, err = l.newWebhookHandler(); err != nil {
-		return nil, err
+	l.settings = &settings.Service{Store: l.store, Overrides: l.overrides()}
+	l.applySettings(settings.Stored{}, true) // 先按代码配置生效
+	{
+		// 再读一次数据库中保存的配置（未执行迁移 0004 或数据库暂不可用时只告警，按代码配置运行，之后定时重试）
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		l.refreshSettings(ctx)
+		cancel()
+		l.settingsChecked.Store(time.Now().UnixNano())
 	}
+	l.webhook = l.newWebhookHandler()
 	if l.tickets, err = ticket.NewService(ticket.ServiceOptions{
 		Store:                l.store,
 		AutoForward:          l.defaultAutoForward,
@@ -153,8 +171,8 @@ func New(cfg Config) (*Lingo, error) {
 	if l.assistant, err = l.newAssistant(); err != nil {
 		return nil, err
 	}
-	l.rest = l.newRESTHandler()
-	l.mcp = l.newMCPHandler()
+	l.rest = l.liveHandler(l.newRESTHandler())
+	l.mcp = l.liveHandler(l.newMCPHandler())
 	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
 	return l, nil
 }
@@ -173,16 +191,11 @@ func (l *Lingo) labelPrefix() string {
 	return "lingo"
 }
 
-// drafter 返回建单前整理工单用的模型：优先 LightModel，其次 Model；都没有时为 nil（按原内容建单）。
-func (l *Lingo) drafter() worker.Drafter {
-	m := l.cfg.LightModel
-	if isNil(m) {
-		m = l.cfg.Model
-	}
-	if isNil(m) {
-		return nil
-	}
-	return &llm.Drafter{Chat: chatOf(m)}
+// resetBot 清除机器人账号缓存（Gitea 地址或令牌变化后重新获取）。
+func (l *Lingo) resetBot() {
+	l.botMu.Lock()
+	defer l.botMu.Unlock()
+	l.bot, l.botTried = "", time.Time{}
 }
 
 // chatOf 把 Model 适配为 llm.Chat；实现了 UsageModel 的模型报告用量。
@@ -279,7 +292,14 @@ func (l *Lingo) overdueAfter() time.Duration {
 }
 
 func (l *Lingo) issueURL(repo string, n int64) string {
-	return ticket.IssueURL(l.cfg.Gitea.BaseURL, repo, n)
+	base := ""
+	if c := l.conn(); c != nil {
+		base = c.eff.Gitea.BaseURL
+	}
+	if base == "" {
+		return "" // Gitea 未配置
+	}
+	return ticket.IssueURL(base, repo, n)
 }
 
 func (l *Lingo) newWorker() (*worker.Worker, error) {
@@ -304,7 +324,8 @@ func (l *Lingo) newWorker() (*worker.Worker, error) {
 		Issues:      l.gitea,
 		Drafts:      l.tickets,
 		Forwarding:  l.store,
-		Drafter:     l.drafter(),
+		DrafterFor:  l.drafterFor,
+		Ready:       l.gitea.Configured,
 		Usage:       l.store,
 		Repos:       l.repoConfig,
 		LabelPrefix: l.labelPrefix(),
@@ -337,31 +358,28 @@ func publicEvent(e notify.Event) Event {
 		Perspectives: publicPerspectives(e.Perspectives)}
 }
 
-func (l *Lingo) newWebhookHandler() (http.Handler, error) {
-	if l.cfg.Gitea.WebhookSecret == "" {
-		// 未配置密钥时拒绝所有投递：空密钥的签名任何人都能伪造
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			l.log.Error("lingo: webhook received but Config.Gitea.WebhookSecret is empty")
-			http.Error(w, "webhook secret not configured", http.StatusServiceUnavailable)
-		}), nil
-	}
-	h, err := webhook.NewHandler(webhook.Options{
-		Secret:    l.cfg.Gitea.WebhookSecret,
-		BotLogin:  l.botLogin,
-		ReplyMode: l.replyMode(),
-		Store:     l.store,
-		Logger:    l.log,
+// newWebhookHandler 按当前连接验签：每个请求取当前的处理器（密钥修改后立即按新密钥验签）。
+// Gitea 未配置或未设置 Webhook 密钥时拒绝所有投递（503）：空密钥的签名任何人都能伪造。
+func (l *Lingo) newWebhookHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		l.touchSettings()
+		c := l.conn()
+		if c == nil || c.webhook == nil || !l.gitea.Configured() {
+			l.log.Error("lingo: webhook received but Gitea or its webhook secret is not configured")
+			http.Error(w, "webhook not configured", http.StatusServiceUnavailable)
+			return
+		}
+		c.webhook.ServeHTTP(w, r)
 	})
-	if err != nil {
-		return nil, fmt.Errorf("lingo: %w", err)
-	}
-	return h, nil
 }
 
 // botLogin 返回机器人账号 login。尚未获取时在后台发起获取（同一时间只有一个，失败后每分钟最多重试一次）
 // 并立即返回空串，不阻塞 Webhook 请求；Handler 与 Run 分进程部署时同样可用。
 // 接收时未识别的机器人事件，由 worker 按当时的账号重新解析判定。
 func (l *Lingo) botLogin() string {
+	if !l.gitea.Configured() {
+		return "" // Gitea 未配置：不获取
+	}
 	l.botMu.Lock()
 	defer l.botMu.Unlock()
 	if l.bot == "" && !l.botFetching && time.Since(l.botTried) >= time.Minute {
@@ -417,15 +435,36 @@ func (l *Lingo) Run(ctx context.Context) error {
 		l.log.Error("lingo: sync projects failed", "err", err)
 	}
 	var checked sync.WaitGroup
-	if !l.cfg.SkipSelfCheck {
+	var checking atomic.Bool
+	selfCheck := func() { // 不阻断启动；结果写日志，也可调用 SelfCheck 获取；同一时间只跑一次
+		if !checking.CompareAndSwap(false, true) {
+			l.selfCheckDue.Store(true) // 正在自检：结束后再跑一次（期间配置又变了）
+			return
+		}
 		checked.Add(1)
-		go func() { // 不阻断启动；结果写日志，也可调用 SelfCheck 获取
+		go func() {
 			defer checked.Done()
-			l.logSelfCheck(ctx)
+			for {
+				l.logSelfCheck(ctx)
+				checking.Store(false)
+				// 自检期间连接配置又变了：再跑一次，确保 Gitea 端拿到最新的密钥与地址
+				if ctx.Err() != nil || l.cfg.SkipSelfCheck || !l.selfCheckDue.CompareAndSwap(true, false) || !checking.CompareAndSwap(false, true) {
+					return
+				}
+			}
 		}()
 	}
+	l.selfCheckDue.Store(false) // 启动时的自检已经覆盖
+	if !l.cfg.SkipSelfCheck {
+		selfCheck()
+	}
+	checked.Add(1)
+	go func() { // 定时检查连接配置；Gitea 连接变化后补跑一次自检（开启自动注册时同步 Webhook 密钥）
+		defer checked.Done()
+		l.watchSettings(ctx, selfCheck)
+	}()
 	err := l.worker.Run(ctx)
-	checked.Wait() // 退出前等自检结束（它随 ctx 取消尽快返回），之后不再访问数据库
+	checked.Wait() // 退出前等自检与配置检查结束（它们随 ctx 取消尽快返回），之后不再访问数据库
 	return err
 }
 

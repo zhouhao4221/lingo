@@ -145,6 +145,19 @@ if m.PendingAction != nil { /* show a confirm button that calls l.ConfirmPending
 
 REST streaming: `POST /conversations/{id}/messages` with `{"content":"…","time_zone":"Asia/Shanghai","stream":true}` returns SSE: any number of `event: delta` (`{"text"}`) followed by exactly one `event: message` carrying the full assistant message, whose `content` is authoritative. Errors after the stream starts arrive as `event: error` (`{"code","message"}`); errors before it (404, 409, 501) are regular JSON errors. A message whose model call failed has `status: "failed"` and can be retried. Read the stream with `fetch` (`EventSource` cannot POST).
 
+### Connection settings (stored in the database)
+
+Model and Gitea connection settings (addresses, tokens / API keys, webhook secret, webhook auto-registration, redirect rejection) can live in the database instead of code, editable from the host's settings page **without a restart**:
+
+- `ConnectionSettings` / `UpdateConnectionSettings` / `TestConnectionSettings` (REST `GET` / `PUT /settings/connections`, `POST /settings/connections/test`); not exposed over MCP. Access is decided by `Config.AuthorizeSettings`; without it only admins may view or change them.
+- **Precedence**: values given in `Config` win, show source `config` and return 409 if changed; the rest come from the database. Models are decided per slot (if `Config.Model` / `LightModel` is set, that slot comes from code). Booleans are locked by code only when `true`. `LabelPrefix` and `ReplyMode` are code-only.
+- **Propagation**: the saving instance switches immediately; other instances within 30 seconds (`Run` polls; Handler-only processes check on incoming requests). In-flight requests keep the settings they started with.
+- **Secrets are stored in plain text** in `lingo_settings`: anyone who can read that table (including backups and replicas) can read them, so restrict database and backup access. APIs only return masks (e.g. `sk-****abcd`); logs record only who changed which fields.
+- **Changing an address requires re-entering the secret**: if the Gitea or model host changes, the token / API key must be submitted too, so a stored secret is never sent to a new host. Pointing at a different Gitea instance breaks existing ticket–issue links and is not recommended.
+- **Unconfigured state**: lingo starts without a Gitea address or token: webhooks return 503, Gitea tasks wait (without counting failures), and the self-check reports a `config` warning; everything resumes once configured. Webhooks Gitea failed to deliver meanwhile are not retried by Gitea and are recovered by reconciliation, which is impossible if reconciliation is disabled (`ReconcileInterval < 0`).
+- **Changing the webhook secret**: lingo verifies with the new secret immediately. With auto-registration, a self-check re-runs and updates the secret in Gitea; otherwise (or with `SkipSelfCheck`) update it in Gitea by hand.
+- Database-configured models support the built-in OpenAI-compatible (`openai`) and DeepSeek (`deepseek`) providers, without embeddings; custom `lingo.Model` implementations still go through `Config`. Requires migration 0004.
+
 ### REST API
 
 | Endpoint | Description |
@@ -161,6 +174,7 @@ REST streaming: `POST /conversations/{id}/messages` with `{"content":"…","time
 | `POST` / `GET /conversations`, `DELETE /conversations/{id}` | Q&A conversations: create, list (by recent activity; pass the previous page's `cursor` as `before`), delete |
 | `GET` / `POST /conversations/{id}/messages`, `POST /conversations/{id}/messages/{mid}/retry` | History; ask (SSE when `stream` is true); retry a failed answer |
 | `POST /conversations/{id}/actions/{aid}/confirm\|cancel` | Confirm / cancel a pending action (such as a comment) |
+| `GET` / `PUT /settings/connections`, `POST /settings/connections/test` | Connection settings (model and Gitea): view (secrets masked), update by field, test (access per `Config.AuthorizeSettings`) |
 
 Write requests must use `Content-Type: application/json` (CSRF protection); errors are `{"error":{"code","message"}}`.
 

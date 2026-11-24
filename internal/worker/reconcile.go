@@ -51,7 +51,7 @@ var errSkip = errors.New("skipped")
 // 各处理幂等，与 Webhook 重叠不会重复通知或重复留痕。
 func (w *Worker) Reconcile(ctx context.Context) error {
 	ro := w.o.Reconcile
-	if ro.Gitea == nil || ro.Cursors == nil {
+	if ro.Gitea == nil || ro.Cursors == nil || !w.ready() {
 		return nil
 	}
 	if ro.Lock != nil {
