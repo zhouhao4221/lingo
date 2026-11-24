@@ -1,4 +1,4 @@
-package datatool
+package connector
 
 import (
 	"context"
@@ -13,13 +13,13 @@ import (
 // 错误：都不含参数值、原始结果或 Call 的错误原文。
 var (
 	// ErrNotFound 表示工具不存在、调用人无权调用，或结果声明的归属项目不可访问（三者不区分）。
-	ErrNotFound = errors.New("datatool: not found")
+	ErrNotFound = errors.New("connector: not found")
 	// ErrUnavailable 表示暂时不可用：熔断中、在途调用已满，或审计写入失败。
-	ErrUnavailable = errors.New("datatool: temporarily unavailable")
+	ErrUnavailable = errors.New("connector: temporarily unavailable")
 	// ErrFailed 表示调用失败：Call 返回错误、超时、panic 或结果无法编码。
-	ErrFailed = errors.New("datatool: call failed")
+	ErrFailed = errors.New("connector: call failed")
 	// ErrBadQuery 表示审计查询条件不合法。
-	ErrBadQuery = errors.New("datatool: invalid query")
+	ErrBadQuery = errors.New("connector: invalid query")
 )
 
 // 入口（Record.Channel）。

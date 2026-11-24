@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 )
 
-var _ datatool.AuditStore = (*Store)(nil)
+var _ connector.AuditStore = (*Store)(nil)
 
 // 错误不包装语句参数：调用方只记录错误码。
 
@@ -21,8 +21,8 @@ func argsJSON(m map[string]string) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, err
 }
 
-// InsertDataRequest 实现 datatool.AuditStore。
-func (s *Store) InsertDataRequest(ctx context.Context, r *datatool.Record, lease time.Duration) error {
+// InsertDataRequest 实现 connector.AuditStore。
+func (s *Store) InsertDataRequest(ctx context.Context, r *connector.Record, lease time.Duration) error {
 	args, err := argsJSON(r.Args)
 	if err != nil {
 		return err
@@ -37,8 +37,8 @@ func (s *Store) InsertDataRequest(ctx context.Context, r *datatool.Record, lease
 		r.Status, r.Reason, r.Duration.Milliseconds(), r.Truncated, lease.Milliseconds()).Scan(&r.ID, &r.CreatedAt)
 }
 
-// FinishDataRequest 实现 datatool.AuditStore。
-func (s *Store) FinishDataRequest(ctx context.Context, r *datatool.Record) error {
+// FinishDataRequest 实现 connector.AuditStore。
+func (s *Store) FinishDataRequest(ctx context.Context, r *connector.Record) error {
 	args, err := argsJSON(r.Args)
 	if err != nil {
 		return err
@@ -50,8 +50,8 @@ func (s *Store) FinishDataRequest(ctx context.Context, r *datatool.Record) error
 	return err
 }
 
-// ListDataRequests 实现 datatool.AuditStore。
-func (s *Store) ListDataRequests(ctx context.Context, q datatool.Query) ([]datatool.Record, error) {
+// ListDataRequests 实现 connector.AuditStore。
+func (s *Store) ListDataRequests(ctx context.Context, q connector.Query) ([]connector.Record, error) {
 	var since, until sql.NullTime
 	if !q.Since.IsZero() {
 		since = sql.NullTime{Time: q.Since, Valid: true}
@@ -72,9 +72,9 @@ func (s *Store) ListDataRequests(ctx context.Context, q datatool.Query) ([]datat
 		return nil, err
 	}
 	defer rows.Close()
-	var out []datatool.Record
+	var out []connector.Record
 	for rows.Next() {
-		var r datatool.Record
+		var r connector.Record
 		var names string
 		var args sql.NullString
 		var ms int64
@@ -101,7 +101,7 @@ func (s *Store) ListDataRequests(ctx context.Context, q datatool.Query) ([]datat
 	return out, rows.Err()
 }
 
-// InterruptDataRequests 实现 datatool.AuditStore：只处理租约已过期的记录（租约按数据库时间计算）。
+// InterruptDataRequests 实现 connector.AuditStore：只处理租约已过期的记录（租约按数据库时间计算）。
 func (s *Store) InterruptDataRequests(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE lingo_data_requests SET status = 'interrupted', reason = 'interrupted',
 			lease_until = NULL, finished_at = now()
@@ -113,7 +113,7 @@ func (s *Store) InterruptDataRequests(ctx context.Context) (int, error) {
 	return int(n), err
 }
 
-// PurgeDataRequests 实现 datatool.AuditStore。
+// PurgeDataRequests 实现 connector.AuditStore。
 func (s *Store) PurgeDataRequests(ctx context.Context, before time.Time) (int, error) {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM lingo_data_requests WHERE created_at < $1", before)
 	if err != nil {

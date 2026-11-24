@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/mcp"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -79,12 +79,12 @@ func (l *Lingo) dataMCPTools() []mcp.Tool {
 				if err != nil {
 					return nil, mcp.ErrUnknownTool
 				}
-				r, err := l.data.Run(ctx, c, name, args, datatool.ChannelMCP, 0)
-				var ie *datatool.InputError
+				r, err := l.data.Run(ctx, c, name, args, connector.ChannelMCP, 0)
+				var ie *connector.InputError
 				switch {
 				case errors.As(err, &ie):
 					return nil, &mcp.ArgError{Msg: ie.Error()}
-				case errors.Is(err, datatool.ErrNotFound):
+				case errors.Is(err, connector.ErrNotFound):
 					return nil, mcp.ErrUnknownTool
 				case err != nil:
 					return nil, dataErr(err)

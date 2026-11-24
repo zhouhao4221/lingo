@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 )
 
 // 业务数据工具（REQ-008）的错误。错误信息不含参数值、结果或 Call 返回的错误原文。
@@ -37,7 +37,7 @@ func (l *Lingo) CallTool(ctx context.Context, u User, name string, input json.Ra
 	if err != nil {
 		return ToolResult{}, err
 	}
-	r, err := l.data.Run(ctx, c, name, input, datatool.ChannelAPI, 0)
+	r, err := l.data.Run(ctx, c, name, input, connector.ChannelAPI, 0)
 	if err != nil {
 		return ToolResult{}, dataErr(err)
 	}
@@ -87,7 +87,7 @@ func (l *Lingo) ListDataRequests(ctx context.Context, u User, f DataRequestFilte
 	if err != nil {
 		return nil, err
 	}
-	rs, err := l.data.List(ctx, c, datatool.Filter{Tool: f.Tool, UserID: f.UserID, Status: f.Status, Since: f.Since,
+	rs, err := l.data.List(ctx, c, connector.Filter{Tool: f.Tool, UserID: f.UserID, Status: f.Status, Since: f.Since,
 		Until: f.Until, BeforeID: f.Before, Limit: f.Limit})
 	if err != nil {
 		return nil, dataErr(err)
@@ -107,59 +107,59 @@ func (l *Lingo) ListDataRequests(ctx context.Context, u User, f DataRequestFilte
 }
 
 // dataCaller 转换调用人；Projects 保留 User.Projects 原值（审计可见范围只认明确列出的项目）。
-func dataCaller(u User) (datatool.Caller, error) {
+func dataCaller(u User) (connector.Caller, error) {
 	switch {
 	case u.ID == "":
-		return datatool.Caller{}, fmt.Errorf("%w: caller has no user id", ErrForbidden)
+		return connector.Caller{}, fmt.Errorf("%w: caller has no user id", ErrForbidden)
 	case u.Role != RoleExternal && u.Role != RoleAgent && u.Role != RoleReviewer && u.Role != RoleAdmin:
-		return datatool.Caller{}, fmt.Errorf("%w: unknown role", ErrForbidden)
+		return connector.Caller{}, fmt.Errorf("%w: unknown role", ErrForbidden)
 	}
-	return datatool.Caller{ID: u.ID, Role: string(u.Role), Scopes: u.Scopes, Projects: u.Projects, User: u}, nil
+	return connector.Caller{ID: u.ID, Role: string(u.Role), Scopes: u.Scopes, Projects: u.Projects, User: u}, nil
 }
 
 func dataErr(err error) error {
-	var ie *datatool.InputError
+	var ie *connector.InputError
 	switch {
 	case errors.As(err, &ie):
 		return fmt.Errorf("%w: %s", ErrInvalidInput, ie.Error())
-	case errors.Is(err, datatool.ErrNotFound):
+	case errors.Is(err, connector.ErrNotFound):
 		return ErrNotFound
-	case errors.Is(err, datatool.ErrUnavailable):
+	case errors.Is(err, connector.ErrUnavailable):
 		return ErrToolUnavailable
-	case errors.Is(err, datatool.ErrFailed):
+	case errors.Is(err, connector.ErrFailed):
 		return ErrToolFailed
-	case errors.Is(err, datatool.ErrBadQuery):
-		return fmt.Errorf("%w%s", ErrInvalidInput, err.Error()[len(datatool.ErrBadQuery.Error()):])
+	case errors.Is(err, connector.ErrBadQuery):
+		return fmt.Errorf("%w%s", ErrInvalidInput, err.Error()[len(connector.ErrBadQuery.Error()):])
 	}
 	return err
 }
 
 // newDataTools 校验 Config.Tools：被忽略的工具记 Warn（只含序号、名称与原因代码）。
-func (l *Lingo) newDataTools(builtin []string) *datatool.Service {
-	specs := make([]datatool.Spec, 0, len(l.cfg.Tools))
+func (l *Lingo) newDataTools(builtin []string) *connector.Service {
+	specs := make([]connector.Spec, 0, len(l.cfg.Tools))
 	for _, t := range l.cfg.Tools {
-		sp := datatool.Spec{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Scope: t.Scope,
+		sp := connector.Spec{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Scope: t.Scope,
 			Mode: string(t.Mode), Sensitive: t.Sensitive, Timeout: t.Timeout}
 		if call := t.Call; call != nil {
-			sp.Call = func(ctx context.Context, c datatool.Caller, input json.RawMessage) (datatool.Output, error) {
+			sp.Call = func(ctx context.Context, c connector.Caller, input json.RawMessage) (connector.Output, error) {
 				v, err := call(ctx, c.User.(User), input)
 				if err != nil {
-					return datatool.Output{}, err
+					return connector.Output{}, err
 				}
 				switch o := v.(type) {
 				case ToolOutput:
-					return datatool.Output{Project: o.Project, Data: o.Data}, nil
+					return connector.Output{Project: o.Project, Data: o.Data}, nil
 				case *ToolOutput:
 					if o != nil {
-						return datatool.Output{Project: o.Project, Data: o.Data}, nil
+						return connector.Output{Project: o.Project, Data: o.Data}, nil
 					}
 				}
-				return datatool.Output{Data: v}, nil
+				return connector.Output{Data: v}, nil
 			}
 		}
 		specs = append(specs, sp)
 	}
-	s, rej := datatool.New(datatool.Options{Specs: specs, Builtin: builtin, Projects: l.projectKeys, Audit: l.store, Logger: l.log})
+	s, rej := connector.New(connector.Options{Specs: specs, Builtin: builtin, Projects: l.projectKeys, Audit: l.store, Logger: l.log})
 	for _, r := range rej {
 		l.log.Warn("lingo: Config.Tools entry ignored", "index", r.Index, "name", r.Name, "reason", r.Reason)
 	}

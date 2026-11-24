@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/textutil"
 )
 
@@ -52,15 +52,15 @@ func (s *Service) queryData(ctx context.Context, tc *turnCtx, in *Intent) (*repl
 		return &reply{content: textClarify, outcome: OutcomeClarify}, nil
 	}
 	r, err := s.o.DataTools.Run(ctx, in.Tool, in.ToolInput, tc.convID)
-	var ie *datatool.InputError
+	var ie *connector.InputError
 	switch {
 	case errors.As(err, &ie):
 		return &reply{content: needInputText(ie), outcome: OutcomeClarify}, nil
-	case errors.Is(err, datatool.ErrNotFound):
+	case errors.Is(err, connector.ErrNotFound):
 		return &reply{content: textDataNotFound, outcome: OutcomeNotFound}, nil
-	case errors.Is(err, datatool.ErrUnavailable):
+	case errors.Is(err, connector.ErrUnavailable):
 		return &reply{content: textDataUnavailable, outcome: OutcomeDataFailed}, nil
-	case errors.Is(err, datatool.ErrFailed):
+	case errors.Is(err, connector.ErrFailed):
 		return &reply{content: textDataFailed, outcome: OutcomeDataFailed}, nil
 	case err != nil:
 		return nil, err
@@ -75,7 +75,7 @@ func (s *Service) queryData(ctx context.Context, tc *turnCtx, in *Intent) (*repl
 	return s.answer(ctx, tc, f, cites, func() string { return textDataFailed })
 }
 
-func needInputText(ie *datatool.InputError) string {
+func needInputText(ie *connector.InputError) string {
 	if ie.Param == "" {
 		return "查询需要的信息不完整，请补充后再问一次。"
 	}

@@ -368,7 +368,7 @@ stateDiagram-v2
 | 层级 | 文件 | 说明 |
 |------|------|------|
 | 迁移 | `migrations/0007_data_requests.sql` | 新增审计表 |
-| 领域 | `internal/datatool/{doc,registry,schema,mask,breaker,service}.go` 及测试 | 注册校验、参数校验、脱敏截断、熔断、并发上限、超时、审计先行、查询与维护 |
+| 领域 | `internal/connector/{doc,registry,schema,mask,breaker,service}.go` 及测试（沿用架构规范预留的 connector 包） | 注册校验、参数校验、脱敏截断、熔断、并发上限、超时、审计先行、查询与维护 |
 | 存储 | `internal/store/data_requests.go` | 审计写入、更新、查询、中断、清理 |
 | MCP | `internal/mcp/server.go` 及测试 | `Tool.Visible`、`ErrUnknownTool` |
 | 问答 | `internal/assistant/{assistant,turn,data,reply}.go` 及测试；`internal/llm/assistant.go` 及测试 | 工具清单、`data_query` 意图、作答与引用 |
@@ -378,7 +378,7 @@ stateDiagram-v2
 
 ### 11.4 实现步骤
 
-1. 核心与审计：`internal/datatool`、迁移 0007、store、根包 `CallTool` / `ListDataRequests` / REST、`Run` 维护任务
+1. 核心与审计：`internal/connector`、迁移 0007、store、根包 `CallTool` / `ListDataRequests` / REST、`Run` 维护任务
 2. MCP：`mcp.Tool.Visible` 与按调用人列出、调用业务工具
 3. 问答：工具清单进入意图解析（无工具时提示词与输入不变）、`data_query` 分派、作答与引用
 4. 文档与示例：中英文 README、PRD、架构概览、Go 示例

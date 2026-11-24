@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/release"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -140,11 +140,11 @@ type ToolInfo struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// DataTools 是业务数据工具（REQ-008），由根包适配；调用人由根包放在 ctx 中。Run 返回 datatool 的错误
-// （datatool.ErrNotFound、*datatool.InputError、datatool.ErrUnavailable、datatool.ErrFailed）。
+// DataTools 是业务数据工具（REQ-008），由根包适配；调用人由根包放在 ctx 中。Run 返回 connector 的错误
+// （connector.ErrNotFound、*connector.InputError、connector.ErrUnavailable、connector.ErrFailed）。
 type DataTools interface {
 	Visible(ctx context.Context) []ToolInfo
-	Run(ctx context.Context, name string, input json.RawMessage, convID int64) (*datatool.Result, error)
+	Run(ctx context.Context, name string, input json.RawMessage, convID int64) (*connector.Result, error)
 }
 
 // 交给意图解析的工具数量与描述长度上限。

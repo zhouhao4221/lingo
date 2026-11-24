@@ -10,7 +10,7 @@ import (
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
 	"github.com/zhouhao4221/lingo/internal/auth"
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/store"
 )
@@ -333,10 +333,10 @@ func withDataCaller(ctx context.Context, u User) context.Context {
 // assistantData 把业务数据工具适配给知识问答：调用人取自 ctx。
 type assistantData struct{ l *Lingo }
 
-func (a assistantData) caller(ctx context.Context) (datatool.Caller, bool) {
+func (a assistantData) caller(ctx context.Context) (connector.Caller, bool) {
 	u, ok := ctx.Value(dataCallerKey{}).(User)
 	if !ok {
-		return datatool.Caller{}, false
+		return connector.Caller{}, false
 	}
 	c, err := dataCaller(u)
 	return c, err == nil
@@ -354,12 +354,12 @@ func (a assistantData) Visible(ctx context.Context) []assistant.ToolInfo {
 	return out
 }
 
-func (a assistantData) Run(ctx context.Context, name string, input json.RawMessage, convID int64) (*datatool.Result, error) {
+func (a assistantData) Run(ctx context.Context, name string, input json.RawMessage, convID int64) (*connector.Result, error) {
 	c, ok := a.caller(ctx)
 	if !ok {
-		return nil, datatool.ErrNotFound
+		return nil, connector.ErrNotFound
 	}
-	return a.l.data.Run(ctx, c, name, input, datatool.ChannelAssistant, convID)
+	return a.l.data.Run(ctx, c, name, input, connector.ChannelAssistant, convID)
 }
 
 // recordUsage 记录知识问答的模型用量（写库失败只记日志）。

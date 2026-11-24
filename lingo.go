@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
-	"github.com/zhouhao4221/lingo/internal/datatool"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -101,8 +101,8 @@ type Lingo struct {
 	releases  *release.Service
 	assistant *assistant.Service
 	knowledge *knowledge.Service
-	data      *datatool.Service // 业务数据工具（REQ-008）
-	embedKick chan struct{}     // 知识条目新建 / 编辑后提醒生成向量
+	data      *connector.Service // 业务数据工具（REQ-008）
+	embedKick chan struct{}      // 知识条目新建 / 编辑后提醒生成向量
 	tmpls     *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
