@@ -166,7 +166,7 @@ const (
 // 不写入会话、知识库、审计与日志。
 //
 // 注册校验（New 时）：Name 只含字母、数字、下划线且不超过 64 个字符；Mode 为 ToolRead；Scope 非空；InputSchema 为
-// JSON 对象；Call 非空；Timeout 不为负且不超过 60 秒。不满足的工具被忽略并记 Warn 日志（New 不因此失败）；与内置 MCP
+// JSON 对象；Call 非空；Timeout 不为负且不超过 60 秒；Scope 不含空白或控制字符（含首尾空格）。不满足的工具被忽略并记 Warn 日志（New 不因此失败）；与内置 MCP
 // 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖已有工具。
 type Tool struct {
 	Name        string
@@ -177,11 +177,13 @@ type Tool struct {
 	Scope       string
 	Mode        ToolMode
 	// Sensitive 是结果中需脱敏的字段路径，如 "phone"、"customer.phone"、"items.*.price"，匹配到的值替换为 "***"；
-	// 同样作用于审计中的参数摘要。
+	// 字段名不区分大小写（"phone" 也匹配未写 json tag 时编码出的 "Phone"），同样作用于审计中的参数摘要。
 	Sensitive []string
 	// Timeout 是调用时限：0 表示默认 10 秒，最多 60 秒（为负或超过 60 秒时忽略该工具）。
 	Timeout time.Duration
-	// Call 以 u 的身份查询数据。返回 ToolOutput（或 *ToolOutput）时可在 Project 中声明所查数据的实际归属项目，
+	// Call 以 u 的身份查询数据。查无数据时返回（可包装）ErrNotFound，业务侧按 u 拒绝时返回 ErrForbidden：两者是正常的
+	// 业务结果，记入审计（拒绝）但不计入熔断，调用方得到与工具不存在相同的结果（不区分无数据与无权）；其他错误视为
+	// 技术故障，计入熔断。返回 ToolOutput（或 *ToolOutput）时可在 Project 中声明所查数据的实际归属项目，
 	// 审计记录据此归属，负责该项目的 reviewer / admin 可以看到；声明的项目未配置或 u 无权访问时结果被丢弃，
 	// 调用方得到与工具不存在相同的结果。返回其他值时视为数据本身，记录归属为空（只有调用人本人可见）。
 	Call func(ctx context.Context, u User, input json.RawMessage) (any, error)

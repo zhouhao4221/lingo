@@ -61,13 +61,14 @@ func (l *Lingo) dataToolsNote() string {
 	return "\n另有接入方注册的业务数据工具（只读），以调用者身份查询其有权访问的业务数据；结果已脱敏，可能被截断（truncated 为 true）。"
 }
 
-// dataMCPTools 把业务数据工具暴露为 MCP 工具：只对 User.Scopes 覆盖的调用者可见；无权调用、不存在与结果归属
-// 不可访问时都按工具不存在响应。
+// dataMCPTools 把业务数据工具暴露为 MCP 工具：tools/list 只对 User.Scopes 覆盖的调用者列出；无权调用、结果归属不可
+// 访问、业务侧拒绝或无数据时都按工具不存在响应，并与 CallTool 一样写审计。
 func (l *Lingo) dataMCPTools() []mcp.Tool {
 	var out []mcp.Tool
 	for _, info := range l.data.All() {
 		name := info.Name
 		out = append(out, mcp.Tool{Name: name, Description: info.Description, InputSchema: info.InputSchema,
+			CallHidden: true, // 无权调用也进入调用核心写拒绝审计，对外仍与不存在相同
 			Visible: func(user any) bool {
 				u, _ := user.(User)
 				c, err := dataCaller(u)

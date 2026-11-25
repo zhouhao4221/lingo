@@ -46,8 +46,11 @@ func ExampleTool() {
 				return nil, err
 			}
 			o, ok := orders[p.OrderID]
-			if !ok || (o.OwnerID != u.ID && !canViewAllOrders(u)) { // 二次鉴权
-				return nil, errors.New("order not visible")
+			if !ok {
+				return nil, lingo.ErrNotFound // 查无数据：正常业务结果，不计入熔断
+			}
+			if o.OwnerID != u.ID && !canViewAllOrders(u) { // 二次鉴权
+				return nil, lingo.ErrForbidden // 业务拒绝：正常业务结果，不计入熔断
 			}
 			return lingo.ToolOutput{Project: o.ProjectKey, Data: o}, nil // 声明归属项目，供负责该项目的 reviewer 审计
 		},

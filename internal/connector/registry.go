@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // 限制。
@@ -28,6 +29,7 @@ const (
 	RejectBuiltin     = "builtin_name"   // 与内置 MCP 工具同名（不区分大小写）
 	RejectMode        = "write_mode"
 	RejectEmptyScope  = "empty_scope"
+	RejectScope       = "invalid_scope" // 含空白或控制字符（如首尾空格），按原值匹配时无人能调用
 	RejectSchema      = "invalid_schema"
 	RejectNilCall     = "nil_call"
 	RejectTimeout     = "invalid_timeout"
@@ -151,6 +153,8 @@ func register(specs []Spec, builtin []string) ([]*tool, []Rejection) {
 			reason = RejectMode
 		case strings.TrimSpace(sp.Scope) == "":
 			reason = RejectEmptyScope
+		case strings.IndexFunc(sp.Scope, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0:
+			reason = RejectScope
 		case sp.Call == nil:
 			reason = RejectNilCall
 		case sp.Timeout < 0 || sp.Timeout > MaxTimeout:

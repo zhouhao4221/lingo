@@ -210,11 +210,14 @@ orderTool := lingo.Tool{
 			return nil, err
 		}
 		o, err := orders.Get(ctx, p.OrderID) // 响应 ctx 取消
-		if err != nil {
-			return nil, errors.New("order lookup failed") // 错误中不要带业务数据
+		switch {
+		case errors.Is(err, orders.ErrNotExist):
+			return nil, lingo.ErrNotFound // 查无数据：正常业务结果，不计入熔断
+		case err != nil:
+			return nil, errors.New("order lookup failed") // 技术故障；错误中不要带业务数据
 		}
 		if o.OwnerID != u.ID && !canViewAllOrders(u) { // 必须按传入用户二次鉴权
-			return nil, errors.New("order not visible")
+			return nil, lingo.ErrForbidden // 业务拒绝：正常业务结果，不计入熔断
 		}
 		// 可选：声明数据的实际归属项目，负责该项目的 reviewer / admin 可在审计中看到这次调用
 		return lingo.ToolOutput{Project: o.ProjectKey, Data: o}, nil
@@ -234,11 +237,11 @@ l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leave
 ```
 
 - **权限**：灵工只做第一道防线——`User.Scopes` 含 `Tool.Scope` 才可见、可调用（问答中模型也看不到无权限的工具）。**`Call` 必须按传入的 `lingo.User` 再次鉴权与过滤数据**，灵工不使用超级账号。无权调用、工具不存在、结果声明的归属项目调用人无权访问时，三者返回相同的 `ErrNotFound`（MCP 为 `unknown tool`）。
-- **注册校验**：`Name` 只含字母、数字、下划线（不超过 64 个字符），`Mode` 为 `ToolRead`，`Scope` 非空，`InputSchema` 为 JSON 对象，`Call` 非空，`Timeout` 不为负且不超过 60 秒。不满足的工具**被忽略并记 Warn 日志**（`New` 不会因此失败）；与内置 MCP 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖已有工具。升级后请检查启动日志中的 `Config.Tools entry ignored`。
-- **参数**：只校验 `required` 与 `properties` 的基本类型；不合法时问答按参数的 `description` 追问，MCP / Go 返回参数错误（只含参数名与期望类型）。
-- **结果**：按 `Sensitive` 路径（`phone`、`customer.phone`、`items.*.price`）脱敏，超过 8KB 截断（`truncated`）；**原始结果不写入会话、知识库、审计与日志**，回答正文照常作为会话消息保存。业务数据类回答被标为有帮助时不进入知识库候选。
-- **超时、并发与熔断**：默认 10 秒；超时后仍未返回的 `Call` 继续占用并发名额（每个工具 8 个、合计 64 个），名额满时返回 `ErrToolUnavailable`；同一工具 5 分钟内连续失败 5 次暂停 1 分钟（只在当前实例内）；暂停前已在途、之后才返回的调用不会关闭或重开熔断。时限到达后才取到的结果按超时丢弃。结果编码或脱敏失败按失败计入，记录不含错误原文。
-- **审计**：每次调用先写一条待完成记录再执行（写不进就不调用），记录人员、工具、入口、参数摘要（只含 `InputSchema` 声明的参数：参数名与截断、脱敏后的值；拒绝记录只有参数名；未声明的字段不记录）、状态与原因、耗时，不含结果与错误原文，保留 180 天。`ListDataRequests`（REST `GET /data-requests`）：每个人都能看到本人的记录；reviewer / admin 另可看到归属项目在其 `User.Projects` 中**明确列出**的记录——`User.Projects` 为空**不**授予跨用户审计，未声明归属的记录只有本人可见。
+- **注册校验**：`Name` 只含字母、数字、下划线（不超过 64 个字符），`Mode` 为 `ToolRead`，`Scope` 非空且不含空白或控制字符（含首尾空格），`InputSchema` 为 JSON 对象，`Call` 非空，`Timeout` 不为负且不超过 60 秒。不满足的工具**被忽略并记 Warn 日志**（`New` 不会因此失败）；与内置 MCP 工具或先注册的工具同名（不区分大小写）时忽略后者，不覆盖已有工具。升级后请检查启动日志中的 `Config.Tools entry ignored`。
+- **参数**：只校验 `required` 与 `properties` 的基本类型（`integer` 接受 `3.0` 这类没有小数部分的数），不做类型转换；缺少参数时问答按参数的 `description` 请用户补充，类型不符时明确提示格式不对；MCP / Go 返回参数错误（只含参数名与期望类型）。
+- **结果**：按 `Sensitive` 路径（`phone`、`customer.phone`、`items.*.price`，字段名不区分大小写）脱敏，超过 8KB 截断（`truncated`）；**原始结果不写入会话、知识库、审计与日志**，回答正文照常作为会话消息保存。业务数据类回答被标为有帮助时不进入知识库候选。
+- **超时、并发与熔断**：默认 10 秒；超时后仍未返回的 `Call` 继续占用并发名额（每个工具 8 个、合计 64 个），名额满时返回 `ErrToolUnavailable`；**`Call` 返回 `lingo.ErrNotFound`（查无数据）或 `lingo.ErrForbidden`（业务侧拒绝）是正常业务结果**：记入审计、不计入熔断，调用方得到与工具不存在相同的结果；其他错误视为技术故障，计入熔断；同一工具 5 分钟内连续失败 5 次暂停 1 分钟（只在当前实例内）；暂停前已在途、之后才返回的调用不会关闭或重开熔断。时限到达后才取到的结果按超时丢弃。结果编码或脱敏失败按失败计入，记录不含错误原文。
+- **审计**：每次调用（含 MCP 上的无权调用）先写一条记录再执行（写不进就不调用），记录人员、工具、入口、参数摘要（只含 `InputSchema` 声明的参数：参数名与截断、脱敏后的值；拒绝记录只有参数名；未声明的字段不记录）、状态与原因、耗时，不含结果与错误原文，保留 180 天（按数据库时钟清理）。`ListDataRequests`（REST `GET /data-requests`）：每个人都能看到本人的记录；reviewer / admin 另可看到归属项目在其 `User.Projects` 中**明确列出**的记录——`User.Projects` 为空**不**授予跨用户审计，未声明归属的记录只有本人可见。
 - **合规提醒**：业务数据会发给你配置的模型组织回答，请按数据合规要求选择模型服务，并用 `Sensitive` 去掉不应外发的字段。工具结果被当作数据而不是指令，但仍应避免让工具返回不可信的长文本。
 - 错误：`ErrToolUnavailable`（REST 503 `tool_unavailable`）、`ErrToolFailed`（超时、`Call` 出错或 panic；REST 502 `tool_failed`），都不含错误原文。
 - 需要迁移 `0007_data_requests.sql`；即使没有注册工具，`Run` 也会把租约过期的待完成记录标为中断、清理 180 天前的记录。只读，`write` 类工具与转工单时附带业务数据留待后续版本。

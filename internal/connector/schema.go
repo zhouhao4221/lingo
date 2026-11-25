@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
 )
 
 // schema 是 InputSchema 中参与校验的部分：required 与 properties 的基本类型（不是完整的 JSON Schema 校验）。
@@ -95,7 +98,13 @@ func (s *schema) validate(m map[string]any) error {
 			return &InputError{Param: name, Want: "required", Desc: s.props[name].desc}
 		}
 	}
-	for name, p := range s.props {
+	names := make([]string, 0, len(s.props))
+	for name := range s.props {
+		names = append(names, name)
+	}
+	sort.Strings(names) // 多个参数不合法时固定报第一个（按参数名排序）
+	for _, name := range names {
+		p := s.props[name]
 		v, ok := m[name]
 		if !ok || len(p.types) == 0 {
 			continue
@@ -131,8 +140,11 @@ func typeOK(t string, v any) bool {
 		if !ok {
 			return false
 		}
-		_, err := n.Int64()
-		return err == nil
+		if _, err := n.Int64(); err == nil {
+			return true
+		}
+		f, err := strconv.ParseFloat(string(n), 64) // 3.0、1e3 等没有小数部分的数也是整数
+		return err == nil && !math.IsInf(f, 0) && f == math.Trunc(f)
 	case "boolean":
 		_, ok := v.(bool)
 		return ok

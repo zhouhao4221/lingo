@@ -113,9 +113,10 @@ func (s *Store) InterruptDataRequests(ctx context.Context) (int, error) {
 	return int(n), err
 }
 
-// PurgeDataRequests 实现 connector.AuditStore。
-func (s *Store) PurgeDataRequests(ctx context.Context, before time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM lingo_data_requests WHERE created_at < $1", before)
+// PurgeDataRequests 实现 connector.AuditStore：截止时间按数据库时钟计算。
+func (s *Store) PurgeDataRequests(ctx context.Context, retention time.Duration) (int, error) {
+	res, err := s.db.ExecContext(ctx, "DELETE FROM lingo_data_requests WHERE created_at < now() - $1::bigint * interval '1 millisecond'",
+		retention.Milliseconds())
 	if err != nil {
 		return 0, err
 	}

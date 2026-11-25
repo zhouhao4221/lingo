@@ -28,7 +28,7 @@ func parsePaths(ss []string) [][]string {
 }
 
 // mask 把 v（JSON 解码后的值）中匹配路径的值替换为 ***（原地修改并返回）。"*" 匹配对象的任意键或数组的任意元素；
-// 普通路径段遇到数组时对每个元素生效。
+// 普通路径段不区分大小写，遇到数组时对每个元素生效。
 func mask(v any, paths [][]string) any {
 	for _, p := range paths {
 		v = maskPath(v, p)
@@ -46,8 +46,13 @@ func maskPath(v any, path []string) any {
 			for k := range x {
 				x[k] = maskPath(x[k], path[1:])
 			}
-		} else if val, ok := x[path[0]]; ok {
-			x[path[0]] = maskPath(val, path[1:])
+		} else {
+			// 默认安全：字段名不区分大小写匹配（与 Go 的 JSON 解码一致；未写 json tag 的字段编码为 "Phone" 等）
+			for k := range x {
+				if strings.EqualFold(k, path[0]) {
+					x[k] = maskPath(x[k], path[1:])
+				}
+			}
 		}
 	case []any:
 		for i := range x {

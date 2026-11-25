@@ -27,6 +27,9 @@ type Tool struct {
 	Call        func(ctx context.Context, user any, args json.RawMessage) (any, error)
 	// Visible 非空时按调用者过滤：返回假的工具不出现在 tools/list 中，调用时按不存在处理。为空表示对所有人可见。
 	Visible func(user any) bool
+	// CallHidden 为真时 Visible 只过滤 tools/list：看不到的工具被调用时仍交给 Call（由它记审计并返回 ErrUnknownTool，
+	// 对外响应与不存在相同）。
+	CallHidden bool
 }
 
 // ErrUnknownTool 由 Tool.Call 返回，表示按工具不存在响应（不暴露工具或数据是否存在）。
@@ -252,7 +255,7 @@ func (s *Server) dispatch(ctx context.Context, user any, req *request) (any, *rp
 		}
 		unknown := &rpcError{codeInvalidParams, "unknown tool: " + p.Name}
 		t, ok := s.tools[p.Name]
-		if !ok || (t.Visible != nil && !t.Visible(user)) {
+		if !ok || (t.Visible != nil && !t.CallHidden && !t.Visible(user)) {
 			return nil, unknown
 		}
 		if len(p.Arguments) == 0 || string(p.Arguments) == "null" {

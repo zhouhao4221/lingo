@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -535,5 +536,80 @@ func TestDataToolNoToolsIntentFallback(t *testing.T) {
 	_ = db.QueryRowContext(ctx, "SELECT count(*) FROM lingo_data_requests").Scan(&n)
 	if n != 0 {
 		t.Errorf("audit rows without tools = %d", n)
+	}
+}
+
+// PR #50 审查项：MCP 无权调用写审计；业务拒绝 / 无数据保留审计、不计入熔断；参数类型不符的追问。
+func TestDataToolReviewFixes(t *testing.T) {
+	db := testDB(t, true)
+	ctx := context.Background()
+	var outcome error
+	biz := lingo.Tool{Name: "get_ticket_order", Description: "按订单号查询", InputSchema: json.RawMessage(orderSchema),
+		Scope: "order:read", Mode: lingo.ToolRead,
+		Call: func(context.Context, lingo.User, json.RawMessage) (any, error) {
+			if outcome != nil {
+				return nil, outcome
+			}
+			return map[string]string{"status": "ok"}, nil
+		}}
+	m := &toolModel{}
+	l, err := lingo.New(lingo.Config{DB: db, Model: m, Projects: toolProjects, Authenticate: scopedHeaderUser,
+		Tools: []lingo.Tool{orderTool(""), biz}, SkipSelfCheck: true, ReconcileInterval: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1. MCP：无权调用也写拒绝审计，响应与不存在相同
+	h := l.MCPHandler()
+	noScope := map[string]string{"X-User": "mallory", "X-Role": "external"}
+	call := func(name string) string {
+		return strings.ReplaceAll(mcpRaw(t, h, noScope, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+name+`","arguments":{"order_id":"1"}}}`), name, "X")
+	}
+	if hidden, missing := call("get_order"), call("no_such_tool"); hidden != missing {
+		t.Errorf("hidden differs from missing:\n%s\n%s", hidden, missing)
+	}
+	rs, err := l.ListDataRequests(ctx, lingo.User{ID: "mallory", Role: lingo.RoleExternal}, lingo.DataRequestFilter{})
+	if err != nil || len(rs) != 1 || rs[0].Status != "denied" || rs[0].Reason != "forbidden" || rs[0].Channel != "mcp" || rs[0].Args != nil {
+		t.Errorf("mcp denial audit = %+v, %v", rs, err)
+	}
+
+	// 2. 业务拒绝 / 无数据：调用方得到 ErrNotFound，审计保留原因，不计入熔断
+	u := lingo.User{ID: "u1", Role: lingo.RoleExternal, Scopes: []string{"order:read"}}
+	for i := 0; i < 6; i++ {
+		outcome = fmt.Errorf("not visible to this user: %w", lingo.ErrForbidden)
+		if i%2 == 1 {
+			outcome = lingo.ErrNotFound
+		}
+		if _, err := l.CallTool(ctx, u, "get_ticket_order", json.RawMessage(`{"order_id":"1"}`)); !errors.Is(err, lingo.ErrNotFound) ||
+			strings.Contains(err.Error(), "visible") {
+			t.Fatalf("%d: %v", i, err)
+		}
+	}
+	outcome = nil
+	if _, err := l.CallTool(ctx, u, "get_ticket_order", json.RawMessage(`{"order_id":"1"}`)); err != nil {
+		t.Fatalf("business outcomes opened the breaker: %v", err)
+	}
+	rs, _ = l.ListDataRequests(ctx, u, lingo.DataRequestFilter{Status: "denied"})
+	reasons := map[string]int{}
+	for _, r := range rs {
+		reasons[r.Reason]++
+	}
+	if reasons["business_denied"] != 3 || reasons["no_data"] != 3 {
+		t.Errorf("reasons = %v", reasons)
+	}
+
+	// 3. 参数类型不符：明确提示格式不对，而不是要求重新补充
+	c, err := l.CreateConversation(ctx, u, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.intents = []string{`{"intent":"data_query","tool":"get_order","tool_input":{"order_id":1024}}`}
+	m.mu.Unlock()
+	msg, err := l.SendMessage(ctx, u, c.ID, lingo.MessageInput{Content: "订单 1024 到哪了"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg.Content, "格式不对") || strings.Contains(msg.Content, "请补充") {
+		t.Errorf("type mismatch reply = %q", msg.Content)
 	}
 }

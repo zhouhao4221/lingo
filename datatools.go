@@ -143,7 +143,12 @@ func (l *Lingo) newDataTools(builtin []string) *connector.Service {
 		if call := t.Call; call != nil {
 			sp.Call = func(ctx context.Context, c connector.Caller, input json.RawMessage) (connector.Output, error) {
 				v, err := call(ctx, c.User.(User), input)
-				if err != nil {
+				switch {
+				case errors.Is(err, ErrNotFound):
+					return connector.Output{}, connector.ErrNoData // 正常业务结果：不计入熔断；原错误不外传
+				case errors.Is(err, ErrForbidden):
+					return connector.Output{}, connector.ErrDenied
+				case err != nil:
 					return connector.Output{}, err
 				}
 				switch o := v.(type) {

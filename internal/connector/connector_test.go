@@ -53,7 +53,7 @@ func (f *fakeAudit) InterruptDataRequests(context.Context) (int, error) {
 	f.interrupts++
 	return 0, nil
 }
-func (f *fakeAudit) PurgeDataRequests(context.Context, time.Time) (int, error) { return 0, nil }
+func (f *fakeAudit) PurgeDataRequests(context.Context, time.Duration) (int, error) { return 0, nil }
 
 func (f *fakeAudit) last() Record {
 	f.mu.Lock()

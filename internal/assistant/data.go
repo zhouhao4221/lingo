@@ -75,6 +75,7 @@ func (s *Service) queryData(ctx context.Context, tc *turnCtx, in *Intent) (*repl
 	return s.answer(ctx, tc, f, cites, func() string { return textDataFailed })
 }
 
+// needInputText 是参数不合法时的追问：缺少参数时请用户补充；类型不符时明确说明格式不对（不做静默转换）。
 func needInputText(ie *connector.InputError) string {
 	if ie.Param == "" {
 		return "查询需要的信息不完整，请补充后再问一次。"
@@ -83,5 +84,15 @@ func needInputText(ie *connector.InputError) string {
 	if d := strings.TrimSpace(oneLine(ie.Desc)); d != "" {
 		what = textutil.Clip(d, 50) + "（" + ie.Param + "）"
 	}
-	return "查询需要" + what + "，请补充后再问一次。"
+	if ie.Want == "required" {
+		return "查询需要" + what + "，请补充后再问一次。"
+	}
+	want, ok := typeNamesZh[ie.Want]
+	if !ok {
+		want = "正确的格式"
+	}
+	return "查询参数" + what + "的格式不对，应为" + want + "。请换个说法或直接给出该值后再问一次。"
 }
+
+var typeNamesZh = map[string]string{"string": "文本", "number": "数字", "integer": "整数", "boolean": "是或否",
+	"object": "对象", "array": "列表", "null": "空值"}

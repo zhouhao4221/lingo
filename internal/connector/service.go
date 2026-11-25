@@ -20,6 +20,11 @@ var (
 	ErrFailed = errors.New("connector: call failed")
 	// ErrBadQuery 表示审计查询条件不合法。
 	ErrBadQuery = errors.New("connector: invalid query")
+
+	// ErrNoData 与 ErrDenied 由 Call 返回（可包装），表示正常的业务结果而不是技术故障：查无数据、业务侧按调用人拒绝。
+	// 两者都保留审计（拒绝，只记参数名）、不计入熔断，对调用方与工具不存在相同（不区分无数据与无权）。
+	ErrNoData = errors.New("connector: no data")
+	ErrDenied = errors.New("connector: denied by business")
 )
 
 // 入口（Record.Channel）。
@@ -49,6 +54,8 @@ const (
 	ReasonCircuitOpen  = "circuit_open"
 	ReasonOverloaded   = "overloaded"
 	ReasonInterrupted  = "interrupted"
+	ReasonNoData       = "no_data"         // Call 返回 ErrNoData：查无数据
+	ReasonBizDenied    = "business_denied" // Call 返回 ErrDenied：业务侧拒绝
 )
 
 // Record 是一条审计记录，不含结果与错误原文。ArgNames / Args 只含 InputSchema 声明的参数；Args 为 nil 表示不记参数值
@@ -93,7 +100,8 @@ type AuditStore interface {
 	ListDataRequests(ctx context.Context, q Query) ([]Record, error)
 	// InterruptDataRequests 把租约已过期的 pending 记录标为中断（单条语句的条件更新，并发时每条只标一次）。
 	InterruptDataRequests(ctx context.Context) (int, error)
-	PurgeDataRequests(ctx context.Context, before time.Time) (int, error)
+	// PurgeDataRequests 删除创建时间早于数据库当前时间 - retention 的记录。
+	PurgeDataRequests(ctx context.Context, retention time.Duration) (int, error)
 }
 
 // Options 是 Service 的配置。
@@ -217,6 +225,12 @@ func (s *Service) Run(ctx context.Context, c Caller, name string, input json.Raw
 	case reason == ReasonCanceled:
 		t.br.neutral(tk)
 		err = ErrFailed
+	case reason == ReasonNoData || reason == ReasonBizDenied:
+		// 正常业务结果：保留审计（拒绝，只记参数名），不计入熔断，对外与工具不存在相同
+		t.br.neutral(tk)
+		rec.Args = nil
+		s.finish(ctx, rec, StatusDenied, reason, start)
+		return nil, ErrNotFound
 	case reason != "":
 		s.fail(t, tk)
 		err = ErrFailed
@@ -319,6 +333,10 @@ func (s *Service) call(ctx context.Context, t *tool, c Caller, input json.RawMes
 			return Output{}, ReasonPanic
 		case r.err == nil:
 			return r.out, ""
+		case errors.Is(r.err, ErrNoData):
+			return Output{}, ReasonNoData
+		case errors.Is(r.err, ErrDenied):
+			return Output{}, ReasonBizDenied
 		case ctx.Err() != nil:
 			return Output{}, ReasonCanceled
 		case cctx.Err() != nil:
@@ -363,7 +381,7 @@ func (s *Service) Maintain(ctx context.Context) error {
 	if _, err := s.o.Audit.InterruptDataRequests(ctx); err != nil {
 		return fmt.Errorf("interrupt data requests: %s", dbCode(err))
 	}
-	if _, err := s.o.Audit.PurgeDataRequests(ctx, s.o.Now().Add(-Retention)); err != nil {
+	if _, err := s.o.Audit.PurgeDataRequests(ctx, Retention); err != nil {
 		return fmt.Errorf("purge data requests: %s", dbCode(err))
 	}
 	return nil
