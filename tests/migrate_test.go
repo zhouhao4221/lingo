@@ -21,7 +21,7 @@ func TestMigrateFreshAndIdempotent(t *testing.T) {
 		WHERE table_schema = current_schema() AND table_name <> 'lingo_schema_migrations'`).Scan(&n, &unprefixed); err != nil {
 		t.Fatal(err)
 	}
-	if n != 21 || unprefixed != 0 { // 0001 的 13 张 + 0003 知识问答 3 张 + 0004 连接配置 1 张 + 0005 知识库 1 张 + 0006 反馈 / 抽取 / 未答上 3 张
+	if n != 22 || unprefixed != 0 { // 0001 的 13 张 + 0003 知识问答 3 张 + 0004 连接配置 1 张 + 0005 知识库 1 张 + 0006 反馈 / 抽取 / 未答上 3 张 + 0007 业务数据审计 1 张
 		t.Errorf("tables = %d, without prefix = %d", n, unprefixed)
 	}
 	var name, sum string

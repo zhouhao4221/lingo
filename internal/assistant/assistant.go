@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/release"
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -55,6 +56,7 @@ const (
 	IntentClarify       = "clarify"
 	IntentOutOfScope    = "out_of_scope"
 	IntentKnowledgeAsk  = "knowledge_ask" // 使用方法、原因、怎么做等知识类问题（REQ-006）
+	IntentDataQuery     = "data_query"    // 需要调用业务数据工具回答的问题（REQ-008）
 
 	// IntentOtherDecision 是 Brain.Confirm 的第三种结果：用户在说别的事情。
 	IntentOtherDecision = "other"
@@ -73,6 +75,7 @@ const (
 	OutcomeActionExpired   = "action_expired"
 	OutcomeActionFailed    = "action_failed"
 	OutcomeNoAction        = "no_action"
+	OutcomeDataFailed      = "data_failed" // 业务数据查询失败或暂时不可用（REQ-008）
 )
 
 // 限制。
@@ -121,7 +124,34 @@ type Citations struct {
 	Tickets   []TicketRef    `json:"tickets"`
 	Releases  []ReleaseRef   `json:"releases"`
 	Knowledge []KnowledgeRef `json:"knowledge,omitempty"`
+	// Tools 是回答调用的业务数据工具（REQ-008），只记工具名，不保存结果
+	Tools []ToolRef `json:"tools,omitempty"`
 }
+
+// ToolRef 是回答调用的业务数据工具。
+type ToolRef struct {
+	Name string `json:"name"`
+}
+
+// ToolInfo 是交给意图解析的业务数据工具（调用人可调用的，描述已截断）。
+type ToolInfo struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// DataTools 是业务数据工具（REQ-008），由根包适配；调用人由根包放在 ctx 中。Run 返回 connector 的错误
+// （connector.ErrNotFound、*connector.InputError、connector.ErrUnavailable、connector.ErrFailed）。
+type DataTools interface {
+	Visible(ctx context.Context) []ToolInfo
+	Run(ctx context.Context, name string, input json.RawMessage, convID int64) (*connector.Result, error)
+}
+
+// 交给意图解析的工具数量与描述长度上限。
+const (
+	MaxIntentTools = 30
+	toolDescRunes  = 300
+)
 
 // KnowledgeRef 是引用的知识条目；SourceTicketID 只在调用者能查看来源工单时填写。
 type KnowledgeRef struct {
@@ -254,6 +284,8 @@ type Options struct {
 	TicketsByID func(ctx context.Context, ids []int64) ([]*ticket.Ticket, error)
 	// Knowledge 是知识库检索（REQ-006）；为空时知识类问题按超出范围回答。
 	Knowledge Knowledge
+	// DataTools 是业务数据工具（REQ-008）；为空时意图解析看不到工具，行为与未接入时一致。
+	DataTools DataTools
 	// Brain 是模型调用；为空时发送与重试返回 ErrNoModel。
 	Brain Brain
 	// BrainFor 非空时每轮提问开始时调用，取当前的模型（运行时可更换模型），返回 nil 表示未配置；优先于 Brain。
@@ -333,6 +365,8 @@ type IntentInput struct {
 	History   []HistoryItem
 	Question  string
 	NeedTitle bool // 需要同时生成会话标题
+	// Tools 是调用人可调用的业务数据工具（REQ-008）；为空时意图解析的提示词与输入与未接入时完全相同。
+	Tools []ToolInfo
 }
 
 // Intent 是解析出的查询意图。字段已由 Brain 校验（非法枚举丢弃、数量与长度截断）。
@@ -353,6 +387,8 @@ type Intent struct {
 	CommentBody    string
 	Clarify        string
 	Title          string
+	Tool           string          // data_query：工具名（已校验在 IntentInput.Tools 中）
+	ToolInput      json.RawMessage // data_query：参数对象
 }
 
 // TimeSpec 是意图中的时间范围：Preset 或 From / To（YYYY-MM-DD，To 含当天）。

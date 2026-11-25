@@ -56,6 +56,8 @@ type turnCtx struct {
 	history  []HistoryItem
 	question string
 	onDelta  func(string)
+	convID   int64      // 会话 ID（业务数据审计记录用）
+	tools    []ToolInfo // 交给意图解析的业务数据工具（REQ-008）
 }
 
 // ---- 工单 ----
@@ -102,6 +104,8 @@ type facts struct {
 	Releases []factRelease `json:"releases,omitempty"`
 	// Knowledge 是检索到的知识条目（REQ-006），回答中写作 K编号
 	Knowledge []factKnowledge `json:"knowledge,omitempty"`
+	// Data 是业务数据工具的结果（REQ-008）
+	Data *factData `json:"data,omitempty"`
 }
 
 // factKnowledge 是交给模型的知识条目。
@@ -399,7 +403,9 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 	}
 	var gs *groundedStream
 	var onDelta func(string)
-	if tc.onDelta != nil {
+	if tc.onDelta != nil && f.Kind == "data" {
+		onDelta = tc.onDelta
+	} else if tc.onDelta != nil {
 		gs = &groundedStream{ids: ids, kids: kids, checkK: checkK, out: tc.onDelta}
 		onDelta = gs.write
 	}
@@ -407,13 +413,15 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 	if err != nil {
 		return nil, modelError{err}
 	}
-	ok := grounded(out, ids) && (!checkK || groundedKnowledge(out, kids))
+	// 业务数据回答不校验 "#数字"：业务数据中的编号（如订单号）不是工单号
+	ok := f.Kind == "data" || (grounded(out, ids) && (!checkK || groundedKnowledge(out, kids)))
 	if !ok {
 		out = fallback()
 	}
 	r := &reply{content: out, outcome: OutcomeAnswered, cites: cites, fallback: !ok}
 	switch {
 	case gs == nil:
+		r.streamed = onDelta != nil
 	case ok && !gs.bad:
 		gs.flush()
 		r.streamed = true

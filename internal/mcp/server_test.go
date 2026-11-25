@@ -144,3 +144,71 @@ func TestTransportChecks(t *testing.T) {
 		t.Errorf("GET: %d", w.Code)
 	}
 }
+
+func TestVisibleAndUnknownTool(t *testing.T) {
+	s := New(Options{Name: "t", Version: "1",
+		Authenticate: func(r *http.Request) (any, error) { return r.Header.Get("Authorization"), nil },
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Tools: []Tool{
+			{Name: "public", InputSchema: json.RawMessage(`{"type":"object"}`), Call: func(context.Context, any, json.RawMessage) (any, error) { return 1, nil }},
+			{Name: "secret", InputSchema: json.RawMessage(`{"type":"object"}`), Visible: func(u any) bool { return u == "u2" },
+				Call: func(context.Context, any, json.RawMessage) (any, error) { return map[string]any{"ok": true}, nil }},
+			{Name: "hide_result", InputSchema: json.RawMessage(`{"type":"object"}`),
+				Call: func(context.Context, any, json.RawMessage) (any, error) { return nil, ErrUnknownTool }},
+		}})
+	names := func(user string) []string {
+		_, out := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, map[string]string{"Authorization": user})
+		var ns []string
+		for _, x := range out["result"].(map[string]any)["tools"].([]any) {
+			ns = append(ns, x.(map[string]any)["name"].(string))
+		}
+		return ns
+	}
+	if got := strings.Join(names("u1"), ","); got != "public,hide_result" {
+		t.Errorf("u1 tools = %s", got)
+	}
+	if got := strings.Join(names("u2"), ","); got != "public,secret,hide_result" {
+		t.Errorf("u2 tools = %s", got)
+	}
+	call := func(user, name string) string {
+		w, _ := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+name+`"}}`, map[string]string{"Authorization": user})
+		return strings.ReplaceAll(w.Body.String(), name, "X")
+	}
+	missing := call("u1", "nope")
+	if hidden := call("u1", "secret"); hidden != missing {
+		t.Errorf("invisible tool differs from missing:\n%s\n%s", hidden, missing)
+	}
+	if denied := call("u1", "hide_result"); denied != missing {
+		t.Errorf("ErrUnknownTool differs from missing:\n%s\n%s", denied, missing)
+	}
+	if ok := call("u2", "secret"); !strings.Contains(ok, `"ok":true`) {
+		t.Errorf("visible call = %s", ok)
+	}
+}
+
+func TestCallHidden(t *testing.T) {
+	calls := 0
+	s := New(Options{Name: "t", Version: "1",
+		Authenticate: func(r *http.Request) (any, error) { return r.Header.Get("Authorization"), nil },
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Tools: []Tool{{Name: "data", InputSchema: json.RawMessage(`{"type":"object"}`), CallHidden: true,
+			Visible: func(u any) bool { return u == "u2" },
+			Call: func(_ context.Context, u any, _ json.RawMessage) (any, error) {
+				calls++ // 由 Call 自行判断并记审计
+				if u != "u2" {
+					return nil, ErrUnknownTool
+				}
+				return map[string]any{"ok": true}, nil
+			}}}})
+	_, list := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, map[string]string{"Authorization": "u1"})
+	if n := len(list["result"].(map[string]any)["tools"].([]any)); n != 0 {
+		t.Errorf("hidden tool listed: %d", n)
+	}
+	call := func(name string) string {
+		w, _ := post(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+name+`"}}`, map[string]string{"Authorization": "u1"})
+		return strings.ReplaceAll(w.Body.String(), name, "X")
+	}
+	if hidden, missing := call("data"), call("nope"); hidden != missing || calls != 1 {
+		t.Errorf("hidden call: calls=%d\n%s\n%s", calls, hidden, missing)
+	}
+}

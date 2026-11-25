@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zhouhao4221/lingo/internal/assistant"
+	"github.com/zhouhao4221/lingo/internal/connector"
 	"github.com/zhouhao4221/lingo/internal/gitea"
 	"github.com/zhouhao4221/lingo/internal/llm"
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -41,7 +42,9 @@ type Config struct {
 	Projects     []Project // 第一个为默认项目（请求未指定 project 时使用）
 	Authenticate Authenticator
 	Notifier     Notifier // 可空，为空时不回传进展
-	Tools        []Tool
+	// Tools 是业务数据工具（REQ-008，只读）：知识问答、MCP 与 CallTool 以调用人身份调用，规则见 Tool；
+	// 不合格的工具被忽略并记 Warn 日志，New 不因此失败。
+	Tools []Tool
 	// FetchAttachment 读取附件内容（可选）。附件由接入方自己的附件系统保存，灵工只记录引用；配置后转出 Issue 时
 	// 经它读取内容上传为 Gitea 附件（图片在 Issue 中直接显示，单个最多 100 MB）；为空时只把附件地址写进 Issue。
 	// 灵工不会自己请求附件 URL（避免以服务端身份访问用户填写的地址）。
@@ -100,7 +103,8 @@ type Lingo struct {
 	releases  *release.Service
 	assistant *assistant.Service
 	knowledge *knowledge.Service
-	embedKick chan struct{} // 知识条目新建 / 编辑后提醒生成向量
+	data      *connector.Service // 业务数据工具（REQ-008）
+	embedKick chan struct{}      // 知识条目新建 / 编辑后提醒生成向量
 	tmpls     *gitea.TemplateCache
 
 	projectsMu     sync.Mutex
@@ -190,6 +194,7 @@ func New(cfg Config) (*Lingo, error) {
 		Extractor: l.knowledgeExtractor, Tickets: l.knowledgeTicket}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
+	l.data = l.newDataTools(builtinToolNames(l.mcpTools()))
 	if l.assistant, err = l.newAssistant(); err != nil {
 		return nil, err
 	}
@@ -489,6 +494,11 @@ func (l *Lingo) Run(ctx context.Context) error {
 	go func() { // 为知识条目生成向量（REQ-006）
 		defer checked.Done()
 		l.embedKnowledge(ctx)
+	}()
+	checked.Add(1)
+	go func() { // 业务数据调用审计：中断恢复与 180 天清理（REQ-008）；不依赖当前是否注册了工具（移除工具后历史审计仍按期清理）
+		defer checked.Done()
+		l.maintainDataRequests(ctx)
 	}()
 	checked.Add(1)
 	go func() { // 定时检查连接配置；Gitea 连接变化后补跑一次自检（开启自动注册时同步 Webhook 密钥）

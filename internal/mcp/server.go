@@ -17,14 +17,23 @@ import (
 var protocolVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 // Tool 是一个 MCP 工具。Call 返回的结果编码为 JSON 文本（同时作为 structuredContent）；
-// 返回错误时作为工具执行错误（isError=true）回给客户端，错误信息由 Options.ErrorText 生成。
+// 返回错误时作为工具执行错误（isError=true）回给客户端，错误信息由 Options.ErrorText 生成；返回 ErrUnknownTool 时
+// 按工具不存在处理（与调用不存在的工具响应相同）。
 type Tool struct {
 	Name        string
 	Title       string
 	Description string
 	InputSchema json.RawMessage // JSON Schema（type: object）
 	Call        func(ctx context.Context, user any, args json.RawMessage) (any, error)
+	// Visible 非空时按调用者过滤：返回假的工具不出现在 tools/list 中，调用时按不存在处理。为空表示对所有人可见。
+	Visible func(user any) bool
+	// CallHidden 为真时 Visible 只过滤 tools/list：看不到的工具被调用时仍交给 Call（由它记审计并返回 ErrUnknownTool，
+	// 对外响应与不存在相同）。
+	CallHidden bool
 }
+
+// ErrUnknownTool 由 Tool.Call 返回，表示按工具不存在响应（不暴露工具或数据是否存在）。
+var ErrUnknownTool = errors.New("mcp: unknown tool")
 
 // Options 是 Server 配置。mcp 不依赖根包：身份以 any 传递。
 type Options struct {
@@ -226,6 +235,9 @@ func (s *Server) dispatch(ctx context.Context, user any, req *request) (any, *rp
 	case "tools/list":
 		list := make([]map[string]any, 0, len(s.o.Tools))
 		for _, t := range s.o.Tools {
+			if t.Visible != nil && !t.Visible(user) {
+				continue
+			}
 			m := map[string]any{"name": t.Name, "description": t.Description, "inputSchema": t.InputSchema}
 			if t.Title != "" {
 				m["title"] = t.Title
@@ -241,18 +253,24 @@ func (s *Server) dispatch(ctx context.Context, user any, req *request) (any, *rp
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, &rpcError{codeInvalidParams, "invalid params"}
 		}
+		unknown := &rpcError{codeInvalidParams, "unknown tool: " + p.Name}
 		t, ok := s.tools[p.Name]
-		if !ok {
-			return nil, &rpcError{codeInvalidParams, "unknown tool: " + p.Name}
+		if !ok || (t.Visible != nil && !t.CallHidden && !t.Visible(user)) {
+			return nil, unknown
 		}
 		if len(p.Arguments) == 0 || string(p.Arguments) == "null" {
 			p.Arguments = json.RawMessage("{}")
 		}
-		return s.call(ctx, user, t, p.Arguments), nil
+		res := s.call(ctx, user, t, p.Arguments)
+		if res == nil {
+			return nil, unknown
+		}
+		return res, nil
 	}
 	return nil, &rpcError{codeMethodNotFound, "method not found: " + req.Method}
 }
 
+// call 执行工具；返回 nil 表示按工具不存在响应。
 func (s *Server) call(ctx context.Context, user any, t Tool, args json.RawMessage) (res map[string]any) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -261,6 +279,9 @@ func (s *Server) call(ctx context.Context, user any, t Tool, args json.RawMessag
 		}
 	}()
 	out, err := t.Call(ctx, user, args)
+	if errors.Is(err, ErrUnknownTool) {
+		return nil
+	}
 	if err != nil {
 		var ae *ArgError
 		if errors.As(err, &ae) {
