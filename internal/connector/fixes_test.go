@@ -170,3 +170,56 @@ func TestTimeoutBoundary(t *testing.T) {
 		t.Error("timeout just over 60s accepted")
 	}
 }
+
+// 正常状态下的并发调用：普通成功只清零计数、不换代，同代在途调用随后的失败照常计入。
+func TestBreakerClosedConcurrentCalls(t *testing.T) {
+	var b breaker
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	a, _ := b.allow(now)
+	c, _ := b.allow(now) // 与 a 同时在途
+	b.success(a)
+	if b.failure(c, now) || b.fails != 1 {
+		t.Fatalf("failure after a concurrent success not counted: fails=%d", b.fails)
+	}
+	for i := 0; i < failThreshold-2; i++ {
+		tk, _ := b.allow(now)
+		if b.failure(tk, now) {
+			t.Fatalf("opened early at %d", i)
+		}
+	}
+	// 第 5 次连续失败来自更早开始、仍在途的同代调用：照常计入并暂停
+	if !b.failure(c, now) {
+		t.Fatalf("5th consecutive failure did not open: fails=%d", b.fails)
+	}
+
+	// 成功会打断连续失败：4 次失败 + 1 次成功 + 4 次失败不暂停
+	var b2 breaker
+	for i := 0; i < 4; i++ {
+		tk, _ := b2.allow(now)
+		b2.failure(tk, now)
+	}
+	ok, _ := b2.allow(now)
+	b2.success(ok)
+	for i := 0; i < 4; i++ {
+		tk, _ := b2.allow(now)
+		if b2.failure(tk, now) {
+			t.Fatal("success did not reset the consecutive count")
+		}
+	}
+	if gen := b2.gen; gen != 0 {
+		t.Errorf("closed-state success changed generation: %d", gen)
+	}
+
+	// 恢复正常后换代：恢复前开始的调用不再计入新一代的计数
+	var b3 breaker
+	old, _ := b3.allow(now)
+	for i := 0; i < failThreshold; i++ {
+		tk, _ := b3.allow(now)
+		b3.failure(tk, now)
+	}
+	probe, _ := b3.allow(now.Add(61 * time.Second))
+	b3.success(probe)
+	if b3.failure(old, now.Add(62*time.Second)) || b3.fails != 0 {
+		t.Errorf("pre-recovery call counted after recovery: fails=%d", b3.fails)
+	}
+}

@@ -15,8 +15,9 @@ const (
 // breaker 是单个工具的熔断状态（只在当前实例内存中）：5 分钟内连续失败 5 次后暂停 1 分钟；暂停结束后放行一次试探，
 // 成功恢复、失败再暂停 1 分钟。
 //
-// 每次暂停都会开始新的一代（gen）：调用开始时取得 ticket，结束时只有同一代的结果才计入。暂停前就已在途的调用
-// （包括超时后仍未退出的）晚到的成功或失败不会关闭、重开熔断，也不会干扰试探的结果。
+// 代次（gen）只在状态切换时递增：正常 → 暂停、试探失败 → 再暂停、试探成功 → 恢复正常。调用开始时取得 ticket，
+// 结束时只有同一代的结果才计入：暂停前就已在途的调用（包括超时后仍未退出的）晚到的成功或失败不会关闭、重开熔断，
+// 也不会干扰试探的结果。正常状态下的普通成功只清零连续失败计数、不换代，同代在途调用之后的失败照常计入。
 type breaker struct {
 	mu        sync.Mutex
 	gen       uint64
@@ -52,11 +53,15 @@ func (b *breaker) success(t ticket) {
 	if t.gen != b.gen {
 		return // 上一代的调用：不计入
 	}
-	if !b.openUntil.IsZero() && !t.probe {
+	if b.openUntil.IsZero() {
+		b.fails = 0 // 正常状态：清零连续失败，不换代
+		return
+	}
+	if !t.probe {
 		return // 试探阶段只认试探调用的结果
 	}
 	b.fails, b.openUntil, b.probing = 0, time.Time{}, false
-	b.gen++
+	b.gen++ // 试探成功恢复正常：换代，暂停期间遗留的调用不再计入
 }
 
 // failure 记一次失败，返回是否因此暂停。
