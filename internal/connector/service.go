@@ -43,19 +43,26 @@ const (
 	StatusUnavailable = "unavailable"
 	StatusInterrupted = "interrupted"
 
-	ReasonNotFound     = "not_found"
-	ReasonForbidden    = "forbidden" // 无工具权限，或结果声明的归属项目不可访问
-	ReasonInvalidInput = "invalid_input"
-	ReasonTimeout      = "timeout"
-	ReasonCallError    = "call_error"
-	ReasonPanic        = "panic"
-	ReasonEncode       = "encode_error"
-	ReasonCanceled     = "canceled"
-	ReasonCircuitOpen  = "circuit_open"
-	ReasonOverloaded   = "overloaded"
-	ReasonInterrupted  = "interrupted"
-	ReasonNoData       = "no_data"         // Call 返回 ErrNoData：查无数据
-	ReasonBizDenied    = "business_denied" // Call 返回 ErrDenied：业务侧拒绝
+	// 拒绝（StatusDenied，只记参数名，不计入熔断，对外与工具不存在相同或为参数错误）
+	ReasonNotFound     = "not_found"       // 工具不存在（不记参数）
+	ReasonForbidden    = "forbidden"       // 调用人 Scopes 不含工具的 Scope，或结果声明的归属项目未配置 / 不可访问（归属为空）
+	ReasonInvalidInput = "invalid_input"   // 输入不是完整的 JSON 对象，或缺少必填参数、类型不符；未调用 Call
+	ReasonNoData       = "no_data"         // Call 返回 ErrNoData（接入方的 lingo.ErrNotFound）：查无数据
+	ReasonBizDenied    = "business_denied" // Call 返回 ErrDenied（接入方的 lingo.ErrForbidden）：业务侧拒绝
+
+	// 技术故障（StatusError，计入熔断；canceled 除外）
+	ReasonTimeout   = "timeout"      // 超过 Tool.Timeout；时限到达后才取到的结果同样按超时丢弃
+	ReasonCallError = "call_error"   // Call 返回其他错误（原文不记录）
+	ReasonPanic     = "panic"        // Call panic（内容不记录）
+	ReasonEncode    = "encode_error" // 结果无法编码或脱敏（含 MarshalJSON panic，内容不记录）
+	ReasonCanceled  = "canceled"     // 调用方的 ctx 被取消或到期：不计入熔断
+
+	// 暂时不可用（StatusUnavailable，未调用 Call，不计入熔断）
+	ReasonCircuitOpen = "circuit_open" // 熔断暂停中
+	ReasonOverloaded  = "overloaded"   // 在途调用已满（每个工具 8 个、合计 64 个）
+
+	// 中断（StatusInterrupted）：待完成记录的租约过期仍未结束（如进程退出），由 Maintain 标记
+	ReasonInterrupted = "interrupted"
 )
 
 // Record 是一条审计记录，不含结果与错误原文。ArgNames / Args 只含 InputSchema 声明的参数；Args 为 nil 表示不记参数值

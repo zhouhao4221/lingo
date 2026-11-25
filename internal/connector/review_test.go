@@ -84,12 +84,13 @@ func TestIntegerAndErrorOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, in := range []string{`{"a":3}`, `{"a":3.0}`, `{"a":1e3}`, `{"a":-2.00}`} {
+	// integer 与 Go 标准整型解码一致（契约见 TestIntegerMatchesGoDecoding）：3.0、1e3 不再接受
+	for _, in := range []string{`{"a":3}`, `{"a":-2}`, `{"a":0}`} {
 		if err := sc.validate(decodeObject(json.RawMessage(in))); err != nil {
 			t.Errorf("%s rejected: %v", in, err)
 		}
 	}
-	for _, in := range []string{`{"a":3.5}`, `{"a":"3"}`, `{"a":true}`} {
+	for _, in := range []string{`{"a":3.5}`, `{"a":"3"}`, `{"a":true}`, `{"a":3.0}`, `{"a":1e3}`} {
 		if err := sc.validate(decodeObject(json.RawMessage(in))); err == nil {
 			t.Errorf("%s accepted", in)
 		}

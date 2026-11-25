@@ -171,8 +171,9 @@ const (
 type Tool struct {
 	Name        string
 	Description string
-	// InputSchema 是参数的 JSON Schema（type: object）。灵工只校验 required 与 properties 的基本类型
-	// （string / number / integer / boolean / object / array）；description 会出现在参数缺失时的追问中。
+	// InputSchema 是参数的 JSON Schema（type: object）。调用输入必须整体是一个完整的 JSON 对象；灵工只校验 required 与
+	// properties 的基本类型（string / number / integer / boolean / object / array），integer 与 encoding/json 解码到
+	// int64 的规则一致（3.0、1e3 不接受）；description 会出现在参数缺失时的追问中。校验通过的输入原样交给 Call。
 	InputSchema json.RawMessage
 	Scope       string
 	Mode        ToolMode

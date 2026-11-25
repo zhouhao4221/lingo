@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
+	"io"
 	"sort"
-	"strconv"
 )
 
 // schema 是 InputSchema 中参与校验的部分：required 与 properties 的基本类型（不是完整的 JSON Schema 校验）。
@@ -77,12 +76,21 @@ func normalize(input json.RawMessage) json.RawMessage {
 	return input
 }
 
-// decodeObject 把输入解码为对象（数字保留为 json.Number）；不是对象时返回 nil。
+// decodeObject 把输入解码为对象（数字保留为 json.Number）。输入必须整体是一个完整、合法的 JSON 对象：不合法、
+// 不是对象、或对象之后还有其他内容（如第二个值）时返回 nil，按参数不合法处理，不调用 Call——
+// 交给 Call 的原始输入与校验过的内容完全一致，接入方按标准 json.Unmarshal 解码不会因此失败。
 func decodeObject(input json.RawMessage) map[string]any {
-	d := json.NewDecoder(bytes.NewReader(normalize(input)))
+	raw := normalize(input)
+	if !json.Valid(raw) {
+		return nil
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	var m map[string]any
 	if err := d.Decode(&m); err != nil || m == nil {
+		return nil
+	}
+	if _, err := d.Token(); err != io.EOF {
 		return nil
 	}
 	return m
@@ -140,11 +148,10 @@ func typeOK(t string, v any) bool {
 		if !ok {
 			return false
 		}
-		if _, err := n.Int64(); err == nil {
-			return true
-		}
-		f, err := strconv.ParseFloat(string(n), 64) // 3.0、1e3 等没有小数部分的数也是整数
-		return err == nil && !math.IsInf(f, 0) && f == math.Trunc(f)
+		// 与 Go 标准库把 JSON 数字解码为整型（int / int64）的规则一致：只接受十进制整数写法且在 int64 范围内；
+		// 3.0、1e3 这类写法会让接入方的 json.Unmarshal 失败，因此在这里按参数不合法拒绝，不做转换。
+		_, err := n.Int64()
+		return err == nil
 	case "boolean":
 		_, ok := v.(bool)
 		return ok

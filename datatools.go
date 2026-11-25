@@ -58,8 +58,13 @@ type DataRequest struct {
 	// ArgNames 是参数名；Args 是参数名到截断（32 字）、脱敏后的值，拒绝记录没有 Args。
 	ArgNames []string          `json:"arg_names"`
 	Args     map[string]string `json:"args,omitempty"`
-	// Status 是 pending | ok | denied | error | unavailable | interrupted；Reason 是原因代码，如 not_found、forbidden、
-	// invalid_input、timeout、call_error、panic、canceled、circuit_open、overloaded、interrupted。
+	// Status 与 Reason（原因代码）：
+	//   - pending：调用中（Reason 为空）；ok：成功（Reason 为空）
+	//   - denied：not_found（工具不存在）、forbidden（无工具权限或结果归属项目不可访问）、invalid_input（输入不是完整的
+	//     JSON 对象或参数不合法）、no_data（Call 返回 ErrNotFound）、business_denied（Call 返回 ErrForbidden）
+	//   - error：timeout、call_error、panic、encode_error（结果无法编码或脱敏）、canceled（调用方取消）
+	//   - unavailable：circuit_open（熔断中）、overloaded（在途调用已满）
+	//   - interrupted：interrupted（待完成记录的租约过期仍未结束，如进程退出）
 	Status     string     `json:"status"`
 	Reason     string     `json:"reason,omitempty"`
 	DurationMS int64      `json:"duration_ms"`

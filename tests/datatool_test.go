@@ -597,6 +597,33 @@ func TestDataToolReviewFixes(t *testing.T) {
 		t.Errorf("reasons = %v", reasons)
 	}
 
+	// 2b. 输入不是完整的 JSON 对象（对象后还有内容）：参数错误，不调用 Call、不计入熔断
+	calledBefore := 0
+	rsBefore, _ := l.ListDataRequests(ctx, u, lingo.DataRequestFilter{Status: "ok"})
+	calledBefore = len(rsBefore)
+	for i := 0; i < 6; i++ {
+		if _, err := l.CallTool(ctx, u, "get_ticket_order", json.RawMessage(`{"order_id":"1"} extra`)); !errors.Is(err, lingo.ErrInvalidInput) {
+			t.Fatalf("trailing input: %v", err)
+		}
+	}
+	if _, err := l.CallTool(ctx, u, "get_ticket_order", json.RawMessage(`{"order_id":"1"}`)); err != nil {
+		t.Fatalf("malformed input affected the breaker: %v", err)
+	}
+	rsAfter, _ := l.ListDataRequests(ctx, u, lingo.DataRequestFilter{Status: "ok"})
+	if len(rsAfter) != calledBefore+1 {
+		t.Errorf("ok records = %d, want %d", len(rsAfter), calledBefore+1)
+	}
+	invalid, _ := l.ListDataRequests(ctx, u, lingo.DataRequestFilter{Status: "denied"})
+	n := 0
+	for _, r := range invalid {
+		if r.Reason == "invalid_input" {
+			n++
+		}
+	}
+	if n != 6 {
+		t.Errorf("invalid_input records = %d", n)
+	}
+
 	// 3. 参数类型不符：明确提示格式不对，而不是要求重新补充
 	c, err := l.CreateConversation(ctx, u, "")
 	if err != nil {
