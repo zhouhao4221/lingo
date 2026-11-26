@@ -186,7 +186,9 @@ func (l *Lingo) ListVisibleTickets(ctx context.Context, u User, f VisibleTicketF
 // 条件不合法（类型、状态、时间字段、仓库格式、关键词过多或过长、提交人姓名过长、排序或游标不合法）时返回 ErrInvalidInput。
 //
 // Sort 为 TicketSortTriageSince 时只含当前待确认的工单，按实际进入待确认的时间（triage_since）从早到晚、同一时间按 ID
-// 从小到大，游标为 (triage_since, id)，用 Cursor / NextCursor 翻页；默认排序与 BeforeID / NextBefore 不变（REQ-010 增补，待办 #789）。
+// 从小到大，游标为 (triage_since, id)，用 Cursor / NextCursor 翻页：无重复，翻页开始前已提交且仍在待确认的不会遗漏，翻页期间
+// 新进入的通常排在末尾但不保证出现在本轮翻页里（triage_since 取应用时钟，并发提交或多实例时钟偏差时可能落在已翻过的位置）；
+// 默认排序与 BeforeID / NextBefore 不变（REQ-010 增补，待办 #789）。
 func (l *Lingo) ListTickets(ctx context.Context, u User, f TicketListFilter) (TicketPage, error) {
 	q := ticket.SearchQuery{Repo: f.Repo, Type: string(f.Type), Statuses: f.Statuses, Keywords: strings.Fields(f.Keyword),
 		TimeField: f.TimeField, From: f.From, To: f.To, BeforeID: f.BeforeID, Limit: f.Limit,

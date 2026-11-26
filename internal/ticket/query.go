@@ -260,14 +260,20 @@ func TriageCursor(t *Ticket) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(t.TriageSince.UnixMicro(), 10) + ":" + strconv.FormatInt(t.ID, 10)))
 }
 
-// ParseTriageCursor 解析 TriageCursor 的结果；格式不对时返回 ErrInvalid。
+// 游标时间的合法范围（0001-01-01 至 9999-12-31，UTC），超出即视为伪造或损坏的游标。
+var (
+	minCursorTime = time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC)
+	maxCursorTime = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// ParseTriageCursor 解析 TriageCursor 的结果；格式不对或时间超出 0001–9999 年时返回 ErrInvalid。
 func ParseTriageCursor(s string) (time.Time, int64, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err == nil {
 		if a, b, ok := strings.Cut(string(raw), ":"); ok {
 			us, err1 := strconv.ParseInt(a, 10, 64)
 			id, err2 := strconv.ParseInt(b, 10, 64)
-			if err1 == nil && err2 == nil && id > 0 {
+			if err1 == nil && err2 == nil && id > 0 && us >= minCursorTime.UnixMicro() && us < maxCursorTime.UnixMicro() {
 				return time.UnixMicro(us), id, nil
 			}
 		}

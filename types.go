@@ -332,6 +332,8 @@ type TicketListFilter struct {
 	// 翻页（不能与 BeforeID 同用）。
 	Sort string
 	// Cursor 是 TicketSortTriageSince 排序的游标：上一页的 NextCursor（首页为空）；不透明字符串，不要自行构造。
+	// 翻页无重复；翻页开始前已提交且仍在待确认的工单不会遗漏；翻页期间新进入的通常排在末尾，但不保证出现在本轮翻页里
+	// （从首页重新加载可见）。
 	Cursor string
 }
 

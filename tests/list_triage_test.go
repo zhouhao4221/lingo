@@ -60,6 +60,53 @@ func collectTriage(t *testing.T, l *lingo.Lingo, u lingo.User, f lingo.TicketLis
 	}
 }
 
+// 评审第 1 轮：走真实生命周期——CreateTicket 进入待确认后出现在 sort=triage_since 中；Answer / Reject / Merge / Forward 离开后
+// 不再出现、Total 同步减少、TriageSince 已清空。
+func TestListTicketsTriageLifecycle(t *testing.T) {
+	l, _, _ := newTicketLingo(t, &giteaServer{templates: "[]"}, nil, nil) // 不自动转出：新工单进入待确认
+	ctx := context.Background()
+	create := func(content string) lingo.Ticket {
+		t.Helper()
+		tk, err := l.CreateTicket(ctx, alice, lingo.TicketInput{Type: lingo.TicketFeature, Content: content})
+		if err != nil || tk.Status != "pending_triage" || tk.TriageSince == nil {
+			t.Fatalf("create %s: %+v %v", content, tk, err)
+		}
+		return tk
+	}
+	target, ans, rej, mrg, fwd := create("合并目标"), create("待答复"), create("待驳回"), create("待合并"), create("待转出")
+	ids, total, _ := collectTriage(t, l, rita, lingo.TicketListFilter{Limit: 2})
+	if want := []int64{target.ID, ans.ID, rej.ID, mrg.ID, fwd.ID}; !slices.Equal(ids, want) || total != 5 {
+		t.Fatalf("created: %v total %d, want %v", ids, total, want)
+	}
+	if p, _ := l.ListTickets(ctx, rita, lingo.TicketListFilter{Sort: lingo.TicketSortTriageSince, SubmitterName: alice.Name}); p.Total != 5 {
+		t.Errorf("submitter name from CreateTicket: %+v", p)
+	}
+	remaining := []int64{target.ID, ans.ID, rej.ID, mrg.ID, fwd.ID}
+	for _, c := range []struct {
+		name string
+		id   int64
+		do   func() error
+	}{
+		{"answer", ans.ID, func() error { _, err := l.AnswerTicket(ctx, rita, ans.ID, "已支持"); return err }},
+		{"reject", rej.ID, func() error { _, err := l.RejectTicket(ctx, rita, rej.ID, "不做"); return err }},
+		{"merge", mrg.ID, func() error { _, err := l.MergeTicket(ctx, rita, mrg.ID, target.ID, "重复"); return err }},
+		{"forward", fwd.ID, func() error { _, err := l.ForwardTicket(ctx, rita, fwd.ID, lingo.ForwardOptions{}); return err }},
+	} {
+		if err := c.do(); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		remaining = slices.DeleteFunc(remaining, func(id int64) bool { return id == c.id })
+		ids, total, _ := collectTriage(t, l, rita, lingo.TicketListFilter{Limit: 2})
+		if !slices.Equal(ids, remaining) || total != len(remaining) {
+			t.Errorf("after %s: %v total %d, want %v", c.name, ids, total, remaining)
+		}
+		got, err := l.GetTicket(ctx, rita, c.id)
+		if err != nil || got.Status == "pending_triage" || got.TriageSince != nil {
+			t.Errorf("after %s: status %s triage_since %v err %v", c.name, got.Status, got.TriageSince, err)
+		}
+	}
+}
+
 // 待办 #789：待确认时间正序（实际进入待确认的 triage_since，不用提交时间）与提交人姓名筛选；角色边界、组合、游标、默认旧行为。
 func TestListTicketsTriageOrderAndSubmitter(t *testing.T) {
 	l, db, a := newAudienceLingo(t, nopModel{})
@@ -187,6 +234,7 @@ func TestListTicketsTriageOrderAndSubmitter(t *testing.T) {
 		{"before with sort", lingo.TicketListFilter{Sort: lingo.TicketSortTriageSince, BeforeID: p1}},
 		{"cursor without sort", lingo.TicketListFilter{Cursor: "MTox"}},
 		{"bad cursor", lingo.TicketListFilter{Sort: lingo.TicketSortTriageSince, Cursor: "not-a-cursor"}},
+		{"cursor time out of range", lingo.TicketListFilter{Sort: lingo.TicketSortTriageSince, Cursor: "LTkyMjMzNzIwMzY4NTQ3NzU4MDg6MQ"}}, // "-9223372036854775808:1"
 		{"name too long", lingo.TicketListFilter{SubmitterName: strings.Repeat("名", 101)}},
 	} {
 		if p, err := l.ListTickets(ctx, demoRev, c.f); !errors.Is(err, lingo.ErrInvalidInput) || len(p.Tickets) != 0 {
@@ -231,7 +279,7 @@ func TestListTicketsTriageOrderAndSubmitter(t *testing.T) {
 	if code != 200 || obj["total"] != float64(0) {
 		t.Errorf("rest external stranger: %d %v", code, obj)
 	}
-	for _, q := range []string{"?sort=x", "?sort=triage_since&before=1", "?cursor=MTox", "?sort=triage_since&cursor=bad", "?submitter=" + strings.Repeat("a", 101)} {
+	for _, q := range []string{"?sort=x", "?sort=triage_since&before=1", "?cursor=MTox", "?sort=triage_since&cursor=bad", "?sort=triage_since&cursor=LTkyMjMzNzIwMzY4NTQ3NzU4MDg6MQ", "?sort=triage_since&cursor=OTIyMzM3MjAzNjg1NDc3NTgwNzox", "?submitter=" + strings.Repeat("a", 101)} {
 		if code, obj, _ := rc.do("r1", "reviewer", "GET", "/tickets"+q, nil); code != 400 {
 			t.Errorf("rest %s: %d %v", q, code, obj)
 		}

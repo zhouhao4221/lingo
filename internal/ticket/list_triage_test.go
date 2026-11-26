@@ -121,14 +121,17 @@ func TestListTriageRejects(t *testing.T) {
 			t.Errorf("%s: %v", c.name, err)
 		}
 	}
-	// 非 base64、空、"abc:1"、"1:0"（ID 须为正）
-	for _, bad := range []string{"x", "!!", TriageCursor(nil), "YWJjOjE", "MTow"} {
+	// 非 base64、空、"abc:1"、"1:0"（ID 须为正）；时间超出 0001–9999 年：int64 最小 / 最大、10000-01-01、0001-01-01 前 1 微秒
+	for _, bad := range []string{"x", "!!", TriageCursor(nil), "YWJjOjE", "MTow", "LTkyMjMzNzIwMzY4NTQ3NzU4MDg6MQ", "OTIyMzM3MjAzNjg1NDc3NTgwNzox", "MjUzNDAyMzAwODAwMDAwMDAwOjE", "LTYyMTM1NTk2ODAwMDAwMDAxOjE"} {
 		if _, _, err := ParseTriageCursor(bad); !errors.Is(err, ErrInvalid) {
 			t.Errorf("cursor %q: %v", bad, err)
 		}
 	}
 	if _, id, err := ParseTriageCursor("MTox"); err != nil || id != 1 { // "1:1"
 		t.Errorf("valid cursor: %v %v", id, err)
+	}
+	if at, _, err := ParseTriageCursor("LTYyMTM1NTk2ODAwMDAwMDAwOjE"); err != nil || at.UTC().Year() != 1 { // 下界 0001-01-01 本身合法
+		t.Errorf("min cursor: %v %v", at, err)
 	}
 	tm := time.Date(2026, 11, 1, 8, 0, 0, 123456000, time.UTC)
 	if at, id, err := ParseTriageCursor(TriageCursor(&Ticket{ID: 42, TriageSince: &tm})); err != nil || id != 42 || !at.Equal(tm) {

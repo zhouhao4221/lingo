@@ -21,7 +21,8 @@ import (
 // （最多 10 个、每个最多 100 字，各词同时命中标题或正文）；mine / shared 只接受 true|false|1|0；time_field 取 created（默认）|
 // updated | forwarded（不传 from / to 时只含已转出的）；from / to 为 RFC 3339，to 不含；before 为上一页的 next_before（首页省略）；
 // limit 默认 50、最大 200；submitter 按提交人姓名子串匹配（不区分大小写，最多 100 字）；sort=triage_since 时只含当前待确认的，
-// 按实际进入待确认的时间从早到晚、同一时间按 ID 从小到大，翻页用 cursor（上一页的 next_cursor，不能与 before 同用）；
+// 按实际进入待确认的时间从早到晚、同一时间按 ID 从小到大，翻页用 cursor（上一页的 next_cursor，不能与 before 同用；无重复，
+// 翻页开始前已提交的不会遗漏，翻页期间新进入的不保证出现在本轮翻页里）；
 // 其他取值返回 400；
 // 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
