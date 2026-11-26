@@ -197,6 +197,52 @@ func TestResyncTicketComments(t *testing.T) {
 			t.Errorf("ticket %d got %d comments", id, n)
 		}
 	}
+	// 5b. 未写入的情况不计变化、不留痕、可重复：灵工已删除（Gitea 正文不同 / 原本对外在 marked 下改判内部）、乱序旧版本
+	t5 := seedIssueTicket(t, db, "demo", "api", "u1", "open", 20)
+	g.set("demo/api#20", gcomment(501, "dev", "/reply 对外回复", at), gcomment(502, "dev", "内部讨论", at))
+	if r, err := all.ResyncTicketComments(ctx, rita, t5, lingo.CommentResyncOptions{}); err != nil || r.Added != 2 || r.Published != 2 {
+		t.Fatalf("t5 seed: %+v %v", r, err)
+	}
+	if _, err := db.Exec("UPDATE lingo_ticket_comments SET deleted_at = now() WHERE gitea_comment_id IN (501, 502)"); err != nil {
+		t.Fatal(err)
+	}
+	g.set("demo/api#20", gcomment(501, "dev", "/reply 对外回复（已改）", at.Add(time.Hour)), gcomment(502, "dev", "内部讨论（已改）", at.Add(time.Hour)))
+	audit := func() int {
+		return countRows(t, db, "SELECT count(*) FROM lingo_ticket_events WHERE ticket_id = $1", t5)
+	}
+	feed := func() int { return countRows(t, db, "SELECT count(*) FROM lingo_events WHERE ticket_id = $1", t5) }
+	a0, f0 := audit(), feed()
+	for _, c := range []struct {
+		name string
+		l    *lingo.Lingo
+	}{{"deleted, body differs (all)", all}, {"deleted, body differs (all) again", all}, {"deleted public → internal (marked)", marked}, {"deleted public → internal (marked) again", marked}} {
+		r, err := c.l.ResyncTicketComments(ctx, rita, t5, lingo.CommentResyncOptions{Notify: true})
+		if err != nil || r.Unchanged != 2 || r.Added+r.Updated+r.Published+r.Unpublished != 0 || r.Notified {
+			t.Errorf("%s: %+v %v", c.name, r, err)
+		}
+	}
+	if a, f := audit(), feed(); a != a0 || f != f0 {
+		t.Errorf("unsaved changes left traces: audit %d → %d, feed %d → %d", a0, a, f0, f)
+	}
+	if cs, _ := all.ListTicketComments(ctx, alice, t5); len(cs) != 0 {
+		t.Errorf("deleted comments visible: %v", commentBodies(cs))
+	}
+	// 乱序旧版本：Gitea 返回的 updated_at 早于已保存版本时不覆盖
+	g.set("demo/api#20", gcomment(503, "dev", "最新正文", at.Add(2*time.Hour)))
+	if r, err := all.ResyncTicketComments(ctx, rita, t5, lingo.CommentResyncOptions{}); err != nil || r.Added != 1 {
+		t.Fatalf("t5 new: %+v %v", r, err)
+	}
+	a0 = audit()
+	g.set("demo/api#20", gcomment(503, "dev", "旧正文", at.Add(time.Hour)))
+	for i := range 2 {
+		if r, err := all.ResyncTicketComments(ctx, rita, t5, lingo.CommentResyncOptions{}); err != nil || r.Unchanged != 1 || r.Updated != 0 {
+			t.Errorf("out-of-order %d: %+v %v", i, r, err)
+		}
+	}
+	if cs, _ := all.ListTicketComments(ctx, alice, t5); len(cs) != 1 || cs[0].Body != "最新正文" || audit() != a0 {
+		t.Errorf("out-of-order overwrote: %v audit %d → %d", commentBodies(cs), a0, audit())
+	}
+
 	// 6. 授权：external / agent 403（先于查找），越项目与不存在 404，无关联 Issue / Issue 已删除 409
 	demoRev := lingo.User{ID: "r9", Name: "Rev", Role: lingo.RoleReviewer, Projects: []string{"demo"}}
 	otherAdmin := lingo.User{ID: "root2", Name: "Root", Role: lingo.RoleAdmin, Projects: []string{"other"}}

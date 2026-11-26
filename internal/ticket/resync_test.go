@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 )
@@ -35,6 +36,16 @@ func TestResyncCommentGuardAndSilent(t *testing.T) {
 	u.Public, u.Silent, u.CommentID = true, false, 6
 	if r, err := sy.ResyncComment(ctx, u); err != nil || !r.Published || len(m.events) != 1 {
 		t.Errorf("notify: %+v %v events %d", r, err, len(m.events))
+	}
+	// 乱序旧版本：不写入、不留痕，计为 Unchanged
+	hist := len(m.history)
+	old := u
+	old.Body, old.At, old.Public = "旧正文", t0.Add(-time.Hour), false
+	if r, err := sy.ResyncComment(ctx, old); err != nil || r.Outcome != CommentUnchanged || r.Published || r.Unpublished || len(m.history) != hist {
+		t.Errorf("out-of-order: %+v %v history %d → %d", r, err, hist, len(m.history))
+	}
+	if c := m.comments[6]; c.Body != "已修复" || !c.Public {
+		t.Errorf("out-of-order overwrote: %+v", c)
 	}
 	if r, _ := sy.ResyncComment(ctx, CommentUpdate{FromBot: true, Repo: "demo/api", Number: 12, CommentID: 7}); r.Outcome != CommentSkipped {
 		t.Errorf("bot: %+v", r)

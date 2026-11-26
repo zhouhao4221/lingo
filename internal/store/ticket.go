@@ -411,7 +411,7 @@ func (x *ticketTx) AddHistory(ctx context.Context, h ticket.History) error {
 	return nil
 }
 
-func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*ticket.Comment, error) {
+func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*ticket.Comment, bool, error) {
 	at, known := c.At, !c.At.IsZero()
 	if !known {
 		at = time.Now()
@@ -428,35 +428,32 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 			VALUES ($1, $2, 'gitea', $3, $4, $5, $6, $6)`,
 			c.TicketID, c.AuthorName, c.Body, c.Public, c.GiteaID, at)
 		if err != nil {
-			return nil, fmt.Errorf("store: insert comment %d: %w", c.GiteaID, err)
+			return nil, false, fmt.Errorf("store: insert comment %d: %w", c.GiteaID, err)
 		}
-		return nil, nil
+		return nil, true, nil
 	case err != nil:
-		return nil, fmt.Errorf("store: read comment %d: %w", c.GiteaID, err)
+		return nil, false, fmt.Errorf("store: read comment %d: %w", c.GiteaID, err)
 	}
 	if deleted.Valid || (known && at.Before(prev.At)) {
-		// 已删除，或旧于已保存版本的乱序编辑：不写入，并按“可见性未变”返回，调用方不会因此发通知
-		p := prev
-		p.Public = p.Public || c.Public
-		return &p, nil
+		return &prev, false, nil // 已删除，或旧于已保存版本的乱序编辑：不写入，调用方不留痕、不通知
 	}
 	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_ticket_comments SET body = $2, public = $3, author_name = $4, updated_at = $5 WHERE gitea_comment_id = $1",
 		c.GiteaID, c.Body, c.Public, c.AuthorName, at); err != nil {
-		return nil, fmt.Errorf("store: update comment %d: %w", c.GiteaID, err)
+		return nil, false, fmt.Errorf("store: update comment %d: %w", c.GiteaID, err)
 	}
 	switch {
 	case prev.Public && !c.Public:
 		if err := x.redactCommentEvents(ctx, c.GiteaID); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	case prev.Public && c.Public && prev.Body != c.Body:
 		// 对外评论被编辑（如删掉误贴的密钥）：变更流随之返回新正文
 		if _, err := x.tx.ExecContext(ctx, `UPDATE lingo_events SET payload = jsonb_set(payload, '{body}', to_jsonb($2::text))
 			WHERE kind = 'ticket.comment' AND payload->>'comment_id' = $1`, strconv.FormatInt(c.GiteaID, 10), c.Body); err != nil {
-			return nil, fmt.Errorf("store: update comment events %d: %w", c.GiteaID, err)
+			return nil, false, fmt.Errorf("store: update comment events %d: %w", c.GiteaID, err)
 		}
 	}
-	return &prev, nil
+	return &prev, true, nil
 }
 
 func (x *ticketTx) DeleteGiteaComment(ctx context.Context, giteaID int64, at time.Time) error {

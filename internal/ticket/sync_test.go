@@ -395,13 +395,17 @@ func (m *memStore) AddHistory(_ context.Context, h History) error {
 	return nil
 }
 
-func (m *memStore) SaveGiteaComment(_ context.Context, c Comment) (*Comment, error) {
+func (m *memStore) SaveGiteaComment(_ context.Context, c Comment) (*Comment, bool, error) {
 	prev, ok := m.comments[c.GiteaID]
-	m.comments[c.GiteaID] = c
 	if !ok {
-		return nil, nil
+		m.comments[c.GiteaID] = c
+		return nil, true, nil
 	}
-	return &prev, nil
+	if !c.At.IsZero() && c.At.Before(prev.At) { // 乱序旧编辑：不写入（同 store）
+		return &prev, false, nil
+	}
+	m.comments[c.GiteaID] = c
+	return &prev, true, nil
 }
 
 func (m *memStore) DeleteGiteaComment(_ context.Context, id int64, _ time.Time) error {

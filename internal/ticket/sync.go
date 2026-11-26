@@ -428,14 +428,15 @@ func (s *Sync) applyComment(ctx context.Context, u CommentUpdate) (CommentResult
 			}
 			return tx.DeleteGiteaComment(ctx, u.CommentID, u.At)
 		}
-		prev, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
+		prev, saved, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
 			Body: u.Body, Public: u.Public, At: u.At})
 		if err != nil {
 			return err
 		}
-		if prev != nil && prev.Body == u.Body && prev.Public == u.Public {
+		if !saved || (prev != nil && prev.Body == u.Body && prev.Public == u.Public) {
+			// 未写入（灵工已删除、乱序旧编辑）或内容未变（重投、对账重放、重新同步）：不留痕、不通知
 			res.Outcome = CommentUnchanged
-			return nil // 内容未变（重投或对账重放）：不重复留痕
+			return nil
 		}
 		res.Outcome = CommentAdded
 		if prev != nil {
