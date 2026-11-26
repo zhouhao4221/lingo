@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/httpapi"
 	"github.com/zhouhao4221/lingo/internal/ticket"
@@ -15,6 +16,8 @@ import (
 // bad_request / invalid_input（400）、forbidden（403）、not_found（404）、conflict（409）、internal（500）。
 //
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
+// 反馈管理列表（REQ-010）：GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=，
+// 返回 {"tickets","total","next_before"}，可见范围同 ListTickets；
 // 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、POST /tickets/{id}/reject-forwarded（驳回已转研发工单）、
@@ -75,6 +78,45 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		return httpapi.Created{Value: t}, nil
+	})
+	rt.Handle("GET /tickets", func(r *httpapi.Request) (any, error) {
+		var f TicketListFilter
+		var err error
+		if f.BeforeID, err = r.QueryInt("before"); err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		f.Limit = int(limit)
+		if f.From, err = r.QueryTime("from"); err != nil {
+			return nil, err
+		}
+		if f.To, err = r.QueryTime("to"); err != nil {
+			return nil, err
+		}
+		if f.Mine, err = queryBool(r, "mine"); err != nil {
+			return nil, err
+		}
+		if f.IncludeShared, err = queryBool(r, "shared"); err != nil {
+			return nil, err
+		}
+		f.Project, f.Repo, f.Type, f.Keyword, f.TimeField = r.Query("project"), r.Query("repo"), TicketType(r.Query("type")),
+			r.Query("q"), r.Query("time_field")
+		for _, s := range strings.Split(r.Query("status"), ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				f.Statuses = append(f.Statuses, s)
+			}
+		}
+		page, err := l.ListTickets(ctx(r), user(r), f)
+		if err != nil {
+			return nil, err
+		}
+		if page.Tickets == nil {
+			page.Tickets = []Ticket{}
+		}
+		return page, nil
 	})
 	rt.Handle("GET /tickets/mine", func(r *httpapi.Request) (any, error) {
 		before, err := r.QueryInt("before")
@@ -617,6 +659,17 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		return nil, err
 	})
 	return rt
+}
+
+// queryBool 读取布尔查询参数：缺省或空为 false，取值 true / false / 1 / 0。
+func queryBool(r *httpapi.Request, name string) (bool, error) {
+	switch r.Query(name) {
+	case "", "false", "0":
+		return false, nil
+	case "true", "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: %s must be true or false", ErrInvalidInput, name)
 }
 
 // list 保证空列表编码为 [] 而不是 null。

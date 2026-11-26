@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -157,11 +158,52 @@ func (m *memStore) ListVisible(_ context.Context, q VisibleQuery) ([]*Ticket, er
 }
 func (m *memStore) Search(_ context.Context, q SearchQuery) ([]*Ticket, error) {
 	m.lastSearch = &q
-	return nil, nil
+	var out []*Ticket
+	for _, t := range m.matching(q) {
+		if q.BeforeID > 0 && t.ID >= q.BeforeID {
+			continue
+		}
+		if len(out) == q.Limit {
+			break
+		}
+		out = append(out, t)
+	}
+	return out, nil
 }
 func (m *memStore) Stats(_ context.Context, q SearchQuery) ([]StatRow, error) {
 	m.lastSearch = &q
-	return nil, nil
+	var out []StatRow
+	for _, t := range m.matching(q) { // 每张一行，调用方只求和
+		out = append(out, StatRow{ProjectKey: t.ProjectKey, Type: t.Type, Status: string(t.Status), Count: 1})
+	}
+	return out, nil
+}
+
+// matching 按 store.searchWhere 的语义在内存中过滤（范围、提交人、已转出、仓库、类型、状态、关键词），ID 降序。
+func (m *memStore) matching(q SearchQuery) []*Ticket {
+	var out []*Ticket
+	for _, t := range m.tickets {
+		switch {
+		case !q.Scope.All && !slices.Contains(q.Scope.Projects, t.ProjectKey),
+			q.UserID != "" && t.UserID != q.UserID,
+			len(q.UserIDs) > 0 && !slices.Contains(q.UserIDs, t.UserID),
+			q.ForwardedOnly && !t.Status.forwarded(),
+			q.Repo != "" && !strings.EqualFold(q.Repo, t.Repo),
+			q.Type != "" && t.Type != q.Type,
+			len(q.Statuses) > 0 && !slices.Contains(q.Statuses, string(t.Status)):
+			continue
+		}
+		hit := true
+		for _, k := range q.Keywords {
+			k = strings.ToLower(k)
+			hit = hit && (strings.Contains(strings.ToLower(t.Title), k) || strings.Contains(strings.ToLower(t.Body), k))
+		}
+		if hit {
+			out = append(out, t)
+		}
+	}
+	slices.SortFunc(out, func(a, b *Ticket) int { return int(b.ID - a.ID) })
+	return out
 }
 func (m *memStore) Events(_ context.Context, q EventQuery) ([]notify.Event, error) {
 	m.lastEventQuery = q

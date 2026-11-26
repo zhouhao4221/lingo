@@ -175,6 +175,45 @@ func (l *Lingo) ListVisibleTickets(ctx context.Context, u User, f VisibleTicketF
 	return l.ticketList(u, ts, err)
 }
 
+// ListTickets 返回 u 可查看的工单的一页与总数，供接入方的反馈管理列表使用（REQ-010），可按项目、仓库、类型、状态、关键词、
+// 时间筛选（新的在前，游标分页）。可见范围与 GetTicket、知识问答检索相同，不放宽任何角色：
+//   - external：默认只含本人提交的；IncludeShared 为真时另含 Config.TicketAudience 放宽可见的同事工单（只读）；
+//   - agent：只含 User.Projects 内已转出的工单（Mine 为真时为空）；
+//   - reviewer / admin：User.Projects 内全部（User.Projects 为空时为 Config.Projects 全部）；Mine 为真时只含本人提交的。
+//
+// Project 不在调用者范围内时返回空页（不区分项目不存在与无权访问）；角色未知或 external 没有 User.ID 时返回 ErrForbidden；
+// 条件不合法（类型、状态、时间字段、仓库格式、关键词过多或过长）时返回 ErrInvalidInput。
+func (l *Lingo) ListTickets(ctx context.Context, u User, f TicketListFilter) (TicketPage, error) {
+	if f.Repo != "" {
+		if owner, name, ok := strings.Cut(f.Repo, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+			return TicketPage{}, fmt.Errorf("%w: repo %q must be owner/name", ErrInvalidInput, f.Repo)
+		}
+	}
+	if err := l.ensureProjects(ctx); err != nil {
+		return TicketPage{}, err
+	}
+	p, mine := l.principal(u), f.Mine
+	if u.Role == RoleExternal && !f.Mine {
+		if f.IncludeShared {
+			p = l.viewer(ctx, u) // 只在要看同事工单时调用 TicketAudience
+		} else {
+			mine = true
+		}
+	}
+	ts, total, more, err := l.tickets.List(ctx, p, f.Project, mine, ticket.SearchQuery{Repo: f.Repo, Type: string(f.Type),
+		Statuses: f.Statuses, Keywords: strings.Fields(f.Keyword), TimeField: f.TimeField, From: f.From, To: f.To,
+		BeforeID: f.BeforeID, Limit: f.Limit})
+	out, err := l.ticketList(u, ts, err)
+	if err != nil {
+		return TicketPage{}, err
+	}
+	page := TicketPage{Tickets: out, Total: total}
+	if more && len(out) > 0 {
+		page.NextBefore = out[len(out)-1].ID
+	}
+	return page, nil
+}
+
 // ticketDetail 返回工单、评论与附件（一次鉴权），供 REST 详情接口使用。
 func (l *Lingo) ticketDetail(ctx context.Context, u User, id int64) (Ticket, []Comment, []Attachment, error) {
 	t, cs, as, err := l.tickets.Detail(ctx, l.viewer(ctx, u), id)

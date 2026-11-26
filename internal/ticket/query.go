@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -223,6 +224,50 @@ func (s *Service) Stats(ctx context.Context, p auth.Principal, project string, m
 		return nil, err
 	}
 	return s.queries().Stats(ctx, q)
+}
+
+// 管理列表（List）的关键词上限。
+const (
+	MaxListKeywords     = 10
+	MaxListKeywordRunes = 100
+)
+
+// List 返回调用者可读、符合条件的一页工单（新的在前）与符合条件的总数（忽略 BeforeID 与 Limit），供接入方的反馈管理列表
+// 使用（REQ-010）。可见范围与 Search 完全一致（同一个 searchScope）：external 为本人的（mine 为假且 Principal.Peers 非空时
+// 另含被放宽可见的提交人的），agent 只含已转出的（mine 为真时为空），reviewer / admin 为项目范围内全部（mine 为真时只含本人
+// 提交的）；project 不在范围内时为空。hasMore 报告 BeforeID 之后是否还有下一页。
+func (s *Service) List(ctx context.Context, p auth.Principal, project string, mine bool, q SearchQuery) (ts []*Ticket, total int, hasMore bool, err error) {
+	if len(q.Keywords) > MaxListKeywords {
+		return nil, 0, false, fmt.Errorf("%w: at most %d keywords", ErrInvalid, MaxListKeywords)
+	}
+	for _, k := range q.Keywords {
+		if utf8.RuneCountInString(k) > MaxListKeywordRunes {
+			return nil, 0, false, fmt.Errorf("%w: keyword longer than %d characters", ErrInvalid, MaxListKeywordRunes)
+		}
+	}
+	q, ok, err := s.searchScope(p, project, mine, q)
+	if err != nil || !ok {
+		return nil, 0, false, err
+	}
+	rows, err := s.queries().Stats(ctx, q)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	for _, r := range rows {
+		total += r.Count
+	}
+	if total == 0 {
+		return nil, 0, false, nil
+	}
+	n := limitOf(q.Limit, DefaultLimit)
+	q.Limit = n + 1 // 多取一条判断是否还有下一页
+	if ts, err = s.queries().Search(ctx, q); err != nil {
+		return nil, 0, false, err
+	}
+	if len(ts) > n {
+		ts, hasMore = ts[:n], true
+	}
+	return ts, total, hasMore, nil
 }
 
 func (s *Service) searchScope(p auth.Principal, project string, mine bool, q SearchQuery) (SearchQuery, bool, error) {

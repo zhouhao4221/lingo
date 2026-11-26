@@ -305,6 +305,36 @@ type VisibleTicketFilter struct {
 	Limit    int   // 0 时默认 50，最多 200
 }
 
+// TicketListFilter 是 ListTickets 的条件（REST GET /tickets 同名查询参数），零值表示不限。筛选只在调用者可见范围内收窄，
+// 不会扩大范围。
+type TicketListFilter struct {
+	Project  string     // 项目 key；为空时不限（仍限 User.Projects，User.Projects 为空时为 Config.Projects 全部）
+	Repo     string     // 仓库 "owner/name"（不区分大小写）
+	Type     TicketType // consult | bug | feature
+	Statuses []string   // 任一状态（取值同 Ticket.Status）
+	// Keyword 按空白拆成多个关键词，各词须同时命中标题或正文（不区分大小写）；最多 10 个词，每个最多 100 字。
+	Keyword string
+	// Mine 为真时只含调用者本人提交的（reviewer / admin 收窄到本人；agent 不提交工单，结果为空）。
+	Mine bool
+	// IncludeShared 只对 external 生效：另含 Config.TicketAudience 放宽可见的同事工单（只读，Mine 为 false）；
+	// 默认 external 只含本人提交的。Mine 为真时忽略。
+	IncludeShared bool
+	// TimeField 是 From / To 比较的时间：created（默认，提交时间）| updated（更新时间）| forwarded（转出时间）。
+	TimeField string
+	From, To  time.Time // 零值不限；To 不含
+	BeforeID  int64     // 游标：上一页的 NextBefore（首页传 0）
+	Limit     int       // 0 时默认 50，最多 200
+}
+
+// TicketPage 是 ListTickets 的一页结果。
+type TicketPage struct {
+	Tickets []Ticket `json:"tickets"` // 新的在前（按 ID 降序）
+	// Total 是符合条件的工单总数（不受 BeforeID 与 Limit 影响；与 Tickets 分两次查询，并发写入时可能略有出入）。
+	Total int `json:"total"`
+	// NextBefore 是下一页的 BeforeID；为 0 表示没有下一页。
+	NextBefore int64 `json:"next_before"`
+}
+
 // IssueClose 是转研发后被驳回的工单关闭关联 Issue 的进度（RejectForwardedTicket 之后由 Run 异步执行）。
 type IssueClose struct {
 	TicketID int64  `json:"ticket_id"`

@@ -272,6 +272,7 @@ l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leave
 | `GET /knowledge/search?q=&project=&limit=`；`GET` / `POST /knowledge`、`PUT` / `DELETE /knowledge/{id}`、`POST /knowledge/{id}/disable\|enable`、`POST /knowledge/disable-by-ticket`、`POST /knowledge/{id}/approve\|reject`、`GET /knowledge/unanswered` | 知识库：检索（所有角色）；维护与审核（reviewer / admin） |
 | `GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=` | 业务数据工具调用审计：本人的，以及 reviewer / admin 明确负责的项目内的 |
 | `GET /tickets/visible?project=&status=&before=` | 可查看的工单：本人的 + `TicketAudience` 放宽可见的同事的（只读） |
+| `GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=` | 反馈管理列表（Go `ListTickets`）：返回 `{tickets, total, next_before}`；external 默认只含本人（`shared=true` 另含同事的），agent 只含已转出的，reviewer / admin 为 `User.Projects` 内全部 |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
 | `POST /tickets/{id}/reject-forwarded`、`GET /tickets/{id}/issue-close`、`POST /tickets/{id}/issue-close/retry` | 驳回已转研发工单（只关闭关联 Issue，异步可重试）及关闭进度 / 重试（reviewer / admin） |
