@@ -16,11 +16,13 @@ import (
 // bad_request / invalid_input（400）、forbidden（403）、not_found（404）、conflict（409）、internal（500）。
 //
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
-// 反馈管理列表（REQ-010）：GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=，
-// 返回 {"tickets","total","next_before"}，可见范围同 ListTickets。参数：status 逗号分隔、表示任一（重复的去重）；q 按空白拆词
+// 反馈管理列表（REQ-010）：GET /tickets?project=&repo=&type=&status=a,b&q=&submitter=&mine=&shared=&time_field=&from=&to=&sort=&before=&cursor=&limit=，
+// 返回 {"tickets","total","next_before","next_cursor"}，可见范围同 ListTickets。参数：status 逗号分隔、表示任一（重复的去重）；q 按空白拆词
 // （最多 10 个、每个最多 100 字，各词同时命中标题或正文）；mine / shared 只接受 true|false|1|0；time_field 取 created（默认）|
 // updated | forwarded（不传 from / to 时只含已转出的）；from / to 为 RFC 3339，to 不含；before 为上一页的 next_before（首页省略）；
-// limit 默认 50、最大 200；其他取值返回 400；
+// limit 默认 50、最大 200；submitter 按提交人姓名子串匹配（不区分大小写，最多 100 字）；sort=triage_since 时只含当前待确认的，
+// 按实际进入待确认的时间从早到晚、同一时间按 ID 从小到大，翻页用 cursor（上一页的 next_cursor，不能与 before 同用）；
+// 其他取值返回 400；
 // 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、POST /tickets/{id}/reject-forwarded（驳回已转研发工单）、
@@ -108,6 +110,7 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		}
 		f.Project, f.Repo, f.Type, f.Keyword, f.TimeField = r.Query("project"), r.Query("repo"), TicketType(r.Query("type")),
 			r.Query("q"), r.Query("time_field")
+		f.SubmitterName, f.Sort, f.Cursor = r.Query("submitter"), r.Query("sort"), r.Query("cursor")
 		for _, s := range strings.Split(r.Query("status"), ",") {
 			if s = strings.TrimSpace(s); s != "" {
 				f.Statuses = append(f.Statuses, s)

@@ -183,8 +183,23 @@ func (l *Lingo) ListVisibleTickets(ctx context.Context, u User, f VisibleTicketF
 //   - reviewer / admin：User.Projects 内全部（User.Projects 为空时为 Config.Projects 全部）；Mine 为真时只含本人提交的。
 //
 // Project 不在调用者范围内时返回空页（不区分项目不存在与无权访问）；角色未知或 external 没有 User.ID 时返回 ErrForbidden；
-// 条件不合法（类型、状态、时间字段、仓库格式、关键词过多或过长）时返回 ErrInvalidInput。
+// 条件不合法（类型、状态、时间字段、仓库格式、关键词过多或过长、提交人姓名过长、排序或游标不合法）时返回 ErrInvalidInput。
+//
+// Sort 为 TicketSortTriageSince 时只含当前待确认的工单，按实际进入待确认的时间（triage_since）从早到晚、同一时间按 ID
+// 从小到大，游标为 (triage_since, id)，用 Cursor / NextCursor 翻页；默认排序与 BeforeID / NextBefore 不变（REQ-010 增补，待办 #789）。
 func (l *Lingo) ListTickets(ctx context.Context, u User, f TicketListFilter) (TicketPage, error) {
+	q := ticket.SearchQuery{Repo: f.Repo, Type: string(f.Type), Statuses: f.Statuses, Keywords: strings.Fields(f.Keyword),
+		TimeField: f.TimeField, From: f.From, To: f.To, BeforeID: f.BeforeID, Limit: f.Limit,
+		SubmitterName: strings.TrimSpace(f.SubmitterName), Order: f.Sort}
+	if f.Cursor != "" {
+		if f.Sort != TicketSortTriageSince {
+			return TicketPage{}, fmt.Errorf("%w: cursor requires sort=%s", ErrInvalidInput, TicketSortTriageSince)
+		}
+		var err error
+		if q.AfterTriage, q.AfterID, err = ticket.ParseTriageCursor(f.Cursor); err != nil {
+			return TicketPage{}, publicErr(err)
+		}
+	}
 	if f.Repo != "" {
 		if owner, name, ok := strings.Cut(f.Repo, "/"); !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 			return TicketPage{}, fmt.Errorf("%w: repo %q must be owner/name", ErrInvalidInput, f.Repo)
@@ -201,15 +216,17 @@ func (l *Lingo) ListTickets(ctx context.Context, u User, f TicketListFilter) (Ti
 			mine = true
 		}
 	}
-	ts, total, more, err := l.tickets.List(ctx, p, f.Project, mine, ticket.SearchQuery{Repo: f.Repo, Type: string(f.Type),
-		Statuses: f.Statuses, Keywords: strings.Fields(f.Keyword), TimeField: f.TimeField, From: f.From, To: f.To,
-		BeforeID: f.BeforeID, Limit: f.Limit})
+	ts, total, more, err := l.tickets.List(ctx, p, f.Project, mine, q)
 	out, err := l.ticketList(u, ts, err)
 	if err != nil {
 		return TicketPage{}, err
 	}
 	page := TicketPage{Tickets: out, Total: total}
-	if more && len(out) > 0 {
+	switch {
+	case !more || len(ts) == 0:
+	case q.Order == ticket.OrderTriageAsc:
+		page.NextCursor = ticket.TriageCursor(ts[len(ts)-1])
+	default:
 		page.NextBefore = out[len(out)-1].ID
 	}
 	return page, nil

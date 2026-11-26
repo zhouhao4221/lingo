@@ -27,6 +27,7 @@
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
 | v1.33 | 2026-11-25 | haiqing | REQ-008 业务数据 Tool（只读）：3.2.0.5 注册校验、三种入口、超时并发熔断、审计先行与可见范围；数据模型新增 lingo_data_requests（0007） |
 | v1.34 | 2026-11-26 | haiqing | REQ-009 知识问答图片提问（待评审）：提问可附带最多 4 张 PNG / JPEG / WebP（沿用 Attachment、不带 URL、允许只发图），经 FetchAttachment（Purpose=question）以提问人身份读取并校验后按 OpenAI 兼容多模态格式发给回答模型；模型连接声明图片能力，不支持时明确报错；迁移 0008 为问答消息加 attachments 列 |
+| v1.37 | 2026-11-27 | haiqing | 反馈管理列表增补（REQ-010，待办 #789）：`ListTickets` / `GET /tickets` 新增 `Sort=triage_since`（只含当前待确认，按实际进入待确认的时间 `triage_since` 从早到晚、同一时间按 ID，`(triage_since, id)` 不透明游标 `next_cursor`）与 `SubmitterName` / `submitter`（提交人姓名快照子串匹配）；默认排序与可见范围不变，无迁移 |
 | v1.36 | 2026-11-27 | haiqing | 历史评论重新同步（REQ-011）：新增 `ResyncTicketComments`（REST `POST /tickets/{id}/comments/resync`，reviewer / admin，限 `User.Projects`），按当前 ReplyMode 重读工单主 Issue 的全部评论，与 Webhook / 对账同一套处理（机器人过滤、去重、编辑、已删除不恢复），默认不通知、幂等；用于切换 ReplyAll 后回补此前存为内部的评论；无迁移 |
 | v1.35 | 2026-11-27 | haiqing | 反馈管理列表（REQ-010）：新增 `ListTickets`（REST `GET /tickets`），按项目、仓库、类型、状态、关键词、时间筛选，游标分页并返回总数；可见范围复用知识问答检索（3.2.0.6），external 默认只含本人（`IncludeShared` 另含 `TicketAudience` 同事工单），agent 只含已转出，reviewer / admin 为 `User.Projects` 内全部；不新增权限规则，无迁移 |
 | v1.32 | 2026-11-25 | haiqing | 知识库二期（REQ-007）：迁移 0006 放宽条目状态（新增待审核 / 已驳回）与来源（工单抽取、回答反馈、工单评论），新增回答反馈、抽取记录、未答上记录三张表；Bug / 需求工单首次进入已发布 / 已上线 / 已关闭后由轻量模型抽取问答（待审核，每张一次，升级前已结案的不抽取）；`RateMessage` 回答反馈（有帮助 / 没帮助次数，知识类回答首次有帮助时入候选）；`AddTicketCommentWith` 后台评论勾选入库；`ApproveKnowledge` / `RejectKnowledge` 审核，入库时标出可能重复；`ListUnansweredQuestions` 未答上统计（90 天）；检索重合词数不少于提问与条目中较短一方的 20%；未答上按项目分别记录 |
@@ -574,7 +575,7 @@ sequenceDiagram
 | `GET /ticket-types` | 可选类型与每类的表单字段（取自对应仓库的 Issue 模板必填字段，见 3.2.2），弹窗据此渲染表单 |
 | `POST /tickets` | 提交工单：`project`、`repo`（可选）、`type`、`title`（可选，缺省由模型生成）、`content`、`fields`（模板字段）、`attachments`（附件引用：`id`、`name`、`url`，可选 `content_type`、`size`）、`context`（页面 URL、页面标题、浏览器、`version`，由弹窗自动采集） |
 | `GET /tickets/mine` | 本人工单列表，按状态过滤、分页 |
-| `GET /tickets` | 反馈管理列表（REQ-010）：按项目、仓库、类型、状态、关键词、时间筛选，游标分页，返回 `{tickets, total, next_before}`；范围见 3.2.0.6 |
+| `GET /tickets` | 反馈管理列表（REQ-010）：按项目、仓库、类型、状态、关键词、提交人姓名、时间筛选，游标分页，返回 `{tickets, total, next_before}`；`sort=triage_since` 时只含待确认、按进入待确认的时间从早到晚，用 `cursor` / `next_cursor` 翻页；范围见 3.2.0.6 |
 | `GET /tickets/{id}` | 工单详情：状态时间线、对外回复、附件、修复版本、上线时间；不返回 Gitea 内部讨论 |
 | `POST /tickets/{id}/comments` | 用户补充说明，可带 `attachments`；已转出时同步为 Issue 评论 |
 

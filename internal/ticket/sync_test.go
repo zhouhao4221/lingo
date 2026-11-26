@@ -163,6 +163,11 @@ func (m *memStore) Search(_ context.Context, q SearchQuery) ([]*Ticket, error) {
 		if q.BeforeID > 0 && t.ID >= q.BeforeID {
 			continue
 		}
+		if q.Order == OrderTriageAsc && q.AfterID > 0 { // (triage_since, id) > 游标，按库中的微秒精度比较
+			if ts, at := t.TriageSince.UnixMicro(), q.AfterTriage.UnixMicro(); ts < at || (ts == at && t.ID <= q.AfterID) {
+				continue
+			}
+		}
 		if len(out) == q.Limit {
 			break
 		}
@@ -190,7 +195,9 @@ func (m *memStore) matching(q SearchQuery) []*Ticket {
 			q.ForwardedOnly && !t.Status.forwarded(),
 			q.Repo != "" && !strings.EqualFold(q.Repo, t.Repo),
 			q.Type != "" && t.Type != q.Type,
-			len(q.Statuses) > 0 && !slices.Contains(q.Statuses, string(t.Status)):
+			len(q.Statuses) > 0 && !slices.Contains(q.Statuses, string(t.Status)),
+			q.SubmitterName != "" && !strings.Contains(strings.ToLower(t.UserName), strings.ToLower(q.SubmitterName)),
+			q.Order == OrderTriageAsc && (t.Status != StatusPendingTriage || t.TriageSince == nil):
 			continue
 		}
 		hit := true
@@ -203,6 +210,14 @@ func (m *memStore) matching(q SearchQuery) []*Ticket {
 		}
 	}
 	slices.SortFunc(out, func(a, b *Ticket) int { return int(b.ID - a.ID) })
+	if q.Order == OrderTriageAsc {
+		slices.SortFunc(out, func(a, b *Ticket) int {
+			if c := a.TriageSince.Compare(*b.TriageSince); c != 0 {
+				return c
+			}
+			return int(a.ID - b.ID)
+		})
+	}
 	return out
 }
 func (m *memStore) Events(_ context.Context, q EventQuery) ([]notify.Event, error) {

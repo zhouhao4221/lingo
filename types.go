@@ -322,17 +322,34 @@ type TicketListFilter struct {
 	// TimeField 是 From / To 比较的时间：created（默认，提交时间）| updated（更新时间）| forwarded（转出时间）。
 	TimeField string
 	From, To  time.Time // 零值不限；To 不含
-	BeforeID  int64     // 游标：上一页的 NextBefore（首页传 0）
+	BeforeID  int64     // 游标：上一页的 NextBefore（首页传 0）；只用于默认排序
 	Limit     int       // 0 时默认 50，最多 200
+	// SubmitterName 非空时只含提交人姓名（Ticket.UserName，提交时的姓名快照）包含该文本的工单：去掉首尾空白后按子串匹配、
+	// 不区分大小写，最多 100 字；只在可见范围内收窄。
+	SubmitterName string
+	// Sort 是排序：空（默认）为 ID 降序（新的在前），用 BeforeID / NextBefore 翻页；TicketSortTriageSince 为按实际进入待确认
+	// （pending_triage）的时间 Ticket.TriageSince 从早到晚、同一时间按 ID 从小到大，只含当前待确认的工单，用 Cursor / NextCursor
+	// 翻页（不能与 BeforeID 同用）。
+	Sort string
+	// Cursor 是 TicketSortTriageSince 排序的游标：上一页的 NextCursor（首页为空）；不透明字符串，不要自行构造。
+	Cursor string
 }
+
+// ListTickets 的排序（TicketListFilter.Sort）。
+const (
+	// TicketSortTriageSince 按实际进入待确认的时间（Ticket.TriageSince）正序，同一时间按 ID 正序；只含当前待确认的工单。
+	TicketSortTriageSince = "triage_since"
+)
 
 // TicketPage 是 ListTickets 的一页结果。
 type TicketPage struct {
-	Tickets []Ticket `json:"tickets"` // 新的在前（按 ID 降序）
+	Tickets []Ticket `json:"tickets"` // 默认新的在前（按 ID 降序）；TicketSortTriageSince 时按进入待确认的时间从早到晚
 	// Total 是符合条件的工单总数（不受 BeforeID 与 Limit 影响；与 Tickets 分两次查询，并发写入时可能略有出入）。
 	Total int `json:"total"`
-	// NextBefore 是下一页的 BeforeID；为 0 表示没有下一页。
+	// NextBefore 是默认排序下一页的 BeforeID；为 0 表示没有下一页（TicketSortTriageSince 排序时恒为 0）。
 	NextBefore int64 `json:"next_before"`
+	// NextCursor 是 TicketSortTriageSince 排序下一页的 Cursor；为空表示没有下一页（默认排序时恒为空）。
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 // CommentResyncOptions 是 ResyncTicketComments 的选项。
