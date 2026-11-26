@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,54 @@ type OpenAIOptions struct {
 	Headers        map[string]string // 额外请求头（如网关要求的租户头）
 	HTTPClient     *http.Client      // 为空时用 90 秒超时的默认客户端
 	MaxRetries     int               // 429 / 5xx / 网络错误的重试次数：0 取默认 2，负数不重试
+	// Images 声明对话模型支持图片输入（REQ-009）：为真时带图的消息按 OpenAI 多模态格式发送（content 为 text 与
+	// image_url 片段的数组，图片为 data URL）；为假时带图的消息返回 ErrImagesUnsupported，不会丢掉图片。
+	Images bool
+}
+
+// SupportsImages 报告对话模型是否声明了支持图片输入。
+func (c *OpenAI) SupportsImages() bool { return c.o.Images }
+
+// ErrImagesUnsupported 表示消息带图片，但模型没有声明支持图片输入（OpenAIOptions.Images）。
+var ErrImagesUnsupported = errors.New("llm: model is not configured to accept images")
+
+// wireMessage 是 /chat/completions 的一条消息：没有图片时 content 为字符串（与之前的请求完全相同），有图片时为片段数组。
+type wireMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type contentPart struct {
+	Type     string    `json:"type"` // text | image_url
+	Text     string    `json:"text,omitempty"`
+	ImageURL *imageURL `json:"image_url,omitempty"`
+}
+
+type imageURL struct {
+	URL string `json:"url"` // data:<type>;base64,<data>
+}
+
+func (c *OpenAI) wireMessages(messages []Message) ([]wireMessage, error) {
+	out := make([]wireMessage, 0, len(messages))
+	for _, m := range messages {
+		if len(m.Images) == 0 {
+			out = append(out, wireMessage{m.Role, m.Content})
+			continue
+		}
+		if !c.o.Images {
+			return nil, ErrImagesUnsupported
+		}
+		parts := make([]contentPart, 0, len(m.Images)+1)
+		if m.Content != "" {
+			parts = append(parts, contentPart{Type: "text", Text: m.Content})
+		}
+		for _, img := range m.Images {
+			parts = append(parts, contentPart{Type: "image_url",
+				ImageURL: &imageURL{URL: "data:" + img.ContentType + ";base64," + base64.StdEncoding.EncodeToString(img.Data)}})
+		}
+		out = append(out, wireMessage{m.Role, parts})
+	}
+	return out, nil
 }
 
 // EmbeddingModelName 返回向量模型名（未配置时为空），供知识库区分不同模型生成的向量。
@@ -104,21 +153,18 @@ func (c *OpenAI) Chat(ctx context.Context, messages []Message) (string, error) {
 
 // ChatUsage 同 Chat，另返回 token 用量（出错时为已知部分）。
 func (c *OpenAI) ChatUsage(ctx context.Context, messages []Message) (string, Usage, error) {
-	type msg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+	u := Usage{Model: c.o.Model}
+	wire, err := c.wireMessages(messages)
+	if err != nil {
+		return "", u, err
 	}
 	req := struct {
-		Model       string   `json:"model"`
-		Messages    []msg    `json:"messages"`
-		Temperature *float64 `json:"temperature,omitempty"`
-		Stream      bool     `json:"stream"`
-	}{Model: c.o.Model, Temperature: c.o.Temperature}
-	for _, m := range messages {
-		req.Messages = append(req.Messages, msg{m.Role, m.Content})
-	}
+		Model       string        `json:"model"`
+		Messages    []wireMessage `json:"messages"`
+		Temperature *float64      `json:"temperature,omitempty"`
+		Stream      bool          `json:"stream"`
+	}{Model: c.o.Model, Messages: wire, Temperature: c.o.Temperature}
 	var resp completion
-	u := Usage{Model: c.o.Model}
 	if err := c.post(ctx, "/chat/completions", req, &resp); err != nil {
 		return "", u, err
 	}
@@ -171,33 +217,30 @@ func (resp *completion) result(u Usage) (string, Usage, error) {
 // ChatStream 以流式调用 /chat/completions（stream=true），逐片段调用 onDelta，返回全文与 token 用量。
 // 只在收到响应之前重试（429 / 5xx / 网络错误）；开始输出后出错直接返回，已回调的片段不撤回。
 func (c *OpenAI) ChatStream(ctx context.Context, messages []Message, onDelta func(string)) (string, Usage, error) {
-	type msg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+	wire, err := c.wireMessages(messages)
+	if err != nil {
+		return "", Usage{Model: c.o.Model}, err
 	}
 	req := struct {
-		Model         string   `json:"model"`
-		Messages      []msg    `json:"messages"`
-		Temperature   *float64 `json:"temperature,omitempty"`
-		Stream        bool     `json:"stream"`
+		Model         string        `json:"model"`
+		Messages      []wireMessage `json:"messages"`
+		Temperature   *float64      `json:"temperature,omitempty"`
+		Stream        bool          `json:"stream"`
 		StreamOptions struct {
 			IncludeUsage bool `json:"include_usage"`
 		} `json:"stream_options"`
-	}{Model: c.o.Model, Temperature: c.o.Temperature, Stream: true}
+	}{Model: c.o.Model, Messages: wire, Temperature: c.o.Temperature, Stream: true}
 	req.StreamOptions.IncludeUsage = true
-	for _, m := range messages {
-		req.Messages = append(req.Messages, msg{m.Role, m.Content})
-	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", Usage{}, err
 	}
 	// 不认识 stream_options 的兼容接口会返回 400：去掉它再试一次（只是拿不到用量）
 	plain, err := json.Marshal(struct {
-		Model       string   `json:"model"`
-		Messages    []msg    `json:"messages"`
-		Temperature *float64 `json:"temperature,omitempty"`
-		Stream      bool     `json:"stream"`
+		Model       string        `json:"model"`
+		Messages    []wireMessage `json:"messages"`
+		Temperature *float64      `json:"temperature,omitempty"`
+		Stream      bool          `json:"stream"`
 	}{req.Model, req.Messages, req.Temperature, true})
 	if err != nil {
 		return "", Usage{}, err

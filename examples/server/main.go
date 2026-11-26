@@ -85,7 +85,8 @@ func main() {
 		Notifier:             logNotifier{},
 		// 附件存在业务系统自己的附件服务中，提交工单时只传引用（ID、文件名、地址）。可选配置 FetchAttachment：
 		// 转出时读取内容上传为 Gitea 附件；不配置时只把附件地址写进 Issue。
-		// 读取时须校验附件属于 userID（附件 ID 由前端传入），否则返回 lingo.ErrNotFound：
+		// 读取时须校验附件属于 userID（附件 ID 由前端传入），否则返回 lingo.ErrNotFound。知识问答的带图提问也经它读图：
+		// a.Purpose 为 lingo.AttachmentForQuestion 时 userID 是提问人，图片会发给回答模型（需模型声明支持图片）：
 		// FetchAttachment: func(ctx context.Context, userID string, a lingo.Attachment) (io.ReadCloser, error) {
 		// 	return files.OpenOwned(ctx, userID, a.ID)
 		// },

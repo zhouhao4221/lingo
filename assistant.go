@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -17,6 +18,18 @@ import (
 
 // ErrNoModel 表示未配置 Config.Model：知识问答的发送与重试不可用（会话列表、历史、确认与取消不受影响）。
 var ErrNoModel = errors.New("lingo: model not configured")
+
+// ErrImagesUnsupported 表示带图提问不可用（REQ-009）：当前的主模型没有声明支持图片（见 ImageModel、
+// OpenAIConfig.Images、ModelSlotSettings.Images），或未配置 Config.FetchAttachment。提问不会保存（重试时不会改动消息）。
+var ErrImagesUnsupported = errors.New("lingo: images are not supported by the current model or attachment configuration")
+
+// 带图提问（REQ-009）的限制：每条提问最多 MaxQuestionImages 张图片；只接受 PNG、JPEG、WebP；单张按实际读取的内容
+// 不超过 MaxQuestionImageBytes，宽高各不超过 MaxQuestionImageSide 像素。
+const (
+	MaxQuestionImages     = assistant.MaxImages
+	MaxQuestionImageBytes = assistant.MaxImageBytes
+	MaxQuestionImageSide  = assistant.MaxImageSide
+)
 
 // Conversation 是知识问答的会话，只有创建者本人可访问（admin 也看不到他人的会话）。
 type Conversation struct {
@@ -34,8 +47,12 @@ type ConversationMessage struct {
 	Role           string `json:"role"` // user | assistant
 	Content        string `json:"content"`
 	Status         string `json:"status"` // done | failed（模型出错，可用 RetryMessage 重试）
-	// Error 是失败类别：model_error | timeout | canceled | internal_error
-	Error         string         `json:"error,omitempty"`
+	// Error 是失败类别：model_error | timeout | canceled | internal_error；带图提问另有 attachment_rejected（接入方拒绝
+	// 读取、内容不是声明的图片类型或超出限制）与 attachment_error（读取图片的临时错误），均可用 RetryMessage 重试
+	Error string `json:"error,omitempty"`
+	// Attachments 是用户消息附带的图片引用（REQ-009，只有 ID、Name、ContentType、Size；forwarded 恒为 false：
+	// 问答图片不转出到 Gitea）；没有时省略
+	Attachments   []Attachment   `json:"attachments,omitempty"`
 	ReplyTo       int64          `json:"reply_to,omitempty"` // 助手消息所回答的用户消息
 	Citations     Citations      `json:"citations"`
 	PendingAction *PendingAction `json:"pending_action,omitempty"` // 该消息提出的待确认操作
@@ -105,7 +122,12 @@ type ActionResult struct {
 
 // MessageInput 是一次提问。
 type MessageInput struct {
-	Content string // 最多 4000 字
+	Content string // 最多 4000 字；带图片时可以为空
+	// Attachments 是随提问附带的图片（REQ-009）：沿用 Attachment，只填 ID（必填，本条提问内唯一）、Name、ContentType
+	// （必填，image/png | image/jpeg | image/webp）与可选的 Size，不接受 URL（灵工不请求地址）。数量、类型与大小限制见
+	// MaxQuestionImages 等；回答时经 Config.FetchAttachment 以提问人身份读取（Purpose 为 AttachmentForQuestion），
+	// 按内容校验后与提问一起发给回答模型。模型不支持图片时返回 ErrImagesUnsupported。
+	Attachments []Attachment
 	// TimeZone 是 IANA 时区名（如 "Asia/Shanghai"），用于理解“今天”“上周”；为空时用服务进程的本地时区。
 	TimeZone string
 }
@@ -172,7 +194,11 @@ func (l *Lingo) SendMessageStream(ctx context.Context, u User, conversationID in
 	if err := l.ensureProjects(ctx); err != nil {
 		return ConversationMessage{}, err
 	}
-	m, err := l.assistant.Send(withDataCaller(ctx, u), l.viewer(ctx, u), conversationID, in.Content, in.TimeZone, onDelta)
+	atts, err := questionAttachments(in.Attachments)
+	if err != nil {
+		return ConversationMessage{}, err
+	}
+	m, err := l.assistant.Send(withDataCaller(ctx, u), l.viewer(ctx, u), conversationID, in.Content, atts, in.TimeZone, onDelta)
 	if err != nil {
 		return ConversationMessage{}, assistantErr(err)
 	}
@@ -180,6 +206,7 @@ func (l *Lingo) SendMessageStream(ctx context.Context, u User, conversationID in
 }
 
 // RetryMessage 重新回答失败的助手消息（须是最近一次提问的回答），原地更新该消息；timeZone 同 MessageInput.TimeZone。
+// 提问带图片时复用原图片（重新经 Config.FetchAttachment 读取）；当前模型不支持图片时返回 ErrImagesUnsupported。
 func (l *Lingo) RetryMessage(ctx context.Context, u User, conversationID, messageID int64, timeZone string) (ConversationMessage, error) {
 	return l.RetryMessageStream(ctx, u, conversationID, messageID, timeZone, nil)
 }
@@ -221,10 +248,48 @@ func (l *Lingo) CancelPendingAction(ctx context.Context, u User, conversationID,
 }
 
 func assistantErr(err error) error {
-	if errors.Is(err, assistant.ErrNoModel) {
+	switch {
+	case errors.Is(err, assistant.ErrNoModel):
 		return ErrNoModel
+	case errors.Is(err, assistant.ErrImagesUnsupported):
+		return ErrImagesUnsupported
 	}
 	return publicErr(err)
+}
+
+// questionAttachments 把提问附带的图片转为内部引用：只取 ID、Name、ContentType、Size；带 URL 时拒绝（问答图片
+// 只经 FetchAttachment 读取，灵工不请求地址），只读字段（CommentID、Forwarded 等）忽略。其余校验见 assistant.CleanAttachments。
+func questionAttachments(in []Attachment) ([]assistant.Attachment, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make([]assistant.Attachment, 0, len(in))
+	for _, a := range in {
+		if strings.TrimSpace(a.URL) != "" {
+			return nil, fmt.Errorf("%w: question attachment %q must not have a url (images are read via FetchAttachment)", ErrInvalidInput, a.ID)
+		}
+		out = append(out, assistant.Attachment{ID: a.ID, Name: a.Name, ContentType: a.ContentType, Size: a.Size})
+	}
+	return out, nil
+}
+
+// fetchQuestionImage 把 Config.FetchAttachment 适配给知识问答（Purpose 为 question，userID 为提问人）；未配置时为 nil。
+func (l *Lingo) fetchQuestionImage() assistant.FetchImage {
+	f := l.cfg.FetchAttachment
+	if f == nil {
+		return nil
+	}
+	return func(ctx context.Context, userID string, convID, msgID int64, a assistant.Attachment) (io.ReadCloser, error) {
+		rc, err := f(ctx, userID, Attachment{ID: a.ID, Name: a.Name, ContentType: a.ContentType, Size: a.Size,
+			Purpose: AttachmentForQuestion, ConversationID: convID, MessageID: msgID})
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
+			return nil, assistant.ErrImageDenied
+		}
+		if err == nil && rc == nil {
+			return nil, assistant.ErrImageDenied // 实现有误：没有内容也没有错误，按拒绝处理
+		}
+		return rc, err
+	}
 }
 
 func publicConversation(c *assistant.Conversation) Conversation {
@@ -234,6 +299,9 @@ func publicConversation(c *assistant.Conversation) Conversation {
 func publicMessage(m *assistant.Message) ConversationMessage {
 	out := ConversationMessage{ID: m.ID, ConversationID: m.ConversationID, Role: m.Role, Content: m.Content, Status: m.Status,
 		Error: m.Error, ReplyTo: m.ReplyTo, Citations: publicCitations(m.Citations), CreatedAt: m.CreatedAt}
+	for _, a := range m.Attachments {
+		out.Attachments = append(out.Attachments, Attachment{ID: a.ID, Name: a.Name, ContentType: a.ContentType, Size: a.Size})
+	}
 	if m.Action != nil {
 		a := publicAction(m.Action)
 		out.PendingAction = &a
@@ -312,6 +380,7 @@ func (l *Lingo) newAssistant() (*assistant.Service, error) {
 		},
 	}
 	o.BrainFor = l.brainFor // 每轮提问取当前的模型（连接配置可在运行时修改）
+	o.FetchImage = l.fetchQuestionImage()
 	o.Knowledge = l.knowledge
 	if !l.data.Empty() {
 		o.DataTools = assistantData{l}

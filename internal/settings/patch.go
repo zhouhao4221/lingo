@@ -23,6 +23,7 @@ type SlotPatch struct {
 	BaseURL  *string
 	APIKey   *string
 	Model    *string
+	Images   *bool
 }
 
 // Patch 是一次修改。
@@ -102,7 +103,7 @@ func apply(ov Overrides, st Stored, p Patch, forSave bool) (Stored, Changed, err
 }
 
 func (p SlotPatch) empty() bool {
-	return p.Provider == nil && p.BaseURL == nil && p.APIKey == nil && p.Model == nil
+	return p.Provider == nil && p.BaseURL == nil && p.APIKey == nil && p.Model == nil && p.Images == nil
 }
 
 func applyGitea(cfg, cur Gitea, p GiteaPatch) (Gitea, []string, error) {
@@ -186,6 +187,9 @@ func applySlot(name string, cur Slot, p SlotPatch) (Slot, []string, error) {
 	set("base_url", &out.BaseURL, p.BaseURL)
 	set("api_key", &out.APIKey, p.APIKey)
 	set("model", &out.Model, p.Model)
+	if p.Images != nil {
+		out.Images, fields = *p.Images, append(fields, "images")
+	}
 	switch out.Provider {
 	case "", ProviderOpenAI:
 	case ProviderDeepSeek:
@@ -202,6 +206,13 @@ func applySlot(name string, cur Slot, p SlotPatch) (Slot, []string, error) {
 	}
 	if (out.Provider == "") != (out.Model == "") {
 		return Slot{}, nil, fmt.Errorf("%w: %s model needs both provider and model", ErrInvalid, name)
+	}
+	if out.Provider == "" {
+		out.Images = false // 清空槽位时一并清除图片能力声明
+	}
+	if out.Images && out.Provider != ProviderOpenAI {
+		// 图片按 OpenAI 兼容多模态格式发送；DeepSeek 对话接口不接受图片，不允许声明
+		return Slot{}, nil, fmt.Errorf("%w: %s model images is only supported for the openai provider", ErrInvalid, name)
 	}
 	// 接口地址变了（协议、主机，含换类型）却沿用已存的 API Key：清空槽位时一并清空 API Key，改成新地址时要求重新提交
 	if p.APIKey == nil && cur.APIKey != "" && originOf(endpoint(cur)) != originOf(endpoint(out)) {

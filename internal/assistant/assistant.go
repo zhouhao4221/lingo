@@ -117,6 +117,8 @@ type Message struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	Action         *Action // 该助手消息提出的待确认操作（读取时回填）
+	// Attachments 是用户消息附带的图片引用（REQ-009）；助手消息为空
+	Attachments []Attachment
 }
 
 // Citations 是回答引用的工单、版本与知识条目（回答当时的快照）。
@@ -286,6 +288,8 @@ type Options struct {
 	Knowledge Knowledge
 	// DataTools 是业务数据工具（REQ-008）；为空时意图解析看不到工具，行为与未接入时一致。
 	DataTools DataTools
+	// FetchImage 读取提问附带的图片（REQ-009）；为空时带图提问返回 ErrImagesUnsupported。
+	FetchImage FetchImage
 	// Brain 是模型调用；为空时发送与重试返回 ErrNoModel。
 	Brain Brain
 	// BrainFor 非空时每轮提问开始时调用，取当前的模型（运行时可更换模型），返回 nil 表示未配置；优先于 Brain。
@@ -341,6 +345,9 @@ type Brain interface {
 	Intent(ctx context.Context, in IntentInput) (*Intent, error)
 	// Answer 依据 Facts 组织回答；onDelta 非空时逐片段回调（模型不支持流式时整段回调一次）。
 	Answer(ctx context.Context, in AnswerInput, onDelta func(string)) (string, error)
+	// SupportsImages 报告能否处理带图提问（REQ-009）：组织回答的模型声明了支持图片。为假时带图提问返回
+	// ErrImagesUnsupported，不会丢掉图片只按文字回答。
+	SupportsImages() bool
 }
 
 // ConfirmInput 是确认判断的输入。
@@ -356,6 +363,8 @@ type HistoryItem struct {
 	Tickets   []TicketRef    `json:"tickets,omitempty"`
 	Knowledge []KnowledgeRef `json:"knowledge,omitempty"`
 	Tags      []string       `json:"releases,omitempty"`
+	// Images 是该条用户消息附带的图片数（REQ-009）；历史图片不再发给模型
+	Images int `json:"images,omitempty"`
 }
 
 // IntentInput 是意图解析的输入。
@@ -367,6 +376,8 @@ type IntentInput struct {
 	NeedTitle bool // 需要同时生成会话标题
 	// Tools 是调用人可调用的业务数据工具（REQ-008）；为空时意图解析的提示词与输入与未接入时完全相同。
 	Tools []ToolInfo
+	// Images 是本条提问附带的图片（REQ-009），已校验；为空时意图解析的提示词与输入与不带图时完全相同。
+	Images []Image
 }
 
 // Intent 是解析出的查询意图。字段已由 Brain 校验（非法枚举丢弃、数量与长度截断）。
@@ -410,4 +421,5 @@ type AnswerInput struct {
 	History  []HistoryItem
 	Question string
 	Facts    json.RawMessage // 本轮查询结果（白名单字段）
+	Images   []Image         // 本条提问附带的图片（REQ-009）
 }

@@ -24,6 +24,9 @@ const (
 	textNeedBody    = "请直接给出要留言的原文，例如：在 #12 留言：复现环境是 Chrome 120。"
 	textNoKnowledge = "知识库里还没有相关内容。可以提交一个咨询工单，由后台人员答复。"
 	textReadOnly    = "这是同事提交的工单，你可以查看进展，但只能对自己提交的工单留言。"
+	// textNoImageComment：带图的消息不提出留言（REQ-009）
+	textNoImageComment = "留言不支持附带图片。请不带图片再发一次要留言的内容；需要补充截图时，请在工单中补充附件。"
+	titleImages        = "图片提问"
 )
 
 var statusNames = map[string]string{

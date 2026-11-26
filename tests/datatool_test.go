@@ -260,6 +260,56 @@ func mcpRaw(t *testing.T, h http.Handler, hdr map[string]string, body string) st
 
 const toolsListReq = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
 
+// sameToolsAsV080 报告 tools/list 与 v0.8.0 的快照一致：除 ask 外逐字节相同（顺序、描述、参数）；ask 只多了 REQ-009 的
+// 图片参数（attachments，question 不再是 schema 必填），其余参数不变。
+func sameToolsAsV080(t *testing.T, got, golden string) bool {
+	t.Helper()
+	type tool = map[string]json.RawMessage
+	split := func(s string) (rest string, ask tool) {
+		var resp struct {
+			JSONRPC string `json:"jsonrpc"`
+			ID      int    `json:"id"`
+			Result  struct {
+				Tools []tool `json:"tools"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal([]byte(s), &resp); err != nil {
+			t.Fatalf("tools/list: %v", err)
+		}
+		var others []tool
+		for _, x := range resp.Result.Tools {
+			if string(x["name"]) == `"ask"` {
+				ask = x
+				continue
+			}
+			others = append(others, x)
+		}
+		b, _ := json.Marshal(others)
+		return string(b), ask
+	}
+	gotRest, gotAsk := split(got)
+	wantRest, wantAsk := split(golden)
+	if gotRest != wantRest || gotAsk == nil || wantAsk == nil {
+		return false
+	}
+	var gs, ws struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if json.Unmarshal(gotAsk["inputSchema"], &gs) != nil || json.Unmarshal(wantAsk["inputSchema"], &ws) != nil {
+		return false
+	}
+	if len(gs.Required) != 0 || gs.Properties["attachments"] == nil || len(gs.Properties) != len(ws.Properties)+1 {
+		return false
+	}
+	for k, v := range ws.Properties {
+		if string(gs.Properties[k]) != string(v) {
+			return false
+		}
+	}
+	return true
+}
+
 // 回归：不注册工具或注册的全部被忽略时，tools/list 与 v0.8.0 完全一致（testdata 由 v0.8.0 生成），initialize 不变。
 func TestDataToolMCPRegression(t *testing.T) {
 	golden, err := os.ReadFile("testdata/mcp_tools_v0.8.0.json")
@@ -277,7 +327,7 @@ func TestDataToolMCPRegression(t *testing.T) {
 	none := newToolLingo(t, db)
 	bad := newToolLingo(t, db, ignored...)
 	for name, l := range map[string]*lingo.Lingo{"none": none, "all ignored": bad} {
-		if got := mcpRaw(t, l.MCPHandler(), user, toolsListReq); got != string(golden) {
+		if got := mcpRaw(t, l.MCPHandler(), user, toolsListReq); !sameToolsAsV080(t, got, string(golden)) {
 			t.Errorf("%s: tools/list differs from v0.8.0", name)
 		}
 	}
@@ -302,7 +352,7 @@ func TestDataToolMCP(t *testing.T) {
 	h := l.MCPHandler()
 	scoped := map[string]string{"X-User": "u1", "X-Role": "agent", "X-Scopes": "order:read", "X-Projects": "crm"}
 	plain := map[string]string{"X-User": "u2", "X-Role": "agent"}
-	if got := mcpRaw(t, h, plain, toolsListReq); got != string(golden) {
+	if got := mcpRaw(t, h, plain, toolsListReq); !sameToolsAsV080(t, got, string(golden)) {
 		t.Error("caller without scope sees business tools")
 	}
 	list := mcpRaw(t, h, scoped, toolsListReq)

@@ -58,6 +58,7 @@ type turnCtx struct {
 	onDelta  func(string)
 	convID   int64      // 会话 ID（业务数据审计记录用）
 	tools    []ToolInfo // 交给意图解析的业务数据工具（REQ-008）
+	images   []Image    // 本条提问附带的图片（REQ-009），随意图解析与组织回答发给模型
 }
 
 // ---- 工单 ----
@@ -409,7 +410,7 @@ func (s *Service) answer(ctx context.Context, tc *turnCtx, f facts, cites Citati
 		gs = &groundedStream{ids: ids, kids: kids, checkK: checkK, out: tc.onDelta}
 		onDelta = gs.write
 	}
-	out, err := s.brainOf(ctx).Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data}, onDelta)
+	out, err := s.brainOf(ctx).Answer(ctx, AnswerInput{History: tc.history, Question: tc.question, Facts: data, Images: tc.images}, onDelta)
 	if err != nil {
 		return nil, modelError{err}
 	}
@@ -539,7 +540,9 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 		}
 	}
 	if len(hits) == 0 && len(ts) == 0 {
-		_ = s.o.Knowledge.Miss(ctx, tc.p, in.Project, tc.question) // 未答上统计（REQ-007）：失败不影响回答
+		if tc.question != "" { // 只发了图片的提问没有可统计的文字（图片不进入知识库）
+			_ = s.o.Knowledge.Miss(ctx, tc.p, in.Project, tc.question) // 未答上统计（REQ-007）：失败不影响回答
+		}
 		return &reply{content: textNoKnowledge, outcome: OutcomeNotFound}, nil
 	}
 	readable, err := s.readableSources(ctx, tc.p, hits)

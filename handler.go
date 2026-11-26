@@ -32,11 +32,13 @@ import (
 // 业务数据调用审计（REQ-008）：GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=（本人，及 reviewer /
 // admin 明确负责的项目）；工具暂时不可用返回 503 tool_unavailable，调用失败返回 502 tool_failed。
 // 知识问答（会话只有本人可见）：POST /conversations、GET /conversations、DELETE /conversations/{id}、
-// GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream"}）、
+// GET /conversations/{id}/messages、POST /conversations/{id}/messages（{"content","time_zone","stream","attachments"}，
+// attachments 为提问附带的图片 [{"id","name","content_type","size"}]，见 MessageInput.Attachments）、
 // POST /conversations/{id}/messages/{mid}/retry、POST /conversations/{id}/actions/{aid}/confirm|cancel。
 // stream 为 true 时以 SSE 返回：若干 event: delta（data {"text"}），最后恰好一个 event: message（data 为完整的助手消息，
 // 以它的 content 为准）；开始输出后出错发送 event: error（data {"code","message"}）。开始输出前的错误仍按 JSON 错误响应。
-// 未配置 Config.Model 时发送与重试返回 501 model_not_configured。
+// 未配置 Config.Model 时发送与重试返回 501 model_not_configured；带图提问而模型不支持图片或未配置 FetchAttachment 时返回
+// 501 images_unsupported（REQ-009）。
 func (l *Lingo) Handler() http.Handler { return l.rest }
 
 func (l *Lingo) newRESTHandler() http.Handler {
@@ -504,15 +506,17 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		var in struct {
-			Content  string `json:"content"`
-			TimeZone string `json:"time_zone"`
-			Stream   bool   `json:"stream"`
+			Content     string       `json:"content"`
+			TimeZone    string       `json:"time_zone"`
+			Stream      bool         `json:"stream"`
+			Attachments []Attachment `json:"attachments"`
 		}
 		if err := r.Decode(&in); err != nil {
 			return nil, err
 		}
 		return reply(r, in.Stream, func(onDelta func(string)) (ConversationMessage, error) {
-			return l.SendMessageStream(ctx(r), user(r), id, MessageInput{Content: in.Content, TimeZone: in.TimeZone}, onDelta)
+			return l.SendMessageStream(ctx(r), user(r), id, MessageInput{Content: in.Content, TimeZone: in.TimeZone,
+				Attachments: in.Attachments}, onDelta)
 		})
 	})
 	rt.Handle("POST /conversations/{id}/messages/{mid}/feedback", func(r *httpapi.Request) (any, error) {
@@ -638,6 +642,8 @@ func restError(err error) (int, string) {
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, ErrNoModel):
 		return http.StatusNotImplemented, "model_not_configured"
+	case errors.Is(err, ErrImagesUnsupported):
+		return http.StatusNotImplemented, "images_unsupported"
 	case errors.Is(err, ErrToolUnavailable):
 		return http.StatusServiceUnavailable, "tool_unavailable"
 	case errors.Is(err, ErrToolFailed):

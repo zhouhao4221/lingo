@@ -47,6 +47,9 @@ func TestAttachmentsAndCommentsFlow(t *testing.T) {
 		Authenticate: headerAuth,
 		FetchAttachment: func(_ context.Context, userID string, a lingo.Attachment) (io.ReadCloser, error) {
 			fetchedBy.Store(a.ID, userID)
+			if a.Purpose != lingo.AttachmentForTicket || a.TicketID == 0 || a.ConversationID != 0 || a.MessageID != 0 { // REQ-009
+				t.Errorf("ticket attachment %s fetched with purpose %q ticket %d", a.ID, a.Purpose, a.TicketID)
+			}
 			b, ok := files[a.ID]
 			if !ok { // 接入方校验归属：不是该用户的附件
 				return nil, fmt.Errorf("file %s not owned by %s: %w", a.ID, userID, lingo.ErrNotFound)

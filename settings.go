@@ -52,6 +52,9 @@ type ModelSlotSettings struct {
 	BaseURL  string        `json:"base_url,omitempty"` // 为空时用类型的默认地址
 	Model    string        `json:"model,omitempty"`
 	APIKey   SecretSetting `json:"api_key"`
+	// Images 表示该模型声明了支持图片输入（REQ-009，知识问答带图提问要求主模型支持）。来源为 database 时为保存的声明
+	// （只能用于 openai 类型）；来源为 config 时为代码中模型的 ImageModel 声明（只读）。
+	Images bool `json:"images"`
 }
 
 // SettingsMeta 是一类配置的版本（每次保存 +1）与最近修改。
@@ -98,6 +101,8 @@ type ModelSlotUpdate struct {
 	BaseURL  *string `json:"base_url"`
 	APIKey   *string `json:"api_key"`
 	Model    *string `json:"model"`
+	// Images 声明模型支持图片输入（REQ-009），只能用于 openai 类型；灵工不探测模型能力，按所用模型如实填写
+	Images *bool `json:"images"`
 }
 
 // ModelConnectionUpdate 是模型连接配置的修改。
@@ -206,6 +211,13 @@ func (l *Lingo) UpdateConnectionSettings(ctx context.Context, u User, in Connect
 
 // markApplied 按本实例实际生效的连接标出各类配置是否已生效。
 func (l *Lingo) markApplied(s ConnectionSettings, st settings.Stored) ConnectionSettings {
+	// 代码配置的槽位：图片能力取自模型对象的 ImageModel 声明
+	if s.Model.Main.Source == SourceConfig {
+		s.Model.Main.Images = supportsImages(l.cfg.Model)
+	}
+	if s.Model.Light.Source == SourceConfig {
+		s.Model.Light.Images = supportsImages(l.cfg.LightModel)
+	}
 	c := l.conn()
 	if c == nil {
 		return s
@@ -377,7 +389,7 @@ func settingsPatch(in ConnectionSettingsUpdate) settings.Patch {
 			if s == nil {
 				return nil
 			}
-			return &settings.SlotPatch{Provider: s.Provider, BaseURL: s.BaseURL, APIKey: s.APIKey, Model: s.Model}
+			return &settings.SlotPatch{Provider: s.Provider, BaseURL: s.BaseURL, APIKey: s.APIKey, Model: s.Model, Images: s.Images}
 		}
 		p.Main, p.Light = slot(m.Main), slot(m.Light)
 	}
@@ -395,7 +407,7 @@ func publicSettings(e settings.Effective, st settings.Stored) ConnectionSettings
 	slot := func(s settings.Slot, source settings.Source) ModelSlotSettings {
 		out := ModelSlotSettings{Source: src(source), APIKey: SecretSetting{Source: src(source)}}
 		if source == settings.SourceDatabase {
-			out.Provider, out.BaseURL, out.Model = s.Provider, s.BaseURL, s.Model
+			out.Provider, out.BaseURL, out.Model, out.Images = s.Provider, s.BaseURL, s.Model, s.Images
 			out.APIKey.Set, out.APIKey.Masked = s.APIKey != "", settings.Mask(s.APIKey)
 		}
 		return out

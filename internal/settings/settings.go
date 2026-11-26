@@ -55,6 +55,8 @@ type Slot struct {
 	BaseURL  string `json:"base_url,omitempty"`
 	APIKey   string `json:"api_key,omitempty"`
 	Model    string `json:"model,omitempty"`
+	// Images 声明该模型支持图片输入（REQ-009），只能用于 openai 类型（OpenAI 兼容多模态格式）
+	Images bool `json:"images,omitempty"`
 }
 
 // Configured 报告槽位是否已配置（类型与模型名都有值；API Key 可空，兼容本地服务）。

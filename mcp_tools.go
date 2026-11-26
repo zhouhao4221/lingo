@@ -385,21 +385,39 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 				return list(l.LLMUsage(ctx, u, a.From, a.To))
 			}),
 		tool("ask", "以自然语言询问工单进展、修复版本、上线情况与近期发版，回答附引用的工单与版本。conversation_id 为空时新建会话，"+
-			"返回值含 conversation_id，追问时传入。要求给工单留言时返回 pending_action，须经用户同意后用 confirm_action 执行。",
-			`{"type":"object","required":["question"],"properties":{"question":{"type":"string"},
-				"conversation_id":{"type":"integer"},"time_zone":{"type":"string","description":"IANA 时区，如 Asia/Shanghai"}}}`,
+			"返回值含 conversation_id，追问时传入。要求给工单留言时返回 pending_action，须经用户同意后用 confirm_action 执行。"+
+			"attachments 为随提问附带的图片引用（接入方附件系统中的 ID，不含地址；最多 4 张 PNG / JPEG / WebP），带图时 question 可为空；"+
+			"模型不支持图片时报错。",
+			`{"type":"object","properties":{"question":{"type":"string"},
+				"conversation_id":{"type":"integer"},"time_zone":{"type":"string","description":"IANA 时区，如 Asia/Shanghai"},
+				"attachments":{"type":"array","maxItems":4,"items":{"type":"object","required":["id","content_type"],"properties":{
+					"id":{"type":"string"},"name":{"type":"string"},"content_type":{"type":"string","enum":["image/png","image/jpeg","image/webp"]},
+					"size":{"type":"integer"}}}}}}`,
 			func(ctx context.Context, u User, a struct {
 				Question       string
 				ConversationID int64  `json:"conversation_id"`
 				TimeZone       string `json:"time_zone"`
+				Attachments    []struct {
+					ID          string `json:"id"`
+					Name        string `json:"name"`
+					ContentType string `json:"content_type"`
+					Size        int64  `json:"size"`
+				} `json:"attachments"`
 			}) (any, error) {
-				if strings.TrimSpace(a.Question) == "" {
+				if strings.TrimSpace(a.Question) == "" && len(a.Attachments) == 0 {
 					return nil, &mcp.ArgError{Msg: "question is required"}
+				}
+				var atts []Attachment
+				for _, x := range a.Attachments {
+					atts = append(atts, Attachment{ID: x.ID, Name: x.Name, ContentType: x.ContentType, Size: x.Size})
 				}
 				id, created := a.ConversationID, false
 				if id == 0 {
 					if isNil(l.mainModel()) { // 先校验，避免失败的调用留下空会话
 						return nil, ErrNoModel
+					}
+					if len(atts) > 0 && (!supportsImages(l.mainModel()) || l.cfg.FetchAttachment == nil) {
+						return nil, ErrImagesUnsupported
 					}
 					c, err := l.CreateConversation(ctx, u, "")
 					if err != nil {
@@ -407,9 +425,9 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 					}
 					id, created = c.ID, true
 				}
-				m, err := l.SendMessage(ctx, u, id, MessageInput{Content: a.Question, TimeZone: a.TimeZone})
+				m, err := l.SendMessage(ctx, u, id, MessageInput{Content: a.Question, TimeZone: a.TimeZone, Attachments: atts})
 				if err != nil {
-					if created && (errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrNoModel)) {
+					if created && (errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrNoModel) || errors.Is(err, ErrImagesUnsupported)) {
 						// 提问在保存前就被拒（参数不合法等）：删掉刚建的空会话；其他错误时提问可能已经保存，保留会话
 						_ = l.DeleteConversation(context.WithoutCancel(ctx), u, id)
 					}

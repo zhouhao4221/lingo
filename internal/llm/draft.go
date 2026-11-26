@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/zhouhao4221/lingo/internal/assistant"
 	"github.com/zhouhao4221/lingo/internal/textutil"
 )
 
@@ -16,7 +17,12 @@ import (
 type Message struct {
 	Role    string // system | user | assistant
 	Content string
+	// Images 是随这条消息发给模型的图片（REQ-009，只出现在带图提问的 user 消息中）；只发给声明支持图片的模型。
+	Images []Image
 }
+
+// Image 是发给模型的图片（已校验类型与大小）。
+type Image = assistant.Image
 
 // Chat 是对话模型，由根包把 lingo.Model 适配而来；不报告用量的模型返回零值 Usage。
 type Chat func(ctx context.Context, messages []Message) (string, Usage, error)

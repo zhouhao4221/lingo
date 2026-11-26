@@ -212,6 +212,9 @@ func (s *Service) Rate(ctx context.Context, p auth.Principal, conversationID, me
 	if !helpful || m.Intent != IntentKnowledgeAsk || m.Outcome != OutcomeAnswered || q == nil {
 		return nil // 只有知识类问题的回答进入候选；其他反馈只记录
 	}
+	if len(q.Attachments) > 0 {
+		return nil // 带图提问的回答依赖图片内容（可能含业务数据），不进入知识库候选（REQ-009）
+	}
 	project, err := s.citedProject(ctx, m.Citations)
 	if err != nil || project == "" {
 		return err
