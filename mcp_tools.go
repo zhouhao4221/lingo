@@ -391,7 +391,7 @@ func (l *Lingo) mcpTools() []mcp.Tool {
 			`{"type":"object","properties":{"question":{"type":"string"},
 				"conversation_id":{"type":"integer"},"time_zone":{"type":"string","description":"IANA 时区，如 Asia/Shanghai"},
 				"attachments":{"type":"array","maxItems":4,"items":{"type":"object","required":["id","content_type"],"properties":{
-					"id":{"type":"string"},"name":{"type":"string"},"content_type":{"type":"string","enum":["image/png","image/jpeg","image/webp"]},
+					"id":{"type":"string"},"name":{"type":"string"},"content_type":{"type":"string","enum":["image/png","image/jpeg","image/jpg","image/webp"]},
 					"size":{"type":"integer"}}}}}}`,
 			func(ctx context.Context, u User, a struct {
 				Question       string

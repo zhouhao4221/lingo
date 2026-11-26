@@ -19,11 +19,13 @@ import (
 
 // 带图提问（REQ-009）的限制。
 const (
-	MaxImages      = 4       // 单条提问的图片上限
-	MaxImageBytes  = 5 << 20 // 单张图片的大小上限（按实际读取的字节数）
-	MaxImageSide   = 8192    // 图片宽、高的上限（像素）
-	imageFetchTime = 30 * time.Second
+	MaxImages     = 4       // 单条提问的图片上限
+	MaxImageBytes = 5 << 20 // 单张图片的大小上限（按实际读取的字节数）
+	MaxImageSide  = 8192    // 图片宽、高的上限（像素）
 )
+
+// imageFetchTime 是单张图片读取（含 FetchImage 与读完内容）的时限；变量只为测试可调。
+var imageFetchTime = 30 * time.Second
 
 // 图片类型：只接受这三种（按内容识别，声明的类型须与实际一致）。
 const (
@@ -157,10 +159,19 @@ func (s *Service) loadImage(ctx context.Context, userID string, m *Message, a At
 		return Image{}, &imageError{kind: ErrKindAttachmentError, err: fmt.Errorf("attachment %q: fetch failed", a.ID)}
 	}
 	defer rc.Close()
+	// 读取器未必理会 ctx：到时限（单图或整轮）就关闭它，让阻塞的 Read 返回，时限才真正生效
+	stop := context.AfterFunc(fctx, func() { _ = rc.Close() })
+	defer stop()
 	data, err := io.ReadAll(io.LimitReader(rc, MaxImageBytes+1))
+	if err == nil && fctx.Err() != nil {
+		err = fctx.Err() // 读完前已到时限，读到的内容可能不完整
+	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return Image{}, ctx.Err()
+			return Image{}, ctx.Err() // 整轮超时或取消
+		}
+		if fctx.Err() != nil {
+			return Image{}, &imageError{kind: ErrKindAttachmentError, err: fmt.Errorf("attachment %q: read timed out", a.ID)}
 		}
 		return Image{}, &imageError{kind: ErrKindAttachmentError, err: fmt.Errorf("attachment %q: read failed", a.ID)}
 	}

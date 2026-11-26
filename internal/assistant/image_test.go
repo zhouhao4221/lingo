@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/ticket"
 )
@@ -161,4 +162,56 @@ func TestLoadImages(t *testing.T) {
 	if _, err := (&Service{}).loadImages(context.Background(), "u1", msg(Attachment{ID: "ok", ContentType: ImagePNG})); !errors.Is(err, ErrImagesUnsupported) {
 		t.Errorf("no fetcher: %v", err)
 	}
+}
+
+// blockingFetch 返回一个不理会 ctx 的阻塞读取器（io.Pipe 的读端，写端永不写入），只有 Close 能让 Read 返回。
+func blockingFetch(context.Context, string, int64, int64, Attachment) (io.ReadCloser, error) {
+	r, _ := io.Pipe()
+	return r, nil
+}
+
+func TestLoadImageReadHonorsDeadline(t *testing.T) {
+	s := &Service{o: Options{FetchImage: blockingFetch}}
+	msg := &Message{ID: 7, ConversationID: 3, Attachments: []Attachment{{ID: "slow", ContentType: ImagePNG}}}
+	within := func(name string, d time.Duration, f func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { f(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(d):
+			t.Fatalf("%s: loadImages still blocked after %v", name, d)
+		}
+	}
+
+	// 整轮时限：返回 ctx 错误，归为 timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	within("turn deadline", 2*time.Second, func() {
+		_, err := s.loadImages(ctx, "u1", msg)
+		if !errors.Is(err, context.DeadlineExceeded) || errKind(ctx, err) != ErrKindTimeout {
+			t.Errorf("turn deadline: %v kind=%s", err, errKind(ctx, err))
+		}
+	})
+
+	// 取消：归为 canceled
+	cctx, ccancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, ccancel)
+	within("cancel", 2*time.Second, func() {
+		_, err := s.loadImages(cctx, "u1", msg)
+		if errKind(cctx, err) != ErrKindCanceled {
+			t.Errorf("cancel: %v kind=%s", err, errKind(cctx, err))
+		}
+	})
+
+	// 只是单图时限到：可重试的 attachment_error
+	defer func(d time.Duration) { imageFetchTime = d }(imageFetchTime)
+	imageFetchTime = 200 * time.Millisecond
+	within("image deadline", 2*time.Second, func() {
+		_, err := s.loadImages(context.Background(), "u1", msg)
+		var ie *imageError
+		if !errors.As(err, &ie) || errKind(context.Background(), err) != ErrKindAttachmentError {
+			t.Errorf("image deadline: %v kind=%s", err, errKind(context.Background(), err))
+		}
+	})
 }

@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
+	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -81,15 +85,63 @@ func (f *questionFiles) fetch(_ context.Context, userID string, a lingo.Attachme
 
 func newImageLingo(t *testing.T, m lingo.Model, fetch func(context.Context, string, lingo.Attachment) (io.ReadCloser, error)) (*lingo.Lingo, *sql.DB) {
 	t.Helper()
-	db := testDB(t, true)
-	g := httptest.NewServer(&giteaServer{templates: "[]"})
-	t.Cleanup(g.Close)
+	e := newImageEnv(t, m, fetch)
+	return e.l, e.db
+}
+
+// lockedBuffer 是可并发写入的日志缓冲（Run 的后台任务也会写日志）。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// imageEnv 记录发往 Gitea 替身的全部请求与全部日志（Debug 级），用于断言图片内容没有外流。
+type imageEnv struct {
+	l    *lingo.Lingo
+	db   *sql.DB
+	g    *giteaServer
+	logs *lockedBuffer
+	mu   sync.Mutex
+	reqs []string // 方法、路径与请求体
+}
+
+func (e *imageEnv) giteaRequests() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return strings.Join(e.reqs, "\n")
+}
+
+func newImageEnv(t *testing.T, m lingo.Model, fetch func(context.Context, string, lingo.Attachment) (io.ReadCloser, error)) *imageEnv {
+	t.Helper()
+	e := &imageEnv{db: testDB(t, true), g: &giteaServer{templates: "[]"}, logs: &lockedBuffer{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		e.mu.Lock()
+		e.reqs = append(e.reqs, r.Method+" "+r.URL.String()+" "+string(b))
+		e.mu.Unlock()
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		e.g.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
 	l, err := lingo.New(lingo.Config{
-		DB: db, Model: m, SkipSelfCheck: true, ReconcileInterval: -1,
-		Gitea:           lingo.GiteaConfig{BaseURL: g.URL, Token: "t", WebhookSecret: "s"},
+		DB: e.db, Model: m, SkipSelfCheck: true, ReconcileInterval: -1,
+		Gitea:           lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s"},
 		Projects:        []lingo.Project{{Key: "demo", Name: "Demo", Repos: []lingo.Repo{{Owner: "demo", Name: "api"}}}},
 		Authenticate:    headerUser,
 		FetchAttachment: fetch,
+		Logger:          slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +149,8 @@ func newImageLingo(t *testing.T, m lingo.Model, fetch func(context.Context, stri
 	if _, err := l.ListTriage(context.Background(), rita, lingo.TriageFilter{}); err != nil {
 		t.Fatal(err)
 	}
-	return l, db
+	e.l = l
+	return e
 }
 
 func TestQuestionImagesAnswered(t *testing.T) {
@@ -381,5 +434,170 @@ func TestQuestionImagesDatabaseSlot(t *testing.T) {
 	if _, err := l.UpdateConnectionSettings(ctx, admin, lingo.ConnectionSettingsUpdate{Model: &lingo.ModelConnectionUpdate{
 		Light: &lingo.ModelSlotUpdate{Provider: &ds, APIKey: sptr("k"), Images: bptr(true)}}}); !errors.Is(err, lingo.ErrInvalidInput) {
 		t.Errorf("deepseek images: %v", err)
+	}
+}
+
+// 带图提问的回答被评为有帮助也不进入知识库候选；同样的问题不带图时照常进入（对照）。
+func TestQuestionImagesNotKnowledgeCandidates(t *testing.T) {
+	shot := synthPNG(t)
+	files := &questionFiles{owner: map[string]string{"img-1": "u2"}, data: map[string][]byte{"img-1": shot}}
+	m := &visionModel{scriptModel: &scriptModel{}}
+	l, db := newImageLingo(t, m, files.fetch)
+	ctx := context.Background()
+	k, err := l.CreateKnowledge(ctx, rita, lingo.KnowledgeDraft{Project: "demo", Question: "怎么配置 SSO", Answer: "在集成页填写 IdP 元数据"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.answer = func(data string) string {
+		if strings.Contains(data, fmt.Sprintf("K%d", k.ID)) {
+			return fmt.Sprintf("参考 K%d：在集成页填写 IdP 元数据。", k.ID)
+		}
+		return "好的"
+	}
+	m.intents = []string{`{"intent":"knowledge_ask","keywords":["SSO"]}`, `{"intent":"knowledge_ask","keywords":["SSO"]}`}
+	conv, _ := l.CreateConversation(ctx, bob, "")
+	withImage, err := l.SendMessage(ctx, bob, conv.ID, lingo.MessageInput{Content: "SSO 怎么配置",
+		Attachments: []lingo.Attachment{{ID: "img-1", ContentType: "image/png"}}})
+	if err != nil || withImage.Status != "done" {
+		t.Fatalf("send with image: %+v %v", withImage, err)
+	}
+	if err := l.RateMessage(ctx, bob, conv.ID, withImage.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// 反馈照常计数（确认回答确实引用了知识条目），但不产生候选
+	if got, _ := l.ListKnowledge(ctx, rita, lingo.KnowledgeFilter{Status: lingo.KnowledgeActive}); len(got) != 1 || got[0].HelpfulCount != 1 {
+		t.Fatalf("feedback not counted: %+v", got)
+	}
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge WHERE source = 'assistant_feedback'"); n != 0 {
+		t.Errorf("answer to an image question became a candidate: %d", n)
+	}
+	// 对照：不带图的同一问题照常进入候选
+	plain := send(t, l, bob, conv.ID, "SSO 怎么配置")
+	if err := l.RateMessage(ctx, bob, conv.ID, plain.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_knowledge WHERE source = 'assistant_feedback'"); n != 1 {
+		t.Errorf("text-only answer should become a candidate: %d", n)
+	}
+}
+
+// noisyPNG 生成像素随机的合成图，base64 片段不会与其他数据偶然相同。
+func noisyPNG(t *testing.T) []byte {
+	t.Helper()
+	r := rand.New(rand.NewPCG(784, 7))
+	img := image.NewRGBA(image.Rect(0, 0, 48, 48))
+	for i := range img.Pix {
+		img.Pix[i] = byte(r.Uint32())
+	}
+	var b bytes.Buffer
+	if err := png.Encode(&b, img); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// 图片内容不写入数据库、日志与 Gitea；接入方的错误原文也不写入。整轮包括一次读取被拒、一次临时错误、重试成功，
+// 之后再用文字确认一条留言，让 Gitea 写操作经 outbox 实际发出。
+func TestQuestionImagesNotPersisted(t *testing.T) {
+	shot := noisyPNG(t)
+	b64 := base64.StdEncoding.EncodeToString(shot)
+	needles := map[string]string{
+		"base64 head": b64[64:96], "base64 middle": b64[len(b64)/2 : len(b64)/2+32], "base64 tail": b64[len(b64)-64 : len(b64)-32],
+		"raw bytes": string(shot[len(shot)/2 : len(shot)/2+32]), "host error": "gpcm-secret-7731",
+	}
+	var fmu sync.Mutex
+	calls := 0
+	fetch := func(_ context.Context, userID string, a lingo.Attachment) (io.ReadCloser, error) {
+		fmu.Lock()
+		defer fmu.Unlock()
+		calls++
+		switch calls {
+		case 1:
+			return nil, fmt.Errorf("gpcm-secret-7731: uploader mismatch for /srv/files/a.png: %w", lingo.ErrForbidden)
+		case 2:
+			return nil, errors.New("gpcm-secret-7731: object storage unavailable")
+		}
+		return io.NopCloser(bytes.NewReader(shot)), nil
+	}
+	m := &visionModel{scriptModel: &scriptModel{}}
+	e := newImageEnv(t, m, fetch)
+	l, db := e.l, e.db
+	ctx := context.Background()
+	tk := seedTicketRow(t, db, "u2", "", "api", "bug", "登录超时", "in_progress", 12)
+	id := strconv.FormatInt(tk, 10)
+	m.answer = func(string) string { return "#" + id + " 处理中" }
+	m.intents = []string{`{"intent":"ticket_find","ticket_ids":[` + id + `]}`,
+		`{"intent":"comment","ticket_ids":[` + id + `],"comment_body":"复现环境是 Chrome"}`}
+
+	conv, _ := l.CreateConversation(ctx, bob, "")
+	got, err := l.SendMessage(ctx, bob, conv.ID, lingo.MessageInput{Content: "#" + id + " 这个报错怎么办",
+		Attachments: []lingo.Attachment{{ID: "a", Name: "报错.png", ContentType: "image/png"}}})
+	if err != nil || got.Status != "failed" || got.Error != "attachment_rejected" {
+		t.Fatalf("denied: %+v %v", got, err)
+	}
+	if got, err = l.RetryMessage(ctx, bob, conv.ID, got.ID, ""); err != nil || got.Status != "failed" || got.Error != "attachment_error" {
+		t.Fatalf("transient: %+v %v", got, err)
+	}
+	if got, err = l.RetryMessage(ctx, bob, conv.ID, got.ID, ""); err != nil || got.Status != "done" {
+		t.Fatalf("retry: %+v %v", got, err)
+	}
+	if c := m.imageCounts(); len(c) != 2 || c[0] != 1 || c[1] != 1 {
+		t.Fatalf("the model should have received the image: %v", c) // 否则下面的“不含”断言没有意义
+	}
+	p := send(t, l, bob, conv.ID, "在 #"+id+" 留言：复现环境是 Chrome")
+	if p.PendingAction == nil {
+		t.Fatalf("no pending action: %+v", p)
+	}
+	if _, err := l.ConfirmPendingAction(ctx, bob, conv.ID, p.PendingAction.ID); err != nil {
+		t.Fatal(err)
+	}
+	runLingo(t, l)
+	waitFor(t, func() bool {
+		e.g.mu.Lock()
+		defer e.g.mu.Unlock()
+		return len(e.g.comments) == 1
+	})
+
+	// 数据库：逐张 lingo_ 表按行转成 JSON 检查（含助手消息的 content / error / citations / attachments、用量、outbox、事件）
+	tables, err := db.QueryContext(ctx, `SELECT table_name FROM information_schema.tables
+		WHERE table_schema = current_schema() AND table_name LIKE 'lingo\_%' AND table_type = 'BASE TABLE' ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for tables.Next() {
+		var n string
+		if err := tables.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, n)
+	}
+	tables.Close()
+	var dump strings.Builder
+	for _, n := range names {
+		var s string
+		if err := db.QueryRowContext(ctx, "SELECT coalesce(string_agg(row_to_json(x)::text, E'\\n'), '') FROM "+n+" x").Scan(&s); err != nil {
+			t.Fatalf("%s: %v", n, err)
+		}
+		dump.WriteString(s)
+	}
+	if !strings.Contains(dump.String(), `"attachments":[{"id": "a"`) || !strings.Contains(dump.String(), "复现环境是 Chrome") {
+		t.Fatalf("dump does not look complete (%d tables): %.500s", len(names), dump.String())
+	}
+	reqs, logs := e.giteaRequests(), e.logs.String()
+	if !strings.Contains(reqs, "复现环境是 Chrome") {
+		t.Fatalf("gitea requests not captured: %q", reqs)
+	}
+	// 目前这一流程不写日志（logs 可能为空）；断言用于防止以后的日志带出图片或接入方错误原文
+	for name, s := range needles {
+		if strings.Contains(dump.String(), s) {
+			t.Errorf("database contains %s", name)
+		}
+		if strings.Contains(reqs, s) {
+			t.Errorf("gitea requests contain %s", name)
+		}
+		if strings.Contains(logs, s) {
+			t.Errorf("logs contain %s", name)
+		}
 	}
 }
