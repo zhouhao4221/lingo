@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 )
@@ -175,6 +177,30 @@ func TestListRejects(t *testing.T) {
 		if !errors.Is(err, c.want) || ts != nil || total != 0 {
 			t.Errorf("%s: %v %v %d", c.name, err, ts, total)
 		}
+	}
+	// 大量互不相同的非法状态：第一个非法值即返回，不做 O(n²) 去重
+	many := make([]string, 100000)
+	for i := range many {
+		many[i] = "bad" + strconv.Itoa(i)
+	}
+	start := time.Now()
+	if _, _, _, err := s.List(ctx, rev, "", false, SearchQuery{Statuses: many}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("many invalid statuses: %v", err)
+	}
+	// 合法值大量重复：线性完成
+	dup := make([]string, 100000)
+	for i := range dup {
+		dup[i] = []string{"open", "rejected", "fixed"}[i%3]
+	}
+	if _, _, _, err := s.List(ctx, rev, "", false, SearchQuery{Statuses: dup}); err != nil {
+		t.Errorf("many duplicate statuses: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("status dedupe took %v", d)
+	}
+	// 合法值在前、非法值在后：同样返回 ErrInvalid
+	if _, _, _, err := s.List(ctx, rev, "", false, SearchQuery{Statuses: []string{"open", "open", "nope"}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("trailing invalid: %v", err)
 	}
 	// 恰好上限的关键词数与长度可以
 	ok := SearchQuery{Keywords: append(strings.Fields(strings.Repeat("k ", MaxListKeywords-1)), strings.Repeat("长", MaxListKeywordRunes))}

@@ -246,9 +246,12 @@ func (s *Service) List(ctx context.Context, p auth.Principal, project string, mi
 			return nil, 0, false, fmt.Errorf("%w: keyword longer than %d characters", ErrInvalid, MaxListKeywordRunes)
 		}
 	}
-	if len(q.Statuses) > 1 { // 去重：合法取值只有 validStatus 的 13 个，去重后条件长度有界
-		uniq := make([]string, 0, len(q.Statuses))
+	if len(q.Statuses) > 1 { // 去重：先校验再去重，遇到非法值立即返回，uniq 最多为合法状态数（13 个），整体 O(n)
+		uniq := make([]string, 0, min(len(q.Statuses), 16))
 		for _, st := range q.Statuses {
+			if !validStatus(Status(st)) {
+				return nil, 0, false, fmt.Errorf("%w: status %q", ErrInvalid, st)
+			}
 			if !slices.Contains(uniq, st) {
 				uniq = append(uniq, st)
 			}
