@@ -58,8 +58,9 @@ type Tx interface {
 	SeenPull(ctx context.Context, ticketID int64, kind, pull string) (bool, error)
 	// AddHistory 写一条 ticket_events 审计记录。
 	AddHistory(ctx context.Context, h History) error
-	// SaveGiteaComment 按 GiteaID 新增或更新来自 Gitea 的评论，返回更新前的记录（新增时为 nil）。
-	SaveGiteaComment(ctx context.Context, c Comment) (prev *Comment, err error)
+	// SaveGiteaComment 按 GiteaID 新增或更新来自 Gitea 的评论，返回更新前的记录（新增时为 nil）；saved 为假表示未写入
+	// （灵工已记为删除，或 c.At 早于已保存版本的乱序旧编辑），此时 prev 为已保存的记录。
+	SaveGiteaComment(ctx context.Context, c Comment) (prev *Comment, saved bool, err error)
 	// DeleteGiteaComment 软删除来自 Gitea 的评论；评论不存在时不报错。
 	DeleteGiteaComment(ctx context.Context, giteaID int64, at time.Time) error
 	// AddPerspective 写一段需求视角补充，返回 ID。

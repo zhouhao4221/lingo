@@ -130,6 +130,12 @@ func searchWhere(q ticket.SearchQuery) (string, []any) {
 	if len(q.Statuses) > 0 {
 		w = append(w, "t.status = ANY(("+arg(textArray(q.Statuses))+"::text)::text[])")
 	}
+	if q.SubmitterName != "" {
+		w = append(w, "t.user_name ILIKE "+arg("%"+likeEscape(q.SubmitterName)+"%")+" ESCAPE '\\'")
+	}
+	if q.Order == ticket.OrderTriageAsc { // 只含当前待确认的（triage_since 在离开待确认时清空）
+		w = append(w, "t.status = 'pending_triage' AND t.triage_since IS NOT NULL")
+	}
 	for _, k := range q.Keywords {
 		p := arg("%" + likeEscape(k) + "%")
 		w = append(w, "(t.title ILIKE "+p+" ESCAPE '\\' OR t.body ILIKE "+p+" ESCAPE '\\')")
@@ -161,12 +167,20 @@ func likeEscape(s string) string {
 // Search 实现 ticket.QueryStore。
 func (s *Store) Search(ctx context.Context, q ticket.SearchQuery) ([]*ticket.Ticket, error) {
 	where, args := searchWhere(q)
-	if q.BeforeID > 0 {
+	order := "t.id DESC"
+	if q.Order == ticket.OrderTriageAsc {
+		// 按实际进入待确认的时间正序，同一时间按 ID 正序（稳定并列键）；游标为上一页最后一张的 (triage_since, id)
+		order = "t.triage_since, t.id"
+		if q.AfterID > 0 {
+			args = append(args, q.AfterTriage, q.AfterID)
+			where += fmt.Sprintf(" AND (t.triage_since, t.id) > ($%d::timestamptz, $%d::bigint)", len(args)-1, len(args))
+		}
+	} else if q.BeforeID > 0 {
 		args = append(args, q.BeforeID)
 		where += fmt.Sprintf(" AND t.id < $%d", len(args))
 	}
 	args = append(args, q.Limit)
-	return s.tickets(ctx, "SELECT "+ticketColumns+" WHERE "+where+fmt.Sprintf(" ORDER BY t.id DESC LIMIT $%d", len(args)), args...)
+	return s.tickets(ctx, "SELECT "+ticketColumns+" WHERE "+where+fmt.Sprintf(" ORDER BY %s LIMIT $%d", order, len(args)), args...)
 }
 
 // Stats 实现 ticket.QueryStore。

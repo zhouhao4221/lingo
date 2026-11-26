@@ -94,25 +94,28 @@ func TestGiteaCommentStore(t *testing.T) {
 	s, _ := store.New(db)
 	ctx := context.Background()
 	t1 := time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC)
+	var saved bool
 	save := func(c ticket.Comment) (prev *ticket.Comment) {
 		t.Helper()
 		if err := s.InTx(ctx, func(tx ticket.Tx) error {
 			var err error
-			prev, err = tx.SaveGiteaComment(ctx, c)
+			prev, saved, err = tx.SaveGiteaComment(ctx, c)
 			return err
 		}); err != nil {
 			t.Fatal(err)
 		}
 		return prev
 	}
-	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "v1", At: t1}); p != nil {
+	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "v1", At: t1}); p != nil || !saved {
 		t.Errorf("new comment prev = %+v", p)
 	}
-	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "v2", Public: true, At: t1.Add(time.Minute)}); p == nil || p.Body != "v1" || p.Public {
+	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "v2", Public: true, At: t1.Add(time.Minute)}); p == nil || p.Body != "v1" || p.Public || !saved {
 		t.Errorf("edit prev = %+v", p)
 	}
 	// 乱序到达的旧编辑不覆盖
-	save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "old", At: t1})
+	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "old", At: t1}); saved || p == nil || p.Body != "v2" {
+		t.Errorf("out-of-order edit saved=%v prev=%+v", saved, p)
+	}
 	var body string
 	if err := db.QueryRow("SELECT body FROM lingo_ticket_comments WHERE gitea_comment_id = 9").Scan(&body); err != nil || body != "v2" {
 		t.Errorf("body = %q %v", body, err)
@@ -120,7 +123,7 @@ func TestGiteaCommentStore(t *testing.T) {
 	if err := s.InTx(ctx, func(tx ticket.Tx) error { return tx.DeleteGiteaComment(ctx, 9, t1.Add(2*time.Minute)) }); err != nil {
 		t.Fatal(err)
 	}
-	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "late", Public: true, At: t1.Add(3 * time.Minute)}); p == nil || !p.Public {
+	if p := save(ticket.Comment{TicketID: id, GiteaID: 9, Body: "late", Public: true, At: t1.Add(3 * time.Minute)}); p == nil || !p.Public || saved {
 		t.Errorf("edit after delete prev = %+v", p)
 	}
 	if err := db.QueryRow("SELECT body FROM lingo_ticket_comments WHERE gitea_comment_id = 9").Scan(&body); err != nil || body != "v2" {

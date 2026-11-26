@@ -76,6 +76,27 @@ type CommentUpdate struct {
 	FromBot    bool   // 机器人自己发的评论（灵工转发的用户补充），只作确认
 	DeliveryID string
 	At         time.Time
+	// TicketID 非零时只写入该工单：Issue 关联的工单不是它时跳过（历史评论重新同步，防止写到其他工单）。
+	TicketID int64
+	// Silent 为真时不发 ticket.comment 事件（历史回补不通知提交人）；保存、对外判定与审计照常。
+	Silent bool
+}
+
+// CommentOutcome 是一条评论变化的处理结果（ResyncComment 返回）。
+type CommentOutcome string
+
+const (
+	CommentSkipped   CommentOutcome = "skipped"   // 机器人评论，或 Issue 不关联（指定的）工单
+	CommentAdded     CommentOutcome = "added"     // 新保存
+	CommentUpdated   CommentOutcome = "updated"   // 正文或对外判定有变化
+	CommentUnchanged CommentOutcome = "unchanged" // 与已保存的一致（含灵工本地已删除的评论）
+)
+
+// CommentResult 是 ResyncComment 的结果：Published / Unpublished 报告对提交人的可见性是否因此变化。
+type CommentResult struct {
+	Outcome     CommentOutcome
+	Published   bool // 由不可见变为对提交人可见（含新增即对外）
+	Unpublished bool // 由对外变为内部
 }
 
 // PullChange 是 Gitea PR 上发生的变化。
@@ -371,16 +392,30 @@ func (s *Sync) labelTicket(t *Ticket, cur IssueState, ignoreNeedInfo bool) {
 
 // ApplyComment 处理评论变化：保存到工单评论；对外评论首次出现时通知提交人。
 func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
+	_, err := s.applyComment(ctx, u)
+	return err
+}
+
+// ResyncComment 同 ApplyComment（同一套保存、去重、乱序与已删除判断），另返回处理结果，供历史评论重新同步统计。
+func (s *Sync) ResyncComment(ctx context.Context, u CommentUpdate) (CommentResult, error) {
+	return s.applyComment(ctx, u)
+}
+
+func (s *Sync) applyComment(ctx context.Context, u CommentUpdate) (CommentResult, error) {
+	res := CommentResult{Outcome: CommentSkipped}
 	if u.FromBot {
-		return nil // 灵工自己转发的评论，已在发出时记录
+		return res, nil // 灵工自己转发的评论，已在发出时记录
 	}
-	return s.o.Store.InTx(ctx, func(tx Tx) error {
+	err := s.o.Store.InTx(ctx, func(tx Tx) error {
 		t, err := tx.LockByIssue(ctx, u.Repo, u.Number)
 		if errors.Is(err, ErrNotFound) {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if u.TicketID != 0 && t.ID != u.TicketID {
+			return nil // Issue 已关联到其他工单：不写入
 		}
 		history := func() error {
 			return tx.AddHistory(ctx, History{TicketID: t.ID, Source: "gitea", Kind: string(u.Change), Payload: map[string]any{
@@ -393,24 +428,36 @@ func (s *Sync) ApplyComment(ctx context.Context, u CommentUpdate) error {
 			}
 			return tx.DeleteGiteaComment(ctx, u.CommentID, u.At)
 		}
-		prev, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
+		prev, saved, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
 			Body: u.Body, Public: u.Public, At: u.At})
 		if err != nil {
 			return err
 		}
-		if prev != nil && prev.Body == u.Body && prev.Public == u.Public {
-			return nil // 内容未变（重投或对账重放）：不重复留痕
+		if !saved || (prev != nil && prev.Body == u.Body && prev.Public == u.Public) {
+			// 未写入（灵工已删除、乱序旧编辑）或内容未变（重投、对账重放、重新同步）：不留痕、不通知
+			res.Outcome = CommentUnchanged
+			return nil
 		}
+		res.Outcome = CommentAdded
+		if prev != nil {
+			res.Outcome = CommentUpdated
+			res.Unpublished = prev.Public && !u.Public
+		}
+		res.Published = u.Public && (prev == nil || !prev.Public)
 		if err := history(); err != nil {
 			return err
 		}
-		if u.Public && (prev == nil || !prev.Public) {
+		if res.Published && !u.Silent {
 			e := s.event(t, notify.TicketComment, "", u.Body)
 			e.CommentID = u.CommentID
 			return tx.Emit(ctx, e)
 		}
 		return nil
 	})
+	if err != nil {
+		return CommentResult{}, err
+	}
+	return res, nil
 }
 
 // ApplyPull 处理 PR 变化：引用工单 Issue 的 PR 打开时工单进入开发中，带关闭关键词的 PR 合并时记为已修复。

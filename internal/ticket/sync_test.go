@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -157,11 +158,67 @@ func (m *memStore) ListVisible(_ context.Context, q VisibleQuery) ([]*Ticket, er
 }
 func (m *memStore) Search(_ context.Context, q SearchQuery) ([]*Ticket, error) {
 	m.lastSearch = &q
-	return nil, nil
+	var out []*Ticket
+	for _, t := range m.matching(q) {
+		if q.BeforeID > 0 && t.ID >= q.BeforeID {
+			continue
+		}
+		if q.Order == OrderTriageAsc && q.AfterID > 0 { // (triage_since, id) > 游标，按库中的微秒精度比较
+			if ts, at := t.TriageSince.UnixMicro(), q.AfterTriage.UnixMicro(); ts < at || (ts == at && t.ID <= q.AfterID) {
+				continue
+			}
+		}
+		if len(out) == q.Limit {
+			break
+		}
+		out = append(out, t)
+	}
+	return out, nil
 }
 func (m *memStore) Stats(_ context.Context, q SearchQuery) ([]StatRow, error) {
 	m.lastSearch = &q
-	return nil, nil
+	var out []StatRow
+	for _, t := range m.matching(q) { // 每张一行，调用方只求和
+		out = append(out, StatRow{ProjectKey: t.ProjectKey, Type: t.Type, Status: string(t.Status), Count: 1})
+	}
+	return out, nil
+}
+
+// matching 按 store.searchWhere 的语义在内存中过滤（范围、提交人、已转出、仓库、类型、状态、关键词），ID 降序。
+func (m *memStore) matching(q SearchQuery) []*Ticket {
+	var out []*Ticket
+	for _, t := range m.tickets {
+		switch {
+		case !q.Scope.All && !slices.Contains(q.Scope.Projects, t.ProjectKey),
+			q.UserID != "" && t.UserID != q.UserID,
+			len(q.UserIDs) > 0 && !slices.Contains(q.UserIDs, t.UserID),
+			q.ForwardedOnly && !t.Status.forwarded(),
+			q.Repo != "" && !strings.EqualFold(q.Repo, t.Repo),
+			q.Type != "" && t.Type != q.Type,
+			len(q.Statuses) > 0 && !slices.Contains(q.Statuses, string(t.Status)),
+			q.SubmitterName != "" && !strings.Contains(strings.ToLower(t.UserName), strings.ToLower(q.SubmitterName)),
+			q.Order == OrderTriageAsc && (t.Status != StatusPendingTriage || t.TriageSince == nil):
+			continue
+		}
+		hit := true
+		for _, k := range q.Keywords {
+			k = strings.ToLower(k)
+			hit = hit && (strings.Contains(strings.ToLower(t.Title), k) || strings.Contains(strings.ToLower(t.Body), k))
+		}
+		if hit {
+			out = append(out, t)
+		}
+	}
+	slices.SortFunc(out, func(a, b *Ticket) int { return int(b.ID - a.ID) })
+	if q.Order == OrderTriageAsc {
+		slices.SortFunc(out, func(a, b *Ticket) int {
+			if c := a.TriageSince.Compare(*b.TriageSince); c != 0 {
+				return c
+			}
+			return int(a.ID - b.ID)
+		})
+	}
+	return out
 }
 func (m *memStore) Events(_ context.Context, q EventQuery) ([]notify.Event, error) {
 	m.lastEventQuery = q
@@ -353,13 +410,17 @@ func (m *memStore) AddHistory(_ context.Context, h History) error {
 	return nil
 }
 
-func (m *memStore) SaveGiteaComment(_ context.Context, c Comment) (*Comment, error) {
+func (m *memStore) SaveGiteaComment(_ context.Context, c Comment) (*Comment, bool, error) {
 	prev, ok := m.comments[c.GiteaID]
-	m.comments[c.GiteaID] = c
 	if !ok {
-		return nil, nil
+		m.comments[c.GiteaID] = c
+		return nil, true, nil
 	}
-	return &prev, nil
+	if !c.At.IsZero() && c.At.Before(prev.At) { // 乱序旧编辑：不写入（同 store）
+		return &prev, false, nil
+	}
+	m.comments[c.GiteaID] = c
+	return &prev, true, nil
 }
 
 func (m *memStore) DeleteGiteaComment(_ context.Context, id int64, _ time.Time) error {

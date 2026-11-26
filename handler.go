@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/zhouhao4221/lingo/internal/httpapi"
 	"github.com/zhouhao4221/lingo/internal/ticket"
@@ -15,10 +16,19 @@ import (
 // bad_request / invalid_input（400）、forbidden（403）、not_found（404）、conflict（409）、internal（500）。
 //
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
+// 反馈管理列表（REQ-010）：GET /tickets?project=&repo=&type=&status=a,b&q=&submitter=&mine=&shared=&time_field=&from=&to=&sort=&before=&cursor=&limit=，
+// 返回 {"tickets","total","next_before","next_cursor"}，可见范围同 ListTickets。参数：status 逗号分隔、表示任一（重复的去重）；q 按空白拆词
+// （最多 10 个、每个最多 100 字，各词同时命中标题或正文）；mine / shared 只接受 true|false|1|0；time_field 取 created（默认）|
+// updated | forwarded（不传 from / to 时只含已转出的）；from / to 为 RFC 3339，to 不含；before 为上一页的 next_before（首页省略）；
+// limit 默认 50、最大 200；submitter 按提交人姓名子串匹配（不区分大小写，最多 100 字）；sort=triage_since 时只含当前待确认的，
+// 按实际进入待确认的时间从早到晚、同一时间按 ID 从小到大，翻页用 cursor（上一页的 next_cursor，不能与 before 同用；无重复，
+// 翻页开始前已提交的不会遗漏，翻页期间新进入的不保证出现在本轮翻页里）；
+// 其他取值返回 400；
 // 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、POST /tickets/{id}/reject-forwarded（驳回已转研发工单）、
 // GET /tickets/{id}/issue-close、POST /tickets/{id}/issue-close/retry（关闭关联 Issue 的进度与重试）、
+// POST /tickets/{id}/comments/resync（按当前 ReplyMode 重新同步历史 Gitea 评论，可带 {"notify":true}，REQ-011）、
 // GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
 // 连接配置（模型与 Gitea，权限见 Config.AuthorizeSettings）：GET / PUT /settings/connections、
@@ -75,6 +85,46 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		return httpapi.Created{Value: t}, nil
+	})
+	rt.Handle("GET /tickets", func(r *httpapi.Request) (any, error) {
+		var f TicketListFilter
+		var err error
+		if f.BeforeID, err = r.QueryInt("before"); err != nil {
+			return nil, err
+		}
+		limit, err := r.QueryInt("limit")
+		if err != nil {
+			return nil, err
+		}
+		f.Limit = int(limit)
+		if f.From, err = r.QueryTime("from"); err != nil {
+			return nil, err
+		}
+		if f.To, err = r.QueryTime("to"); err != nil {
+			return nil, err
+		}
+		if f.Mine, err = queryBool(r, "mine"); err != nil {
+			return nil, err
+		}
+		if f.IncludeShared, err = queryBool(r, "shared"); err != nil {
+			return nil, err
+		}
+		f.Project, f.Repo, f.Type, f.Keyword, f.TimeField = r.Query("project"), r.Query("repo"), TicketType(r.Query("type")),
+			r.Query("q"), r.Query("time_field")
+		f.SubmitterName, f.Sort, f.Cursor = r.Query("submitter"), r.Query("sort"), r.Query("cursor")
+		for _, s := range strings.Split(r.Query("status"), ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				f.Statuses = append(f.Statuses, s)
+			}
+		}
+		page, err := l.ListTickets(ctx(r), user(r), f)
+		if err != nil {
+			return nil, err
+		}
+		if page.Tickets == nil {
+			page.Tickets = []Ticket{}
+		}
+		return page, nil
 	})
 	rt.Handle("GET /tickets/mine", func(r *httpapi.Request) (any, error) {
 		before, err := r.QueryInt("before")
@@ -219,6 +269,19 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return Ticket{}, err
 		}
 		return l.RejectForwardedTicket(ctx(r), user(r), id, in.Reason)
+	})
+	rt.Handle("POST /tickets/{id}/comments/resync", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		var in struct {
+			Notify bool `json:"notify"`
+		}
+		if err := r.DecodeOptional(&in); err != nil {
+			return nil, err
+		}
+		return l.ResyncTicketComments(ctx(r), user(r), id, CommentResyncOptions{Notify: in.Notify})
 	})
 	rt.Handle("GET /tickets/{id}/issue-close", func(r *httpapi.Request) (any, error) {
 		id, err := r.PathID("id")
@@ -617,6 +680,17 @@ func (l *Lingo) newRESTHandler() http.Handler {
 		return nil, err
 	})
 	return rt
+}
+
+// queryBool 读取布尔查询参数：缺省或空为 false，取值 true / false / 1 / 0。
+func queryBool(r *httpapi.Request, name string) (bool, error) {
+	switch r.Query(name) {
+	case "", "false", "0":
+		return false, nil
+	case "true", "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: %s must be true or false", ErrInvalidInput, name)
 }
 
 // list 保证空列表编码为 [] 而不是 null。

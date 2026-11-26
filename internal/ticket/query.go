@@ -2,8 +2,13 @@ package ticket
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/notify"
@@ -102,6 +107,15 @@ const (
 	TimeForwarded = "forwarded" // 转出时间：后台确认转出的时间，自动转出的为提交时间
 )
 
+// 检索排序（SearchQuery.Order）。
+const (
+	// OrderIDDesc 是默认排序：ID 降序（新的在前），游标为 BeforeID。
+	OrderIDDesc = ""
+	// OrderTriageAsc 按实际进入待确认（pending_triage）的时间 triage_since 正序、同一时间按 ID 正序（REQ-010 增补，待办 #789）；
+	// 只含当前待确认的工单，游标为 AfterTriage + AfterID（见 TriageCursor）。
+	OrderTriageAsc = "triage_since"
+)
+
 // SearchQuery 是工单检索的条件，供知识问答按自然语言条件查找工单。范围（Scope、UserID、ForwardedOnly）由
 // Service.Search 按调用者角色填写，调用方传入的值会被覆盖。
 type SearchQuery struct {
@@ -118,7 +132,13 @@ type SearchQuery struct {
 	TimeField     string    // TimeCreated | TimeUpdated | TimeForwarded；为空时按 TimeCreated
 	From, To      time.Time // 零值不限；To 不含
 	BeforeID      int64     // 游标：按 ID 降序
-	Limit         int
+	// SubmitterName 非空时只含提交人姓名（Ticket.UserName 快照）包含该文本的工单（不区分大小写）。
+	SubmitterName string
+	Order         string // OrderIDDesc | OrderTriageAsc
+	// AfterTriage / AfterID 是 OrderTriageAsc 的游标：只含 (triage_since, id) 大于它的；AfterID 为 0 表示首页。
+	AfterTriage time.Time
+	AfterID     int64
+	Limit       int
 }
 
 // StatRow 是工单统计的一行。
@@ -223,6 +243,110 @@ func (s *Service) Stats(ctx context.Context, p auth.Principal, project string, m
 		return nil, err
 	}
 	return s.queries().Stats(ctx, q)
+}
+
+// 管理列表（List）的关键词与提交人姓名上限。
+const (
+	MaxListKeywords     = 10
+	MaxListKeywordRunes = 100
+	MaxListNameRunes    = 100
+)
+
+// TriageCursor 返回 OrderTriageAsc 排序下排在 t 之后的游标（不透明字符串）；t 不是待确认工单时返回空。
+func TriageCursor(t *Ticket) string {
+	if t == nil || t.TriageSince == nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(t.TriageSince.UnixMicro(), 10) + ":" + strconv.FormatInt(t.ID, 10)))
+}
+
+// 游标时间的合法范围（0001-01-01 至 9999-12-31，UTC），超出即视为伪造或损坏的游标。
+var (
+	minCursorTime = time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC)
+	maxCursorTime = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// ParseTriageCursor 解析 TriageCursor 的结果；格式不对或时间超出 0001–9999 年时返回 ErrInvalid。
+func ParseTriageCursor(s string) (time.Time, int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err == nil {
+		if a, b, ok := strings.Cut(string(raw), ":"); ok {
+			us, err1 := strconv.ParseInt(a, 10, 64)
+			id, err2 := strconv.ParseInt(b, 10, 64)
+			if err1 == nil && err2 == nil && id > 0 && us >= minCursorTime.UnixMicro() && us < maxCursorTime.UnixMicro() {
+				return time.UnixMicro(us), id, nil
+			}
+		}
+	}
+	return time.Time{}, 0, fmt.Errorf("%w: cursor %q", ErrInvalid, s)
+}
+
+// List 返回调用者可读、符合条件的一页工单（新的在前）与符合条件的总数（忽略 BeforeID 与 Limit），供接入方的反馈管理列表
+// 使用（REQ-010）。可见范围与 Search 完全一致（同一个 searchScope）：external 为本人的（mine 为假且 Principal.Peers 非空时
+// 另含被放宽可见的提交人的），agent 只含已转出的（mine 为真时为空），reviewer / admin 为项目范围内全部（mine 为真时只含本人
+// 提交的）；project 不在范围内时为空。hasMore 报告 BeforeID 之后是否还有下一页。
+//
+// q.Order 为 OrderTriageAsc 时只含当前待确认的工单，按 triage_since、ID 正序，游标为 AfterTriage / AfterID（BeforeID 须为 0）；
+// 默认排序下 AfterID 须为 0。q.SubmitterName 按提交人姓名子串匹配（最多 MaxListNameRunes 字）。
+func (s *Service) List(ctx context.Context, p auth.Principal, project string, mine bool, q SearchQuery) (ts []*Ticket, total int, hasMore bool, err error) {
+	switch q.Order {
+	case OrderIDDesc:
+		if q.AfterID != 0 || !q.AfterTriage.IsZero() {
+			return nil, 0, false, fmt.Errorf("%w: cursor requires sort %s", ErrInvalid, OrderTriageAsc)
+		}
+	case OrderTriageAsc:
+		if q.BeforeID != 0 {
+			return nil, 0, false, fmt.Errorf("%w: before cannot be used with sort %s", ErrInvalid, OrderTriageAsc)
+		}
+	default:
+		return nil, 0, false, fmt.Errorf("%w: sort %q", ErrInvalid, q.Order)
+	}
+	if utf8.RuneCountInString(q.SubmitterName) > MaxListNameRunes {
+		return nil, 0, false, fmt.Errorf("%w: submitter name longer than %d characters", ErrInvalid, MaxListNameRunes)
+	}
+	if len(q.Keywords) > MaxListKeywords {
+		return nil, 0, false, fmt.Errorf("%w: at most %d keywords", ErrInvalid, MaxListKeywords)
+	}
+	for _, k := range q.Keywords {
+		if utf8.RuneCountInString(k) > MaxListKeywordRunes {
+			return nil, 0, false, fmt.Errorf("%w: keyword longer than %d characters", ErrInvalid, MaxListKeywordRunes)
+		}
+	}
+	if len(q.Statuses) > 1 { // 去重：先校验再去重，遇到非法值立即返回，uniq 最多为合法状态数（13 个），整体 O(n)
+		uniq := make([]string, 0, min(len(q.Statuses), 16))
+		for _, st := range q.Statuses {
+			if !validStatus(Status(st)) {
+				return nil, 0, false, fmt.Errorf("%w: status %q", ErrInvalid, st)
+			}
+			if !slices.Contains(uniq, st) {
+				uniq = append(uniq, st)
+			}
+		}
+		q.Statuses = uniq
+	}
+	q, ok, err := s.searchScope(p, project, mine, q)
+	if err != nil || !ok {
+		return nil, 0, false, err
+	}
+	rows, err := s.queries().Stats(ctx, q)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	for _, r := range rows {
+		total += r.Count
+	}
+	if total == 0 {
+		return nil, 0, false, nil
+	}
+	n := limitOf(q.Limit, DefaultLimit)
+	q.Limit = n + 1 // 多取一条判断是否还有下一页
+	if ts, err = s.queries().Search(ctx, q); err != nil {
+		return nil, 0, false, err
+	}
+	if len(ts) > n {
+		ts, hasMore = ts[:n], true
+	}
+	return ts, total, hasMore, nil
 }
 
 func (s *Service) searchScope(p auth.Principal, project string, mine bool, q SearchQuery) (SearchQuery, bool, error) {

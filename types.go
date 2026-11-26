@@ -305,6 +305,80 @@ type VisibleTicketFilter struct {
 	Limit    int   // 0 时默认 50，最多 200
 }
 
+// TicketListFilter 是 ListTickets 的条件（REST GET /tickets 同名查询参数），零值表示不限。筛选只在调用者可见范围内收窄，
+// 不会扩大范围。
+type TicketListFilter struct {
+	Project  string     // 项目 key；为空时不限（仍限 User.Projects，User.Projects 为空时为 Config.Projects 全部）
+	Repo     string     // 仓库 "owner/name"（不区分大小写）
+	Type     TicketType // consult | bug | feature
+	Statuses []string   // 任一状态（取值同 Ticket.Status，重复的去重）
+	// Keyword 按空白拆成多个关键词，各词须同时命中标题或正文（不区分大小写）；最多 10 个词，每个最多 100 字。
+	Keyword string
+	// Mine 为真时只含调用者本人提交的（reviewer / admin 收窄到本人；agent 不提交工单，结果为空）。
+	Mine bool
+	// IncludeShared 只对 external 生效：另含 Config.TicketAudience 放宽可见的同事工单（只读，Mine 为 false）；
+	// 默认 external 只含本人提交的。Mine 为真时忽略。
+	IncludeShared bool
+	// TimeField 是 From / To 比较的时间：created（默认，提交时间）| updated（更新时间）| forwarded（转出时间）。
+	TimeField string
+	From, To  time.Time // 零值不限；To 不含
+	BeforeID  int64     // 游标：上一页的 NextBefore（首页传 0）；只用于默认排序
+	Limit     int       // 0 时默认 50，最多 200
+	// SubmitterName 非空时只含提交人姓名（Ticket.UserName，提交时的姓名快照）包含该文本的工单：去掉首尾空白后按子串匹配、
+	// 不区分大小写，最多 100 字；只在可见范围内收窄。
+	SubmitterName string
+	// Sort 是排序：空（默认）为 ID 降序（新的在前），用 BeforeID / NextBefore 翻页；TicketSortTriageSince 为按实际进入待确认
+	// （pending_triage）的时间 Ticket.TriageSince 从早到晚、同一时间按 ID 从小到大，只含当前待确认的工单，用 Cursor / NextCursor
+	// 翻页（不能与 BeforeID 同用）。
+	Sort string
+	// Cursor 是 TicketSortTriageSince 排序的游标：上一页的 NextCursor（首页为空）；不透明字符串，不要自行构造。
+	// 翻页无重复；翻页开始前已提交且仍在待确认的工单不会遗漏；翻页期间新进入的通常排在末尾，但不保证出现在本轮翻页里
+	// （从首页重新加载可见）。
+	Cursor string
+}
+
+// ListTickets 的排序（TicketListFilter.Sort）。
+const (
+	// TicketSortTriageSince 按实际进入待确认的时间（Ticket.TriageSince）正序，同一时间按 ID 正序；只含当前待确认的工单。
+	TicketSortTriageSince = "triage_since"
+)
+
+// TicketPage 是 ListTickets 的一页结果。
+type TicketPage struct {
+	Tickets []Ticket `json:"tickets"` // 默认新的在前（按 ID 降序）；TicketSortTriageSince 时按进入待确认的时间从早到晚
+	// Total 是符合条件的工单总数（不受 BeforeID 与 Limit 影响；与 Tickets 分两次查询，并发写入时可能略有出入）。
+	Total int `json:"total"`
+	// NextBefore 是默认排序下一页的 BeforeID；为 0 表示没有下一页（TicketSortTriageSince 排序时恒为 0）。
+	NextBefore int64 `json:"next_before"`
+	// NextCursor 是 TicketSortTriageSince 排序下一页的 Cursor；为空表示没有下一页（默认排序时恒为空）。
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+// CommentResyncOptions 是 ResyncTicketComments 的选项。
+type CommentResyncOptions struct {
+	// Notify 为真时，本次由内部变为对提交人可见的评论照常发 ticket.comment 事件（Notifier 推送与变更流，同 Webhook 同步）；
+	// 默认 false：历史回补不通知提交人。
+	Notify bool
+}
+
+// CommentResync 是 ResyncTicketComments 的结果（各计数只针对该工单关联的主 Issue）。
+type CommentResync struct {
+	TicketID int64  `json:"ticket_id"`
+	Repo     string `json:"repo"`    // 主 Issue 所在仓库 "owner/name"
+	Issue    int64  `json:"issue"`   // 主 Issue 编号
+	Fetched  int    `json:"fetched"` // Gitea 上该 Issue 的评论数（含机器人评论）
+	Bot      int    `json:"bot"`     // 机器人账号的评论（灵工转发的补充等），跳过
+	Added    int    `json:"added"`   // 灵工此前没有、本次新保存的
+	Updated  int    `json:"updated"` // 正文或对外判定有变化的
+	// Unchanged 是与已保存一致的（重复执行时全部计入这里）；Skipped 是因 Issue 已不关联该工单而未写入的。
+	Unchanged int `json:"unchanged"`
+	Skipped   int `json:"skipped"`
+	// Published / Unpublished 是本次由内部变为对提交人可见 / 由对外变为内部的条数（含新增即对外）。
+	Published   int  `json:"published"`
+	Unpublished int  `json:"unpublished"`
+	Notified    bool `json:"notified"` // 是否按 Notify 为新变为对外的评论发了事件
+}
+
 // IssueClose 是转研发后被驳回的工单关闭关联 Issue 的进度（RejectForwardedTicket 之后由 Run 异步执行）。
 type IssueClose struct {
 	TicketID int64  `json:"ticket_id"`
