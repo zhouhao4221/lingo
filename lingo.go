@@ -52,6 +52,12 @@ type Config struct {
 	// userID 是提交该附件的用户（工单提交人或补充评论的作者）。附件 ID 由调用方传入、灵工不校验归属，接入方必须确认
 	// 该附件属于此用户（或其有权访问），否则返回 ErrNotFound / ErrForbidden——该附件不会上传，Issue 中注明未能上传。
 	// 其他错误视为临时错误，随任务重试，连续失败 3 次后同样注明。
+	//
+	// 知识问答的带图提问（REQ-009）同样经它读取图片：a.Purpose 区分用途——AttachmentForTicket 为工单附件（转出到
+	// Gitea，a.TicketID / a.CommentID 为所属工单与评论），AttachmentForQuestion 为提问图片（只发给回答模型，
+	// a.ConversationID / a.MessageID 为所属会话与用户消息，userID 为提问人）。两种用途互不放宽：接入方按用途核对该附件
+	// 由 userID 上传（提问图片还应确认允许发给模型服务），拒绝时返回 ErrNotFound / ErrForbidden，该次回答失败
+	// （attachment_rejected），不会丢掉图片只按文字回答。未配置时带图提问返回 ErrImagesUnsupported。
 	FetchAttachment func(ctx context.Context, userID string, a Attachment) (io.ReadCloser, error)
 	// RequiredPerspectives 是需求工单默认的必填视角（可被 Project.RequiredPerspectives 覆盖）；为空不检查。
 	// 转出时缺少必填视角发出 ticket.perspective_missing，Issue 的视角区块中标注“缺少：…”。
@@ -254,9 +260,26 @@ func streamOf(m Model) llm.Stream {
 func publicMessages(ms []llm.Message) []Message {
 	out := make([]Message, 0, len(ms))
 	for _, x := range ms {
-		out = append(out, Message{Role: x.Role, Content: x.Content})
+		out = append(out, Message{Role: x.Role, Content: x.Content, Images: publicImages(x.Images)})
 	}
 	return out
+}
+
+func publicImages(in []llm.Image) []Image {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Image, 0, len(in))
+	for _, x := range in {
+		out = append(out, Image{ContentType: x.ContentType, Data: x.Data})
+	}
+	return out
+}
+
+// supportsImages 报告模型声明了支持图片输入（REQ-009）。
+func supportsImages(m Model) bool {
+	im, ok := m.(ImageModel)
+	return ok && !isNil(m) && im.SupportsImages()
 }
 
 // isNil 报告接口值是否为 nil，含装着 nil 指针的接口（如 var m *MyModel; cfg.LightModel = m）。
@@ -522,7 +545,9 @@ func (l *Lingo) fetchAttachment() func(context.Context, ticket.Attachment) (io.R
 		return nil
 	}
 	return func(ctx context.Context, a ticket.Attachment) (io.ReadCloser, error) {
-		rc, err := f(ctx, a.UserID, publicAttachment(a))
+		pa := publicAttachment(a)
+		pa.Purpose, pa.TicketID = AttachmentForTicket, a.TicketID
+		rc, err := f(ctx, a.UserID, pa)
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 			return nil, fmt.Errorf("%w: %v", ticket.ErrNotFound, err) // 不再重试
 		}

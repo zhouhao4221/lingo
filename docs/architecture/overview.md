@@ -54,8 +54,8 @@ lingo 运行在接入方（宿主应用）进程内，不含租户与前端；�
 | 目录 | 职责 |
 | --- | --- |
 | 根包 `lingo` | 公开 API：`Config`、扩展点接口、`New`、Handler、`Run`、`Migrate` |
-| `internal/assistant` | 知识问答 Agent：会话（本人可见）、意图到工单 / 版本查询、附引用的回答、待确认操作（本期：留言）；检索增强回答、转工单待实现 |
-| `internal/llm` | 经 `lingo.Model` 的对话与向量调用封装：建单整理、问答的意图解析 / 确认判断 / 组织回答，OpenAI 兼容接口（含流式） |
+| `internal/assistant` | 知识问答 Agent：会话（本人可见）、意图到工单 / 版本查询、附引用的回答、待确认操作（本期：留言）；带图提问（REQ-009：图片引用校验、经 FetchAttachment 读取与内容校验）；检索增强回答、转工单待实现 |
+| `internal/llm` | 经 `lingo.Model` 的对话与向量调用封装：建单整理、问答的意图解析 / 确认判断 / 组织回答，OpenAI 兼容接口（含流式与多模态图片，图片只发给声明支持的模型） |
 | `internal/mcp` | MCP Server：工具定义（list_projects、ask、list_conversations、confirm_action、search_knowledge、create_ticket、get_ticket、reply_ticket、add_perspective、list_perspectives、list_releases、get_release） |
 | `internal/settings` | 连接配置（模型与 Gitea）：合并代码配置与数据库、按字段修改、校验、掩码；运行时热更新由根包按版本号刷新 |
 | `internal/project` | 项目与仓库：同步声明、仓库归属与类型、默认仓库、Issue 落库仓库判定 |

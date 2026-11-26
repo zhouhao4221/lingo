@@ -25,6 +25,10 @@ type OpenAIConfig struct {
 	Temperature    *float64
 	Headers        map[string]string // 额外请求头
 	HTTPClient     *http.Client      // 为空时用 90 秒超时的默认客户端
+	// Images 声明对话模型支持图片输入（REQ-009，如 gpt-4o 等视觉模型）：为真时返回的 Model 实现 ImageModel，知识问答
+	// 带图提问按 OpenAI 兼容多模态格式发送（content 为 text 与 image_url 片段，图片为 base64 data URL）。灵工无法探测
+	// 模型能力，须由接入方按所用模型如实声明；为假（默认）时带图提问返回 ErrImagesUnsupported。
+	Images bool
 }
 
 // NewOpenAIModel 返回基于 OpenAI 兼容接口的 Model，可用作 Config.Model 或 Config.LightModel。
@@ -34,7 +38,7 @@ func NewOpenAIModel(c OpenAIConfig) (Model, error) {
 		c.BaseURL = OpenAIBaseURL
 	}
 	cl, err := llm.NewOpenAI(llm.OpenAIOptions{BaseURL: c.BaseURL, APIKey: c.APIKey, Model: c.Model, EmbeddingModel: c.EmbeddingModel,
-		Temperature: c.Temperature, Headers: c.Headers, HTTPClient: c.HTTPClient})
+		Temperature: c.Temperature, Headers: c.Headers, HTTPClient: c.HTTPClient, Images: c.Images})
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +46,8 @@ func NewOpenAIModel(c OpenAIConfig) (Model, error) {
 }
 
 // NewDeepSeekModel 返回 DeepSeek 的 Model（OpenAI 兼容接口，地址 DeepSeekBaseURL）；model 为空取 "deepseek-chat"。
-// DeepSeek 不提供向量接口，Embed 返回错误；需要向量时用 NewOpenAIModel 另配向量服务。
+// DeepSeek 不提供向量接口，Embed 返回错误；需要向量时用 NewOpenAIModel 另配向量服务。对话接口不接受图片，
+// 不支持带图提问（SupportsImages 为 false）。
 func NewDeepSeekModel(apiKey, model string) (Model, error) {
 	if model == "" {
 		model = "deepseek-chat"
@@ -124,11 +129,7 @@ func (l *Lingo) LLMUsage(ctx context.Context, u User, from, to time.Time) ([]LLM
 type openAIModel struct{ c *llm.OpenAI }
 
 func (m openAIModel) ChatUsage(ctx context.Context, messages []Message) (string, Usage, error) {
-	ms := make([]llm.Message, 0, len(messages))
-	for _, x := range messages {
-		ms = append(ms, llm.Message{Role: x.Role, Content: x.Content})
-	}
-	s, u, err := m.c.ChatUsage(ctx, ms)
+	s, u, err := m.c.ChatUsage(ctx, llmMessages(messages))
 	return s, Usage(u), err
 }
 
@@ -140,10 +141,17 @@ func (m openAIModel) ChatStream(ctx context.Context, messages []Message, onDelta
 func llmMessages(messages []Message) []llm.Message {
 	ms := make([]llm.Message, 0, len(messages))
 	for _, x := range messages {
-		ms = append(ms, llm.Message{Role: x.Role, Content: x.Content})
+		m := llm.Message{Role: x.Role, Content: x.Content}
+		for _, img := range x.Images {
+			m.Images = append(m.Images, llm.Image{ContentType: img.ContentType, Data: img.Data})
+		}
+		ms = append(ms, m)
 	}
 	return ms
 }
+
+// SupportsImages 实现 ImageModel：OpenAIConfig.Images 声明的能力。
+func (m openAIModel) SupportsImages() bool { return m.c.SupportsImages() }
 
 func (m openAIModel) Chat(ctx context.Context, messages []Message) (string, error) {
 	s, _, err := m.ChatUsage(ctx, messages)

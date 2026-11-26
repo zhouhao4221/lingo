@@ -49,7 +49,7 @@ func (s *Store) queryAttachments(ctx context.Context, ticketID, commentID int64,
 		if err := json.Unmarshal(raw, &a.Attachment); err != nil {
 			return nil, fmt.Errorf("store: decode attachment: %w", err)
 		}
-		a.CommentID, a.UserID = cid, uid
+		a.CommentID, a.UserID, a.TicketID = cid, uid, ticketID
 		out = append(out, a)
 	}
 	return out, rows.Err()

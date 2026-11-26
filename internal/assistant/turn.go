@@ -18,15 +18,21 @@ import (
 const historyRunes = 1000 // 每条历史消息带给模型的长度上限
 
 // Send 在会话中提问并返回助手消息。onDelta 非空时逐片段回调回答文本（固定回复整段回调一次）。
-// 模型出错时提问照常保存，返回 status=failed 的助手消息（err 为 nil），可用 Retry 重试。
-// 同一会话上一条提问还在处理时返回 ticket.ErrConflict。
-func (s *Service) Send(ctx context.Context, p auth.Principal, convID int64, content, tz string, onDelta func(string)) (*Message, error) {
+// attachments 是附带的图片引用（REQ-009），带图时提问可以为空；模型不支持图片或未配置读取图片时返回
+// ErrImagesUnsupported（提问不保存）。模型出错、图片读取失败时提问照常保存，返回 status=failed 的助手消息（err 为 nil），
+// 可用 Retry 重试。同一会话上一条提问还在处理时返回 ticket.ErrConflict。
+func (s *Service) Send(ctx context.Context, p auth.Principal, convID int64, content string, attachments []Attachment, tz string,
+	onDelta func(string)) (*Message, error) {
 	if err := caller(p); err != nil {
 		return nil, err
 	}
 	content = strings.TrimSpace(content)
+	attachments, err := CleanAttachments(attachments)
+	if err != nil {
+		return nil, err
+	}
 	switch {
-	case content == "":
+	case content == "" && len(attachments) == 0:
 		return nil, fmt.Errorf("%w: content is empty", ticket.ErrInvalid)
 	case utf8.RuneCountInString(content) > MaxContentRunes:
 		return nil, fmt.Errorf("%w: content exceeds %d characters", ticket.ErrInvalid, MaxContentRunes)
@@ -39,11 +45,14 @@ func (s *Service) Send(ctx context.Context, p auth.Principal, convID int64, cont
 	if brain == nil {
 		return nil, ErrNoModel
 	}
+	if len(attachments) > 0 && !s.imagesSupported(brain) {
+		return nil, ErrImagesUnsupported // 明确拒绝，不丢掉图片只按文字回答
+	}
 	ctx = context.WithValue(ctx, brainKey{}, brain) // 本轮使用开始时的模型
 	var conv *Conversation
 	var act *Action
 	var expired bool
-	user := &Message{ConversationID: convID, Role: RoleUser, Content: content, Status: StatusDone}
+	user := &Message{ConversationID: convID, Role: RoleUser, Content: content, Status: StatusDone, Attachments: attachments}
 	err = s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
 		var err error
 		if conv, err = s.claim(ctx, tx, p, convID); err != nil {
@@ -98,6 +107,9 @@ func (s *Service) Retry(ctx context.Context, p auth.Principal, convID, messageID
 		if user, err = tx.GetMessage(ctx, convID, failed.ReplyTo); err != nil {
 			return err
 		}
+		if len(user.Attachments) > 0 && !s.imagesSupported(brain) {
+			return ErrImagesUnsupported // 重试复用原图片：模型已换成不支持图片的，明确拒绝（事务回滚，租约不保留）
+		}
 		act, expired, err = s.liveAction(ctx, tx, convID, user.ID)
 		return err
 	})
@@ -116,6 +128,9 @@ func (s *Service) brain() Brain {
 	}
 	return s.o.Brain
 }
+
+// imagesSupported 报告带图提问可用：模型声明支持图片，且配置了读取图片。
+func (s *Service) imagesSupported(b Brain) bool { return s.o.FetchImage != nil && b.SupportsImages() }
 
 // brainOf 返回本轮开始时取定的模型调用。
 func (s *Service) brainOf(ctx context.Context) Brain {
@@ -240,9 +255,12 @@ func (e modelError) Unwrap() error { return e.err }
 func errKind(ctx context.Context, err error) string {
 	var timeout interface{ Timeout() bool }
 	var me modelError
+	var ie *imageError
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
 		return ErrKindCanceled
+	case errors.As(err, &ie):
+		return ie.kind
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
 		return ErrKindTimeout
 	case errors.As(err, &me):
@@ -337,8 +355,15 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 // respond 决定本轮的回答（不落库）。
 func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversation, user *Message, act *Action, expired bool,
 	loc *time.Location, onDelta func(string)) (*reply, error) {
+	images, err := s.loadImages(ctx, conv.UserID, user)
+	if err != nil {
+		return nil, err
+	}
 	var cancelled *Action
-	if act != nil {
+	if act != nil && len(images) > 0 {
+		// 带图的消息不作为对待确认操作的答复（不会因为图片旁的“好的”执行写操作）：操作作废，按新问题回答
+		cancelled = act
+	} else if act != nil {
 		d, err := s.brainOf(ctx).Confirm(ctx, ConfirmInput{Summary: act.Summary, Message: user.Content})
 		if err != nil {
 			return nil, modelError{err}
@@ -356,13 +381,17 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 		return nil, err
 	}
 	tc := &turnCtx{p: p, loc: loc, now: s.o.Now(), history: hist, question: user.Content, onDelta: onDelta, convID: conv.ID,
-		tools: s.intentTools(ctx)}
+		tools: s.intentTools(ctx), images: images}
 	in, err := s.brainOf(ctx).Intent(ctx, IntentInput{Today: today(tc.now, loc), Projects: s.o.Projects(p), History: hist,
-		Question: user.Content, NeedTitle: conv.Title == "", Tools: tc.tools})
+		Question: user.Content, NeedTitle: conv.Title == "", Tools: tc.tools, Images: images})
 	if err != nil {
 		return nil, modelError{err}
 	}
-	if cancelled != nil {
+	if cancelled != nil && len(images) > 0 {
+		if in.Kind == IntentCancel {
+			return &reply{cancel: cancelled, intent: IntentCancel, content: textCancelled, outcome: OutcomeActionCancelled}, nil
+		}
+	} else if cancelled != nil {
 		// 确认判断没认出来（如输出不合格），但意图解析认为是确认 / 取消：按用户的意思处理仍在等待的操作
 		switch in.Kind {
 		case IntentConfirm:
@@ -378,6 +407,9 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	r.intent, r.title = in.Kind, cleanTitle(in.Title)
 	if r.title == "" && conv.Title == "" {
 		r.title = cleanTitle(textutil.Clip(user.Content, 30))
+	}
+	if r.title == "" && conv.Title == "" && len(images) > 0 {
+		r.title = titleImages
 	}
 	if cancelled != nil && r.cancel == nil {
 		r.cancel = cancelled
@@ -406,6 +438,9 @@ func (s *Service) dispatch(ctx context.Context, tc *turnCtx, in *Intent, expired
 	case IntentReleaseList:
 		return s.listReleases(ctx, tc, in)
 	case IntentComment:
+		if len(tc.images) > 0 {
+			return &reply{content: textNoImageComment, outcome: OutcomeClarify}, nil // 留言不带图片，也不在带图的消息中提出写操作
+		}
 		return s.proposeComment(ctx, tc, in)
 	case IntentConfirm, IntentCancel:
 		if expired {
@@ -450,7 +485,7 @@ func (s *Service) history(ctx context.Context, p auth.Principal, convID, beforeI
 	out := make([]HistoryItem, 0, len(ms))
 	for _, m := range ms {
 		h := HistoryItem{Role: m.Role, Content: textutil.ClipEllipsis(m.Content, historyRunes), Tickets: m.Citations.Tickets,
-			Knowledge: m.Citations.Knowledge}
+			Knowledge: m.Citations.Knowledge, Images: len(m.Attachments)}
 		for _, r := range m.Citations.Releases {
 			h.Tags = append(h.Tags, r.Repo+" "+r.Tag)
 		}

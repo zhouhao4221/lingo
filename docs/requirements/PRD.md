@@ -26,6 +26,7 @@
 | v1.8 | 2026-11-17 | haiqing | 改为 Go 库形态，去掉租户、前端与在线升级 |
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
 | v1.33 | 2026-11-25 | haiqing | REQ-008 业务数据 Tool（只读）：3.2.0.5 注册校验、三种入口、超时并发熔断、审计先行与可见范围；数据模型新增 lingo_data_requests（0007） |
+| v1.34 | 2026-11-26 | haiqing | REQ-009 知识问答图片提问（待评审）：提问可附带最多 4 张 PNG / JPEG / WebP（沿用 Attachment、不带 URL、允许只发图），经 FetchAttachment（Purpose=question）以提问人身份读取并校验后按 OpenAI 兼容多模态格式发给回答模型；模型连接声明图片能力，不支持时明确报错；迁移 0008 为问答消息加 attachments 列 |
 | v1.32 | 2026-11-25 | haiqing | 知识库二期（REQ-007）：迁移 0006 放宽条目状态（新增待审核 / 已驳回）与来源（工单抽取、回答反馈、工单评论），新增回答反馈、抽取记录、未答上记录三张表；Bug / 需求工单首次进入已发布 / 已上线 / 已关闭后由轻量模型抽取问答（待审核，每张一次，升级前已结案的不抽取）；`RateMessage` 回答反馈（有帮助 / 没帮助次数，知识类回答首次有帮助时入候选）；`AddTicketCommentWith` 后台评论勾选入库；`ApproveKnowledge` / `RejectKnowledge` 审核，入库时标出可能重复；`ListUnansweredQuestions` 未答上统计（90 天）；检索重合词数不少于提问与条目中较短一方的 20%；未答上按项目分别记录 |
 | v1.31 | 2026-11-24 | haiqing | 知识库一期（REQ-006）：新增 `lingo_knowledge`（迁移 0005）；后台直接答复工单时可勾选加入知识库（`AnswerTicketWith`，默认不入库，可改写，入库即生效），reviewer / admin 手动新建与维护（编辑、停用 / 恢复、删除、按来源工单停用、按引用次数列出）；检索（`SearchKnowledge`、REST `/knowledge/search`、MCP `search_knowledge`）用中文二元切词 + GIN 数组索引，`Model.Embed` 可用时后台生成向量并重排前 50 条（可选接口 `EmbeddingModelNamer` 区分向量模型）；知识问答新增知识类意图，检索知识条目与同类工单作答并附 `citations.knowledge`，来源工单按查看权限返回；版本说明不入知识库（沿用版本问答）；模型抽取、回答反馈与审核见 REQ-007 |
 | v1.30 | 2026-11-24 | haiqing | 同事可见（REQ-004）：新增 `Config.TicketAudience`，按提交人放宽 external 的只读可见范围（不超出 `User.Projects`）；新增 `ListVisibleTickets`（REST `GET /tickets/visible`、MCP `list_visible_tickets`）与 `Ticket.Mine`；知识问答的查找、汇总与版本关联工单跟随放宽，同事工单带提交人姓名；写操作、附件、事件流、Notifier 与需求视角不跟随；历史会话的引用按当前范围重新判断；无迁移 |
@@ -1130,6 +1131,7 @@ flowchart LR
 | REQ-006 | 知识库一期：后台答复入库与检索作答 | 知识问答 | 已完成 | 2026-11-24 | 2026-11-25 |
 | REQ-007 | 知识库二期：工单抽取、回答反馈与审核 | 知识问答 | 已完成 | 2026-11-24 | 2026-11-25 |
 | REQ-008 | 业务数据 Tool：以用户权限代查业务数据 | 知识问答 | 已完成 | 2026-11-25 | 2026-11-25 |
+| REQ-009 | 知识问答图片提问 | 知识问答 | 测试中（待评审） | 2026-11-26 | 2026-11-26 |
 
 ---
 

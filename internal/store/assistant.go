@@ -82,13 +82,13 @@ func (s *Store) DeleteConversation(ctx context.Context, userID string, id int64)
 }
 
 const messageColumns = `m.id, m.conversation_id, m.role, m.content, m.status, m.error, COALESCE(m.reply_to, 0), m.intent, m.outcome,
-	m.citations, m.created_at, m.updated_at`
+	m.citations, m.created_at, m.updated_at, m.attachments`
 
 func scanMessage(row rowScanner) (*assistant.Message, error) {
 	var m assistant.Message
-	var cites []byte
+	var cites, atts []byte
 	err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Status, &m.Error, &m.ReplyTo, &m.Intent, &m.Outcome,
-		&cites, &m.CreatedAt, &m.UpdatedAt)
+		&cites, &m.CreatedAt, &m.UpdatedAt, &atts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
 	}
@@ -97,6 +97,11 @@ func scanMessage(row rowScanner) (*assistant.Message, error) {
 	}
 	if err := json.Unmarshal(cites, &m.Citations); err != nil {
 		return nil, fmt.Errorf("store: message %d citations: %w", m.ID, err)
+	}
+	if len(atts) > 0 && string(atts) != "[]" {
+		if err := json.Unmarshal(atts, &m.Attachments); err != nil {
+			return nil, fmt.Errorf("store: message %d attachments: %w", m.ID, err)
+		}
 	}
 	return &m, nil
 }
@@ -202,10 +207,16 @@ func (x assistantTx) InsertMessage(ctx context.Context, m *assistant.Message) er
 	if err != nil {
 		return err
 	}
+	atts := []byte("[]")
+	if len(m.Attachments) > 0 {
+		if atts, err = json.Marshal(m.Attachments); err != nil {
+			return err
+		}
+	}
 	if err := x.tx.QueryRowContext(ctx, `INSERT INTO lingo_assistant_messages
-		(conversation_id, role, content, status, error, reply_to, intent, outcome, citations)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, created_at, updated_at`,
-		m.ConversationID, m.Role, m.Content, m.Status, m.Error, nullInt64(m.ReplyTo), m.Intent, m.Outcome, cites).Scan(
+		(conversation_id, role, content, status, error, reply_to, intent, outcome, citations, attachments)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, created_at, updated_at`,
+		m.ConversationID, m.Role, m.Content, m.Status, m.Error, nullInt64(m.ReplyTo), m.Intent, m.Outcome, cites, atts).Scan(
 		&m.ID, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return fmt.Errorf("store: insert message: %w", err)
 	}

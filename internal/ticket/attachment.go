@@ -30,6 +30,7 @@ type Attachment struct {
 
 	CommentID int64  `json:"-"` // 读取时回填：所属评论，工单本身的附件为 0
 	UserID    string `json:"-"` // 读取时回填：提交该附件的用户（工单提交人或评论作者）
+	TicketID  int64  `json:"-"` // 读取时回填：所属工单
 }
 
 // AttachmentState 是附件转出到 Gitea 的结果。

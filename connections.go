@@ -176,7 +176,7 @@ func buildModel(s settings.Slot) (Model, error) {
 	if base == "" {
 		base = settings.DefaultBaseURL(s.Provider)
 	}
-	return NewOpenAIModel(OpenAIConfig{BaseURL: base, APIKey: s.APIKey, Model: s.Model})
+	return NewOpenAIModel(OpenAIConfig{BaseURL: base, APIKey: s.APIKey, Model: s.Model, Images: s.Images})
 }
 
 func boolStr(b bool) string {
@@ -282,7 +282,8 @@ func (l *Lingo) brainFor() assistant.Brain {
 	if isNil(light) {
 		light = c.main
 	}
-	return &llm.Assistant{Light: chatOf(light), Main: chatOf(c.main), MainStream: streamOf(c.main), Record: l.recordUsage}
+	return &llm.Assistant{Light: chatOf(light), Main: chatOf(c.main), MainStream: streamOf(c.main), Record: l.recordUsage,
+		MainImages: supportsImages(c.main), LightImages: supportsImages(light)}
 }
 
 // settingsState 是 Lingo 中与连接配置相关的字段（嵌入 Lingo）。

@@ -113,3 +113,30 @@ func TestMask(t *testing.T) {
 		}
 	}
 }
+
+func TestApplySlotImages(t *testing.T) {
+	yes, no := true, false
+	openai, deepseek, empty, model := ProviderOpenAI, ProviderDeepSeek, "", "gpt-4o"
+	st, ch, err := Apply(Overrides{}, Stored{}, Patch{Main: &SlotPatch{Provider: &openai, Model: &model, Images: &yes}})
+	if err != nil || !st.Model.Main.Images || len(ch[CategoryModel]) != 3 {
+		t.Fatalf("declare images: %+v %v %v", st.Model.Main, ch, err)
+	}
+	if st2, _, err := Apply(Overrides{}, st, Patch{Main: &SlotPatch{Images: &no}}); err != nil || st2.Model.Main.Images {
+		t.Errorf("undeclare: %+v %v", st2.Model.Main, err)
+	}
+	// DeepSeek 不接受图片
+	if _, _, err := Apply(Overrides{}, Stored{}, Patch{Light: &SlotPatch{Provider: &deepseek, Images: &yes}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("deepseek images: %v", err)
+	}
+	if _, _, err := Apply(Overrides{}, st, Patch{Main: &SlotPatch{Provider: &deepseek}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("switch to deepseek keeps images: %v", err)
+	}
+	// 清空槽位时一并清除声明
+	if st3, _, err := Apply(Overrides{}, st, Patch{Main: &SlotPatch{Provider: &empty, Model: &empty}}); err != nil || st3.Model.Main.Images {
+		t.Errorf("clear slot: %+v %v", st3.Model.Main, err)
+	}
+	// 代码配置的槽位不能经接口声明
+	if _, _, err := Apply(Overrides{Main: true}, Stored{}, Patch{Main: &SlotPatch{Images: &yes}}); !errors.Is(err, ErrConflict) {
+		t.Errorf("config slot: %v", err)
+	}
+}

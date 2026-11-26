@@ -142,6 +142,24 @@ type GiteaConfig struct {
 type Message struct {
 	Role    string // system | user | assistant
 	Content string
+	// Images 是随这条消息发给模型的图片（REQ-009）：只出现在知识问答带图提问的 user 消息中，且只发给声明支持图片的
+	// 模型（ImageModel 的 SupportsImages 返回 true）；其他消息恒为空。实现 ImageModel 的模型必须把它们交给模型服务，
+	// 不能只按 Content 作答。
+	Images []Image
+}
+
+// Image 是随消息发给模型的图片（REQ-009），灵工已按内容识别类型并校验大小与尺寸。
+type Image struct {
+	ContentType string // image/png | image/jpeg | image/webp（按内容识别）
+	Data        []byte
+}
+
+// ImageModel 是能读图的 Model（可选，REQ-009）：SupportsImages 返回 true 的模型会在 Message.Images 中收到知识问答
+// 提问附带的图片。未实现或返回 false 时，带图提问返回 ErrImagesUnsupported（不会丢掉图片只按文字回答）。
+// 内置的 NewOpenAIModel 在 OpenAIConfig.Images 为 true 时实现为 true（按 OpenAI 兼容多模态格式发送）。
+type ImageModel interface {
+	Model
+	SupportsImages() bool
 }
 
 // Model 是大模型与向量服务，由接入方实现或使用适配器。
@@ -312,9 +330,9 @@ type Comment struct {
 	At         time.Time `json:"at"`
 }
 
-// Attachment 是工单或补充评论的附件引用。文件由接入方自己的附件系统保存和鉴权，灵工只记录引用：提交工单或补充时
-// 传入 ID、Name、URL（及可选的 ContentType、Size），转出时写进 Gitea Issue；配置了 Config.FetchAttachment 时
-// 读取内容上传为 Gitea 附件。
+// Attachment 是工单或补充评论的附件引用，也是知识问答提问附带的图片引用（REQ-009，见 MessageInput.Attachments，
+// 不带 URL）。文件由接入方自己的附件系统保存和鉴权，灵工只记录引用：提交工单或补充时传入 ID、Name、URL（及可选的
+// ContentType、Size），转出时写进 Gitea Issue；配置了 Config.FetchAttachment 时读取内容上传为 Gitea 附件。
 type Attachment struct {
 	ID          string `json:"id"`                     // 接入方的附件 ID，必填，在整个工单（含补充评论）内唯一
 	Name        string `json:"name"`                   // 文件名；为空时取 ID
@@ -326,7 +344,24 @@ type Attachment struct {
 	Forwarded bool   `json:"forwarded"`            // 已转出到 Gitea（上传、写入链接或写明失败）
 	GiteaURL  string `json:"gitea_url,omitempty"`  // 已上传为 Gitea 附件时的地址
 	Error     string `json:"error,omitempty"`      // 读取或上传失败的原因
+
+	// 以下只在调用 Config.FetchAttachment 时填写，不出现在 JSON 中（REQ-009）：接入方据此区分用途并核对归属。
+	Purpose        AttachmentPurpose `json:"-"`
+	TicketID       int64             `json:"-"` // Purpose 为 ticket：所属工单（CommentID 非 0 时随该补充评论提交）
+	ConversationID int64             `json:"-"` // Purpose 为 question：所属问答会话
+	MessageID      int64             `json:"-"` // Purpose 为 question：附带该图片的用户消息
 }
+
+// AttachmentPurpose 是 Config.FetchAttachment 读取附件的用途（REQ-009）。
+type AttachmentPurpose string
+
+const (
+	// AttachmentForTicket：工单或补充评论的附件，转出到 Gitea（上传为 Issue / 评论附件，研发可见）。
+	AttachmentForTicket AttachmentPurpose = "ticket"
+	// AttachmentForQuestion：知识问答提问附带的图片，发给回答模型（不转出到 Gitea、不进入知识库）。userID 是提问人
+	// （会话创建者）；接入方应核对该附件由此人上传，且允许发给模型服务。
+	AttachmentForQuestion AttachmentPurpose = "question"
+)
 
 // CheckResult 是一项启动自检结果；Repo 为空表示实例级检查。Level 为 ok / warn（功能受限）/ error（该仓库无法对接）。
 type CheckResult struct {
