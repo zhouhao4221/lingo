@@ -115,6 +115,11 @@ func TestListFiltersAndPaging(t *testing.T) {
 			t.Errorf("%s: %v total %d more %v err %v, want %v", c.name, listIDs(ts), total, more, err, c.want)
 		}
 	}
+	// 状态去重后传给 store
+	if _, _, _, err := s.List(ctx, rev, "", false, SearchQuery{Statuses: []string{"open", "open", "rejected", "open"}}); err != nil ||
+		!slices.Equal(m.lastSearch.Statuses, []string{"open", "rejected"}) {
+		t.Errorf("dedupe statuses = %v %v", m.lastSearch.Statuses, err)
+	}
 	// 分页：5 张，每页 2
 	var got []int64
 	before, pages := int64(0), 0

@@ -17,7 +17,10 @@ import (
 //
 // 工单：GET /ticket-types、POST /tickets、GET /tickets/mine、GET /tickets/{id}、POST /tickets/{id}/comments；
 // 反馈管理列表（REQ-010）：GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=，
-// 返回 {"tickets","total","next_before"}，可见范围同 ListTickets；
+// 返回 {"tickets","total","next_before"}，可见范围同 ListTickets。参数：status 逗号分隔、表示任一（重复的去重）；q 按空白拆词
+// （最多 10 个、每个最多 100 字，各词同时命中标题或正文）；mine / shared 只接受 true|false|1|0；time_field 取 created（默认）|
+// updated | forwarded（不传 from / to 时只含已转出的）；from / to 为 RFC 3339，to 不含；before 为上一页的 next_before（首页省略）；
+// limit 默认 50、最大 200；其他取值返回 400；
 // 需求视角：POST / GET /tickets/{id}/perspectives；
 // 项目与版本：GET /projects、GET /releases、GET /releases/{id}；
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、POST /tickets/{id}/reject-forwarded（驳回已转研发工单）、

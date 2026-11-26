@@ -272,7 +272,7 @@ l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leave
 | `GET /knowledge/search?q=&project=&limit=`；`GET` / `POST /knowledge`、`PUT` / `DELETE /knowledge/{id}`、`POST /knowledge/{id}/disable\|enable`、`POST /knowledge/disable-by-ticket`、`POST /knowledge/{id}/approve\|reject`、`GET /knowledge/unanswered` | 知识库：检索（所有角色）；维护与审核（reviewer / admin） |
 | `GET /data-requests?tool=&user_id=&status=&since=&until=&before=&limit=` | 业务数据工具调用审计：本人的，以及 reviewer / admin 明确负责的项目内的 |
 | `GET /tickets/visible?project=&status=&before=` | 可查看的工单：本人的 + `TicketAudience` 放宽可见的同事的（只读） |
-| `GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=` | 反馈管理列表（Go `ListTickets`）：返回 `{tickets, total, next_before}`；external 默认只含本人（`shared=true` 另含同事的），agent 只含已转出的，reviewer / admin 为 `User.Projects` 内全部 |
+| `GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=` | 反馈管理列表（Go `ListTickets`）：返回 `{tickets, total, next_before}`；external 默认只含本人（`shared=true` 另含同事的），agent 只含已转出的，reviewer / admin 为 `User.Projects` 内全部（`User.Projects` 为空时为 `Config.Projects` 全部）。`status` 逗号分隔表示任一；`q` 按空白拆词（最多 10 个、每个最多 100 字）；`mine` / `shared` 只接受 `true`\|`false`\|`1`\|`0`；`time_field` 默认 `created`，可选 `updated`\|`forwarded`；`from` / `to` 为 RFC 3339，`to` 不含；`before` 为上一页的 `next_before`；`limit` 默认 50、最大 200；不合法返回 400 |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
 | `POST /tickets/{id}/reject-forwarded`、`GET /tickets/{id}/issue-close`、`POST /tickets/{id}/issue-close/retry` | 驳回已转研发工单（只关闭关联 Issue，异步可重试）及关闭进度 / 重试（reviewer / admin） |

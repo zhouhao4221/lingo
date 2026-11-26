@@ -311,7 +311,7 @@ type TicketListFilter struct {
 	Project  string     // 项目 key；为空时不限（仍限 User.Projects，User.Projects 为空时为 Config.Projects 全部）
 	Repo     string     // 仓库 "owner/name"（不区分大小写）
 	Type     TicketType // consult | bug | feature
-	Statuses []string   // 任一状态（取值同 Ticket.Status）
+	Statuses []string   // 任一状态（取值同 Ticket.Status，重复的去重）
 	// Keyword 按空白拆成多个关键词，各词须同时命中标题或正文（不区分大小写）；最多 10 个词，每个最多 100 字。
 	Keyword string
 	// Mine 为真时只含调用者本人提交的（reviewer / admin 收窄到本人；agent 不提交工单，结果为空）。

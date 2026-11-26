@@ -116,6 +116,45 @@ func TestListTickets(t *testing.T) {
 		t.Errorf("from: %v %v", pageIDs(p), err)
 	}
 
+	// REST：合法 RFC 3339 的 from / to（to 不含）
+	from, to := cut.UTC().Format(time.RFC3339), time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	code, obj, _ := restClient{t: t, h: l.Handler()}.do("u1", "external", "GET", "/tickets?from="+from+"&to="+to, nil)
+	if code != 200 || obj["total"] != float64(2) {
+		t.Errorf("rest from/to: %d %v", code, obj)
+	}
+	code, obj, _ = restClient{t: t, h: l.Handler()}.do("u1", "external", "GET", "/tickets?to="+from, nil)
+	if ts, _ := obj["tickets"].([]any); code != 200 || len(ts) != 1 || ts[0].(map[string]any)["id"] != float64(t1) {
+		t.Errorf("rest to: %d %v", code, obj)
+	}
+
+	// time_field=forwarded：不传 from / to 时只含已转出的（转出时间非空）；external 仍只含本人
+	if p, err := l.ListTickets(ctx, alice, lingo.TicketListFilter{TimeField: "forwarded"}); err != nil || !slices.Equal(pageIDs(p), []int64{t5, t3}) {
+		t.Errorf("forwarded external: %v %v", pageIDs(p), err)
+	}
+	if p, err := l.ListTickets(ctx, rita, lingo.TicketListFilter{TimeField: "forwarded"}); err != nil || !slices.Equal(pageIDs(p), []int64{t5, t4, t3, t2}) {
+		t.Errorf("forwarded reviewer: %v %v", pageIDs(p), err)
+	}
+	// 没有 triage.forward 事件时转出时间取提交时间：t3 提交于 5 天前
+	if _, err := db.Exec("UPDATE lingo_tickets SET created_at = now() - interval '5 days' WHERE id = $1", t3); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := l.ListTickets(ctx, alice, lingo.TicketListFilter{TimeField: "forwarded", To: cut}); err != nil || !slices.Equal(pageIDs(p), []int64{t3}) {
+		t.Errorf("forwarded to: %v %v", pageIDs(p), err)
+	}
+	if p, err := l.ListTickets(ctx, alice, lingo.TicketListFilter{TimeField: "forwarded", From: cut}); err != nil || !slices.Equal(pageIDs(p), []int64{t5}) {
+		t.Errorf("forwarded from: %v %v", pageIDs(p), err)
+	}
+	// time_field=updated：按更新时间，与提交时间无关
+	if _, err := db.Exec("UPDATE lingo_tickets SET updated_at = now() - interval '3 days' WHERE id = $1", t5); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := l.ListTickets(ctx, alice, lingo.TicketListFilter{TimeField: "updated", To: cut}); err != nil || !slices.Equal(pageIDs(p), []int64{t5}) {
+		t.Errorf("updated to: %v %v", pageIDs(p), err)
+	}
+	if p, err := l.ListTickets(ctx, alice, lingo.TicketListFilter{TimeField: "updated", From: cut}); err != nil || !slices.Equal(pageIDs(p), []int64{t3, t1}) {
+		t.Errorf("updated from: %v %v", pageIDs(p), err)
+	}
+
 	// 分页：7 张，每页 3
 	var all []int64
 	before, pages := int64(0), 0
@@ -183,7 +222,7 @@ func TestListTickets(t *testing.T) {
 	if code, _, _ := rc.do("", "", "GET", "/tickets", nil); code != 401 {
 		t.Errorf("anonymous: %d", code)
 	}
-	code, obj, _ := rc.do("u1", "external", "GET", "/tickets", nil)
+	code, obj, _ = rc.do("u1", "external", "GET", "/tickets", nil)
 	if code != 200 || obj["total"] != float64(3) || len(obj["tickets"].([]any)) != 3 || obj["next_before"] != float64(0) {
 		t.Errorf("rest external: %d %v", code, obj)
 	}

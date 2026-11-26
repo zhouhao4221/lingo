@@ -3,6 +3,7 @@ package ticket
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -244,6 +245,15 @@ func (s *Service) List(ctx context.Context, p auth.Principal, project string, mi
 		if utf8.RuneCountInString(k) > MaxListKeywordRunes {
 			return nil, 0, false, fmt.Errorf("%w: keyword longer than %d characters", ErrInvalid, MaxListKeywordRunes)
 		}
+	}
+	if len(q.Statuses) > 1 { // 去重：合法取值只有 validStatus 的 13 个，去重后条件长度有界
+		uniq := make([]string, 0, len(q.Statuses))
+		for _, st := range q.Statuses {
+			if !slices.Contains(uniq, st) {
+				uniq = append(uniq, st)
+			}
+		}
+		q.Statuses = uniq
 	}
 	q, ok, err := s.searchScope(p, project, mine, q)
 	if err != nil || !ok {
