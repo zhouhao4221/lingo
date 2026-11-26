@@ -44,6 +44,7 @@ type Tickets interface {
 	Tracks(ctx context.Context, repo string, number int64) (bool, error)
 	ApplyIssue(ctx context.Context, u ticket.IssueUpdate) error
 	ApplyComment(ctx context.Context, u ticket.CommentUpdate) error
+	ResyncComment(ctx context.Context, u ticket.CommentUpdate) (ticket.CommentResult, error)
 	ApplyPull(ctx context.Context, u ticket.PullUpdate) error
 }
 

@@ -7,6 +7,7 @@ import (
 	"github.com/zhouhao4221/lingo/internal/knowledge"
 	"github.com/zhouhao4221/lingo/internal/textutil"
 	"strings"
+	"time"
 
 	"github.com/zhouhao4221/lingo/internal/auth"
 	"github.com/zhouhao4221/lingo/internal/gitea"
@@ -212,6 +213,55 @@ func (l *Lingo) ListTickets(ctx context.Context, u User, f TicketListFilter) (Ti
 		page.NextBefore = out[len(out)-1].ID
 	}
 	return page, nil
+}
+
+// resyncBotWait 是重新同步评论时等待机器人账号获取完成的最长时间。
+const resyncBotWait = 5 * time.Second
+
+// ResyncTicketComments 按当前 GiteaConfig.ReplyMode 重新读取工单 id 关联的主 Issue 的全部 Gitea 评论并写回工单评论
+// （REQ-011），用于切换 ReplyMode（如改为 ReplyAll）后回补此前已保存为内部的历史评论：定时对账的游标只前进，不会重读旧评论。
+//
+// 只允许 reviewer / admin，且工单须在 u 的项目范围内（User.Projects，为空时为 Config.Projects 全部）：其他角色返回
+// ErrForbidden（先于查找），工单不存在或不在范围内返回 ErrNotFound；工单没有关联的主 Issue（待确认、待建单、已合并、
+// 直接答复等）、Gitea 未配置、机器人账号暂未获取（稍后重试）、或 Issue 在 Gitea 上已不存在时返回 ErrConflict。
+//
+// 逐条与 Webhook / 定时对账同一套处理：跳过机器人账号的评论，按 ReplyMode 判定是否对外、去掉 /reply 前缀，按 Gitea
+// 评论 ID 去重，旧于已保存版本的不覆盖，灵工已记为删除的不恢复；只写入该工单。默认不发通知（o.Notify 为真时同 Webhook）；
+// 每条有变化的评论记一条审计（delivery 为 resync）。幂等：重复调用不再产生变化（全部计入 Unchanged）。
+// 不会因为 Gitea 列表中缺少某条评论而把它标记为删除（删除仍以 Webhook 为准）；只读 Gitea，不写 Gitea。
+func (l *Lingo) ResyncTicketComments(ctx context.Context, u User, id int64, o CommentResyncOptions) (CommentResync, error) {
+	l.touchSettings()
+	t, err := l.tickets.ResyncTarget(ctx, l.principal(u), id)
+	if err != nil {
+		return CommentResync{}, publicErr(err)
+	}
+	if !l.gitea.Configured() {
+		return CommentResync{}, fmt.Errorf("%w: Gitea is not configured", ErrConflict)
+	}
+	deadline := time.Now().Add(resyncBotWait)
+	for l.botLogin() == "" && time.Now().Before(deadline) { // 首次调用时机器人账号可能仍在后台获取
+		select {
+		case <-ctx.Done():
+			return CommentResync{}, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	r, err := l.worker.ResyncIssueComments(ctx, t.ID, t.Repo, t.IssueNumber, o.Notify)
+	switch {
+	case errors.Is(err, worker.ErrNotReady):
+		return CommentResync{}, fmt.Errorf("%w: Gitea is not configured", ErrConflict)
+	case errors.Is(err, worker.ErrBotUnknown):
+		return CommentResync{}, fmt.Errorf("%w: Gitea bot account not yet known, retry later", ErrConflict)
+	case errors.Is(err, gitea.ErrNotFound):
+		return CommentResync{}, fmt.Errorf("%w: linked Gitea issue not found", ErrConflict)
+	case err != nil:
+		return CommentResync{}, fmt.Errorf("lingo: resync ticket %d comments: %w", t.ID, err)
+	}
+	l.log.Info("ticket comments resynced", "ticket", t.ID, "by", u.ID, "added", r.Added, "updated", r.Updated,
+		"published", r.Published, "unpublished", r.Unpublished, "notify", o.Notify) // 留痕
+	return CommentResync{TicketID: t.ID, Repo: t.Repo, Issue: t.IssueNumber, Fetched: r.Fetched, Bot: r.Bot, Added: r.Added,
+		Updated: r.Updated, Unchanged: r.Unchanged, Skipped: r.Skipped, Published: r.Published, Unpublished: r.Unpublished,
+		Notified: o.Notify && r.Published > 0}, nil
 }
 
 // ticketDetail 返回工单、评论与附件（一次鉴权），供 REST 详情接口使用。

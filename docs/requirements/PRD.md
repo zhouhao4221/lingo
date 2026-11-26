@@ -3,7 +3,7 @@
 | 字段 | 内容 |
 |-----|------|
 | 产品名称 | 灵工 Lingo（连接 Agent AI 智能开发团队与用户的知识问答 Agent） |
-| 文档版本 | v1.35 |
+| 文档版本 | v1.36 |
 | 创建日期 | 2026-11-13 |
 | 最后更新 | 2026-11-27 |
 | 文档负责人 | haiqing |
@@ -27,6 +27,7 @@
 | v1.10 | 2026-11-18 | haiqing | 新增反馈提交接口（供接入方弹窗组件：类型、文字、截图与附件上传）、后台确认转出（按项目与类型的自动 / 手动开关，运行时可覆盖；待确认默认 24 小时提醒）；事件补充 `triage.resolved` 与事件 ID 等字段，新增查询方法与变更流、提交人身份与数据隔离；弹窗界面仍由接入方实现 |
 | v1.33 | 2026-11-25 | haiqing | REQ-008 业务数据 Tool（只读）：3.2.0.5 注册校验、三种入口、超时并发熔断、审计先行与可见范围；数据模型新增 lingo_data_requests（0007） |
 | v1.34 | 2026-11-26 | haiqing | REQ-009 知识问答图片提问（待评审）：提问可附带最多 4 张 PNG / JPEG / WebP（沿用 Attachment、不带 URL、允许只发图），经 FetchAttachment（Purpose=question）以提问人身份读取并校验后按 OpenAI 兼容多模态格式发给回答模型；模型连接声明图片能力，不支持时明确报错；迁移 0008 为问答消息加 attachments 列 |
+| v1.36 | 2026-11-27 | haiqing | 历史评论重新同步（REQ-011）：新增 `ResyncTicketComments`（REST `POST /tickets/{id}/comments/resync`，reviewer / admin，限 `User.Projects`），按当前 ReplyMode 重读工单主 Issue 的全部评论，与 Webhook / 对账同一套处理（机器人过滤、去重、编辑、已删除不恢复），默认不通知、幂等；用于切换 ReplyAll 后回补此前存为内部的评论；无迁移 |
 | v1.35 | 2026-11-27 | haiqing | 反馈管理列表（REQ-010）：新增 `ListTickets`（REST `GET /tickets`），按项目、仓库、类型、状态、关键词、时间筛选，游标分页并返回总数；可见范围复用知识问答检索（3.2.0.6），external 默认只含本人（`IncludeShared` 另含 `TicketAudience` 同事工单），agent 只含已转出，reviewer / admin 为 `User.Projects` 内全部；不新增权限规则，无迁移 |
 | v1.32 | 2026-11-25 | haiqing | 知识库二期（REQ-007）：迁移 0006 放宽条目状态（新增待审核 / 已驳回）与来源（工单抽取、回答反馈、工单评论），新增回答反馈、抽取记录、未答上记录三张表；Bug / 需求工单首次进入已发布 / 已上线 / 已关闭后由轻量模型抽取问答（待审核，每张一次，升级前已结案的不抽取）；`RateMessage` 回答反馈（有帮助 / 没帮助次数，知识类回答首次有帮助时入候选）；`AddTicketCommentWith` 后台评论勾选入库；`ApproveKnowledge` / `RejectKnowledge` 审核，入库时标出可能重复；`ListUnansweredQuestions` 未答上统计（90 天）；检索重合词数不少于提问与条目中较短一方的 20%；未答上按项目分别记录 |
 | v1.31 | 2026-11-24 | haiqing | 知识库一期（REQ-006）：新增 `lingo_knowledge`（迁移 0005）；后台直接答复工单时可勾选加入知识库（`AnswerTicketWith`，默认不入库，可改写，入库即生效），reviewer / admin 手动新建与维护（编辑、停用 / 恢复、删除、按来源工单停用、按引用次数列出）；检索（`SearchKnowledge`、REST `/knowledge/search`、MCP `search_knowledge`）用中文二元切词 + GIN 数组索引，`Model.Embed` 可用时后台生成向量并重排前 50 条（可选接口 `EmbeddingModelNamer` 区分向量模型）；知识问答新增知识类意图，检索知识条目与同类工单作答并附 `citations.knowledge`，来源工单按查看权限返回；版本说明不入知识库（沿用版本问答）；模型抽取、回答反馈与审核见 REQ-007 |
@@ -693,6 +694,7 @@ flowchart LR
 - 用户补充 → 机器人 `POST /issues/{index}/comments`，正文标明“来自提交人的补充”；工单处于 `need_info` 时补充后回到 `in_progress`
 - 研发回复 → `issue_comment` 事件（created / edited / deleted）；`sender` 为机器人自己的事件只作确认，不再通知，防止回环
 - 哪些评论转给提交人由 `GiteaConfig.ReplyMode` 决定：`marked`（默认）只转发以 `/reply` 开头、含 `<!-- lingo:public -->` 标记或经 MCP 回复工具发出的评论；`all` 转发全部非机器人评论
+- 是否对外在同步时判定并保存；定时对账的游标只前进，切换 ReplyMode 后旧评论不会自动重判。reviewer / admin 可用 `ResyncTicketComments`（REST `POST /tickets/{id}/comments/resync`，REQ-011）按当前 ReplyMode 重新同步单个工单主 Issue 的全部评论：处理同 Webhook，默认不通知，幂等，不因列表中缺少而推断删除
 - 工单结束（`closed` / `deployed`）后锁定 Issue（`PUT /issues/{index}/lock`），重开时解锁
 
 **工单状态**：

@@ -275,6 +275,7 @@ l, err := lingo.New(lingo.Config{ /* … */ Tools: []lingo.Tool{orderTool, leave
 | `GET /tickets?project=&repo=&type=&status=a,b&q=&mine=&shared=&time_field=&from=&to=&before=&limit=` | 反馈管理列表（Go `ListTickets`）：返回 `{tickets, total, next_before}`；external 默认只含本人（`shared=true` 另含同事的），agent 只含已转出的，reviewer / admin 为 `User.Projects` 内全部（`User.Projects` 为空时为 `Config.Projects` 全部）。`status` 逗号分隔表示任一；`q` 按空白拆词（最多 10 个、每个最多 100 字）；`mine` / `shared` 只接受 `true`\|`false`\|`1`\|`0`；`time_field` 默认 `created`，可选 `updated`\|`forwarded`；`from` / `to` 为 RFC 3339，`to` 不含；`before` 为上一页的 `next_before`；`limit` 默认 50、最大 200；不合法返回 400 |
 | `POST` / `GET /tickets/{id}/perspectives` | 需求视角补充：追加、按视角分组查看（见上文「需求视角」） |
 | `GET /triage`、`GET /triage/summary`、`POST /tickets/{id}/forward\|answer\|merge\|reject` | 后台确认（reviewer / admin） |
+| `POST /tickets/{id}/comments/resync` | 按当前 `ReplyMode` 重新同步工单主 Issue 的历史 Gitea 评论（Go `ResyncTicketComments`，reviewer / admin，限 `User.Projects`）：用于切换为 `ReplyAll` 后回补此前存为内部的评论；处理同 Webhook（跳过机器人、去重、编辑、已删除不恢复），默认不通知（body `{"notify":true}` 时照常通知），幂等，只读 Gitea；返回各项计数 |
 | `POST /tickets/{id}/reject-forwarded`、`GET /tickets/{id}/issue-close`、`POST /tickets/{id}/issue-close/retry` | 驳回已转研发工单（只关闭关联 Issue，异步可重试）及关闭进度 / 重试（reviewer / admin） |
 | `GET /events?after=` | 变更流（与 `Notifier` 同源） |
 | `GET /releases`、`GET /releases/{id}` | 版本记录、关联工单与上线记录 |

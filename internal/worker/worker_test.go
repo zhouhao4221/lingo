@@ -94,6 +94,10 @@ func (f *fakeTickets) ApplyComment(_ context.Context, u ticket.CommentUpdate) er
 	f.comments = append(f.comments, u)
 	return f.err
 }
+func (f *fakeTickets) ResyncComment(_ context.Context, u ticket.CommentUpdate) (ticket.CommentResult, error) {
+	f.comments = append(f.comments, u)
+	return ticket.CommentResult{Outcome: ticket.CommentAdded, Published: u.Public}, f.err
+}
 func (f *fakeTickets) ApplyPull(context.Context, ticket.PullUpdate) error { return f.err }
 
 var now = time.Date(2026, 11, 18, 8, 0, 0, 0, time.UTC)

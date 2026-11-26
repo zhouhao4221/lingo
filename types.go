@@ -335,6 +335,31 @@ type TicketPage struct {
 	NextBefore int64 `json:"next_before"`
 }
 
+// CommentResyncOptions 是 ResyncTicketComments 的选项。
+type CommentResyncOptions struct {
+	// Notify 为真时，本次由内部变为对提交人可见的评论照常发 ticket.comment 事件（Notifier 推送与变更流，同 Webhook 同步）；
+	// 默认 false：历史回补不通知提交人。
+	Notify bool
+}
+
+// CommentResync 是 ResyncTicketComments 的结果（各计数只针对该工单关联的主 Issue）。
+type CommentResync struct {
+	TicketID int64  `json:"ticket_id"`
+	Repo     string `json:"repo"`    // 主 Issue 所在仓库 "owner/name"
+	Issue    int64  `json:"issue"`   // 主 Issue 编号
+	Fetched  int    `json:"fetched"` // Gitea 上该 Issue 的评论数（含机器人评论）
+	Bot      int    `json:"bot"`     // 机器人账号的评论（灵工转发的补充等），跳过
+	Added    int    `json:"added"`   // 灵工此前没有、本次新保存的
+	Updated  int    `json:"updated"` // 正文或对外判定有变化的
+	// Unchanged 是与已保存一致的（重复执行时全部计入这里）；Skipped 是因 Issue 已不关联该工单而未写入的。
+	Unchanged int `json:"unchanged"`
+	Skipped   int `json:"skipped"`
+	// Published / Unpublished 是本次由内部变为对提交人可见 / 由对外变为内部的条数（含新增即对外）。
+	Published   int  `json:"published"`
+	Unpublished int  `json:"unpublished"`
+	Notified    bool `json:"notified"` // 是否按 Notify 为新变为对外的评论发了事件
+}
+
 // IssueClose 是转研发后被驳回的工单关闭关联 Issue 的进度（RejectForwardedTicket 之后由 Run 异步执行）。
 type IssueClose struct {
 	TicketID int64  `json:"ticket_id"`
