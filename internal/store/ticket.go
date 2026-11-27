@@ -424,9 +424,10 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = x.tx.ExecContext(ctx, `
-			INSERT INTO lingo_ticket_comments (ticket_id, author_name, source, body, public, gitea_comment_id, created_at, updated_at)
-			VALUES ($1, $2, 'gitea', $3, $4, $5, $6, $6)`,
-			c.TicketID, c.AuthorName, c.Body, c.Public, c.GiteaID, at)
+			INSERT INTO lingo_ticket_comments (ticket_id, author_name, source, body, public, gitea_comment_id, created_at, updated_at,
+				model_marked)
+			VALUES ($1, $2, 'gitea', $3, $4, $5, $6, $6, $7)`,
+			c.TicketID, c.AuthorName, c.Body, c.Public, c.GiteaID, at, c.Model)
 		if err != nil {
 			return nil, false, fmt.Errorf("store: insert comment %d: %w", c.GiteaID, err)
 		}
@@ -437,8 +438,8 @@ func (x *ticketTx) SaveGiteaComment(ctx context.Context, c ticket.Comment) (*tic
 	if deleted.Valid || (known && at.Before(prev.At)) {
 		return &prev, false, nil // 已删除，或旧于已保存版本的乱序编辑：不写入，调用方不留痕、不通知
 	}
-	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_ticket_comments SET body = $2, public = $3, author_name = $4, updated_at = $5 WHERE gitea_comment_id = $1",
-		c.GiteaID, c.Body, c.Public, c.AuthorName, at); err != nil {
+	if _, err := x.tx.ExecContext(ctx, "UPDATE lingo_ticket_comments SET body = $2, public = $3, author_name = $4, updated_at = $5, model_marked = $6 WHERE gitea_comment_id = $1",
+		c.GiteaID, c.Body, c.Public, c.AuthorName, at, c.Model); err != nil {
 		return nil, false, fmt.Errorf("store: update comment %d: %w", c.GiteaID, err)
 	}
 	switch {

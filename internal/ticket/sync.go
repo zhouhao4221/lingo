@@ -66,14 +66,17 @@ const (
 
 // CommentUpdate 是一次评论变化。
 type CommentUpdate struct {
-	Change     CommentChange
-	Repo       string
-	Number     int64
-	CommentID  int64
-	Author     string // 评论人 login
-	Body       string // 对外评论为去掉 /reply 前缀后的正文
-	Public     bool   // 按 ReplyMode 判定为面向提交人
-	FromBot    bool   // 机器人自己发的评论（灵工转发的用户补充），只作确认
+	Change    CommentChange
+	Repo      string
+	Number    int64
+	CommentID int64
+	Author    string // 评论人 login
+	Body      string // 对外评论为去掉 /reply 前缀后的正文
+	Public    bool   // 按 ReplyMode 判定为面向提交人
+	// Model 是按原始正文标记（/reply 开头或带 lingo:public 标记）判定属于 ReplyMarked 内容范围，与 ReplyMode 无关；
+	// 模型准入用（REQ-012），随正文一起保存，乱序旧版本与已删除的评论不覆盖。
+	Model      bool
+	FromBot    bool // 机器人自己发的评论（灵工转发的用户补充），只作确认
 	DeliveryID string
 	At         time.Time
 	// TicketID 非零时只写入该工单：Issue 关联的工单不是它时跳过（历史评论重新同步，防止写到其他工单）。
@@ -429,12 +432,13 @@ func (s *Sync) applyComment(ctx context.Context, u CommentUpdate) (CommentResult
 			return tx.DeleteGiteaComment(ctx, u.CommentID, u.At)
 		}
 		prev, saved, err := tx.SaveGiteaComment(ctx, Comment{TicketID: t.ID, GiteaID: u.CommentID, AuthorName: u.Author,
-			Body: u.Body, Public: u.Public, At: u.At})
+			Body: u.Body, Public: u.Public, Model: u.Model, At: u.At})
 		if err != nil {
 			return err
 		}
 		if !saved || (prev != nil && prev.Body == u.Body && prev.Public == u.Public) {
-			// 未写入（灵工已删除、乱序旧编辑）或内容未变（重投、对账重放、重新同步）：不留痕、不通知
+			// 未写入（灵工已删除、乱序旧编辑）或内容未变（重投、对账重放、重新同步）：不留痕、不通知。
+			// 只有模型准入判定变化（如升级前同步的评论首次判定）时已随本次写入保存，同样不留痕、不改可见性计数
 			res.Outcome = CommentUnchanged
 			return nil
 		}

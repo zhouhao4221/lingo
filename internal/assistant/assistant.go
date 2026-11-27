@@ -116,7 +116,10 @@ type Message struct {
 	Citations      Citations
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
-	Action         *Action // 该助手消息提出的待确认操作（读取时回填）
+	// ModelOK 是助手消息生成时送给模型的工单评论、知识条目与历史回答是否都在 ReplyMarked 内容范围内（可信来源链，
+	// REQ-012）：nil 为未知（升级前的消息、失败的回答），用户消息恒为 nil（提问是用户自己的内容）。
+	ModelOK *bool
+	Action  *Action // 该助手消息提出的待确认操作（读取时回填）
 	// Attachments 是用户消息附带的图片引用（REQ-009）；助手消息为空
 	Attachments []Attachment
 }
@@ -164,11 +167,12 @@ type KnowledgeRef struct {
 
 // Knowledge 是知识库检索，由 knowledge.Service 实现。
 type Knowledge interface {
-	Search(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]knowledge.Hit, error)
+	// SearchForModel 检索交给模型的知识条目：启用模型内容策略时只含来源可信的条目（Hit.ModelInput，REQ-012）。
+	SearchForModel(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]knowledge.Hit, error)
 	ByIDs(ctx context.Context, ids []int64) ([]*knowledge.Entry, error)
 	Cite(ctx context.Context, ids []int64) error
-	// Suggest 以待审核状态入库回答候选；Miss 记录未答上的提问（REQ-007）。
-	Suggest(ctx context.Context, d knowledge.Draft, messageID int64) error
+	// Suggest 以待审核状态入库回答候选（modelOK 为该回答的 Message.ModelOK）；Miss 记录未答上的提问（REQ-007）。
+	Suggest(ctx context.Context, d knowledge.Draft, messageID int64, modelOK *bool) error
 	Miss(ctx context.Context, p auth.Principal, project, question string) error
 }
 
@@ -303,6 +307,10 @@ type Options struct {
 	Now      func() time.Time
 	// Location 是未指定时区时解析"今天 / 上周"等用的时区，默认 time.Local。
 	Location *time.Location
+	// ModelMarked 为真时启用模型内容策略 ModelContentMarked（REQ-012）：external 的问答只把 Comment.Model 的评论交给模型；
+	// 历史中来源未知（ModelOK 为 nil）的回答、以及 external 的 ModelOK 为 false 的回答不作为模型输入（只保留引用的工单与
+	// 版本，用于理解指代）。知识检索经 Knowledge.SearchForModel。为假时行为与升级前相同（仍记录 ModelOK）。
+	ModelMarked bool
 }
 
 // Service 是问答会话与回答。

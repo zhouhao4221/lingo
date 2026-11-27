@@ -107,6 +107,23 @@ const (
 	ReplyAll    ReplyMode = "all"    // 转发全部非机器人评论
 )
 
+// ModelContentPolicy 决定哪些内容可以交给模型（REQ-012），与 ReplyMode（用户可见范围）相互独立，须显式启用。
+type ModelContentPolicy string
+
+const (
+	// ModelContentDefault 是默认：交给模型的内容与升级前相同（普通用户问答带对外评论，自动抽取用对外评论），
+	// 只额外记录来源（不改变任何行为）。
+	ModelContentDefault ModelContentPolicy = ""
+	// ModelContentMarked 启用防御性数据最小化：无论 ReplyMode 如何，普通用户（external）问答与结案工单自动知识抽取只把
+	// ReplyMarked 内容范围内的评论交给模型——Gitea 评论按同步时原始正文的标记（/reply 开头、带 <!-- lingo:public -->）
+	// 判定，灵工本地评论（提交人补充、后台答复、MCP 回复）照常准入；升级前同步、尚未重新判定的 Gitea 评论不准入
+	// （ResyncTicketComments 或 Webhook 编辑会重新判定）。派生内容同样只用可信来源：问答检索与知识向量只用来源可信的
+	// 知识条目（KnowledgeEntry.ModelInput），历史中升级前的回答不作为模型输入。用户可见范围（ReplyMode）、同事、合并工单、
+	// 项目、管理权限与通知不变；reviewer / admin / agent 问答中已授权的评论范围不变。原记录、用户展示与审核状态不改；
+	// 来源未知的旧抽取知识可经 ReextractTicketKnowledge 手动按新规则重新抽取为新候选。
+	ModelContentMarked ModelContentPolicy = "marked"
+)
+
 // GiteaConfig 是 Gitea 连接配置；要求 Gitea ≥ 1.22。
 //
 // BaseURL、Token、WebhookSecret、AutoRegisterWebhook、WebhookURL、RejectRedirects 都可以不在代码中配置，改为存入数据库，

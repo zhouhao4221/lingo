@@ -117,9 +117,14 @@ type Comment struct {
 	AuthorName string
 	Body       string
 	Public     bool
-	At         time.Time
-	Forwarded  bool  // 已随 Issue 正文转出
-	PostedID   int64 // 已由机器人发到 Gitea 的评论 ID
+	// Model 报告评论属于 ReplyMarked 内容范围、可作为模型输入（REQ-012）：与 Public 分开，不随 ReplyMode 变化。
+	// 读取时由 store 计算——Gitea 评论取同步时按原始正文标记（/reply、lingo:public）的判定，升级前同步、尚未重新判定的
+	// 为 false（来源未知不准入）；灵工本地评论（提交人补充、后台与 MCP 回复）取其显式的 Public。SaveGiteaComment 写入时
+	// 为按原始正文标记的判定。
+	Model     bool
+	At        time.Time
+	Forwarded bool  // 已随 Issue 正文转出
+	PostedID  int64 // 已由机器人发到 Gitea 的评论 ID
 	// Attachments 是随评论提交的附件引用（写入时使用）
 	Attachments []Attachment
 }

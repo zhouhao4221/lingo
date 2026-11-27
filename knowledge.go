@@ -47,7 +47,30 @@ type KnowledgeEntry struct {
 	DuplicateOf    int64 `json:"duplicate_of,omitempty"`
 	HelpfulCount   int64 `json:"helpful_count,omitempty"`
 	UnhelpfulCount int64 `json:"unhelpful_count,omitempty"`
+	// ModelInput 报告条目来源可信、可作为模型输入（REQ-012）：人工在灵工中填写的（manual、ticket_answer、ticket_comment），
+	// 或按可信内容生成的派生条目。为 false 的（升级前生成、来源未知的抽取与回答候选，或来源含 ReplyMarked 范围外内容的）
+	// 在启用 ModelContentMarked 时不参与问答检索与向量生成，但照常展示、审核与维护。
+	ModelInput bool `json:"model_input"`
 }
+
+// KnowledgeReextract 是 ReextractTicketKnowledge 的结果。
+type KnowledgeReextract struct {
+	TicketID int64  `json:"ticket_id"`
+	Outcome  string `json:"outcome"` // KnowledgeReextractCreated | KnowledgeReextractExists | KnowledgeReextractSkipped
+	// Entry 是新入库的待审核候选（created），或该工单已有的来源可信的抽取条目（exists）
+	Entry *KnowledgeEntry `json:"entry,omitempty"`
+	// Comments 是送给抽取模型的评论数；Excluded 是未送给模型的对外评论数（不在 ReplyMarked 内容范围，或来源未知——
+	// 升级前同步的 Gitea 评论需先经 ResyncTicketComments 重新判定）
+	Comments int `json:"comments"`
+	Excluded int `json:"excluded"`
+}
+
+// 重新抽取的结果（KnowledgeReextract.Outcome）。
+const (
+	KnowledgeReextractCreated = knowledge.ReextractCreated // 入库了一条新的待审核候选
+	KnowledgeReextractExists  = knowledge.ReextractExists  // 已有来源可信的抽取条目，未调用模型
+	KnowledgeReextractSkipped = knowledge.ReextractSkipped // 模型认为没有可复用的知识，未入库
+)
 
 // UnansweredQuestion 是知识类问题没有命中的提问（脱敏），近 90 天内同类提问归并计数。
 type UnansweredQuestion struct {
@@ -98,7 +121,7 @@ type EmbeddingModelNamer interface {
 
 func publicKnowledge(e *knowledge.Entry, full bool) KnowledgeEntry {
 	out := KnowledgeEntry{ID: e.ID, ProjectKey: e.ProjectKey, Repo: e.Repo, Question: e.Question, Answer: e.Answer, Source: e.Source,
-		Status: e.Status, CiteCount: e.CiteCount, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt}
+		Status: e.Status, CiteCount: e.CiteCount, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, ModelInput: e.ModelInput}
 	if full {
 		out.SourceTicketID, out.CreatedBy, out.UpdatedBy = e.SourceTicketID, e.CreatedBy, e.UpdatedBy
 		out.DuplicateOf, out.HelpfulCount, out.UnhelpfulCount = e.DuplicateOf, e.HelpfulCount, e.UnhelpfulCount
@@ -146,6 +169,30 @@ func (l *Lingo) SearchKnowledge(ctx context.Context, u User, query, project stri
 			e.SourceTicketID = h.SourceTicketID
 		}
 		out = append(out, e)
+	}
+	return out, nil
+}
+
+// ReextractTicketKnowledge 按新规则为工单重新抽取一条待审核的知识候选（仅 reviewer / admin，REQ-012）：只把 ReplyMarked
+// 内容范围内的评论（同 ModelContentMarked）交给抽取模型，新候选记为来源可信、走正常审核（ApproveKnowledge /
+// RejectKnowledge）。该工单原有的来源未知或不可信的抽取条目原样保留（内容、状态与审核结果都不改，也不参与模型输入）。
+//
+// 只适用于已有这样的抽取条目、且仍为已结案（released / deployed / closed）的 Bug / 需求工单，否则 ErrConflict；
+// 已有来源可信的抽取条目时直接返回它（KnowledgeReextractExists，不调用模型）。工单不存在或不在 u.Projects 内返回
+// ErrNotFound；没有可用的抽取模型（LightModel / Model）返回 ErrNoModel。灵工不会自动调用：每次调用（exists 除外）
+// 调用一次抽取模型并计入用量。升级前同步的 Gitea 评论来源未知、不会交给模型，需要时先调用 ResyncTicketComments。
+func (l *Lingo) ReextractTicketKnowledge(ctx context.Context, u User, ticketID int64) (KnowledgeReextract, error) {
+	r, err := l.knowledge.Reextract(ctx, l.principal(u), ticketID)
+	if errors.Is(err, knowledge.ErrNoExtractor) {
+		return KnowledgeReextract{}, ErrNoModel
+	}
+	if err != nil {
+		return KnowledgeReextract{}, publicErr(err)
+	}
+	out := KnowledgeReextract{TicketID: ticketID, Outcome: r.Outcome, Comments: r.Comments, Excluded: r.Excluded}
+	if r.Entry != nil {
+		e := publicKnowledge(r.Entry, true)
+		out.Entry = &e
 	}
 	return out, nil
 }

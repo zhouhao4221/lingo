@@ -82,18 +82,22 @@ func (s *Store) DeleteConversation(ctx context.Context, userID string, id int64)
 }
 
 const messageColumns = `m.id, m.conversation_id, m.role, m.content, m.status, m.error, COALESCE(m.reply_to, 0), m.intent, m.outcome,
-	m.citations, m.created_at, m.updated_at, m.attachments`
+	m.citations, m.created_at, m.updated_at, m.attachments, m.model_ok`
 
 func scanMessage(row rowScanner) (*assistant.Message, error) {
 	var m assistant.Message
 	var cites, atts []byte
+	var modelOK sql.NullBool
 	err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.Status, &m.Error, &m.ReplyTo, &m.Intent, &m.Outcome,
-		&cites, &m.CreatedAt, &m.UpdatedAt, &atts)
+		&cites, &m.CreatedAt, &m.UpdatedAt, &atts, &modelOK)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ticket.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: read message: %w", err)
+	}
+	if modelOK.Valid {
+		m.ModelOK = &modelOK.Bool
 	}
 	if err := json.Unmarshal(cites, &m.Citations); err != nil {
 		return nil, fmt.Errorf("store: message %d citations: %w", m.ID, err)
@@ -214,9 +218,10 @@ func (x assistantTx) InsertMessage(ctx context.Context, m *assistant.Message) er
 		}
 	}
 	if err := x.tx.QueryRowContext(ctx, `INSERT INTO lingo_assistant_messages
-		(conversation_id, role, content, status, error, reply_to, intent, outcome, citations, attachments)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, created_at, updated_at`,
-		m.ConversationID, m.Role, m.Content, m.Status, m.Error, nullInt64(m.ReplyTo), m.Intent, m.Outcome, cites, atts).Scan(
+		(conversation_id, role, content, status, error, reply_to, intent, outcome, citations, attachments, model_ok)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id, created_at, updated_at`,
+		m.ConversationID, m.Role, m.Content, m.Status, m.Error, nullInt64(m.ReplyTo), m.Intent, m.Outcome, cites, atts,
+		nullBool(m.ModelOK)).Scan(
 		&m.ID, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return fmt.Errorf("store: insert message: %w", err)
 	}
@@ -229,8 +234,8 @@ func (x assistantTx) UpdateMessage(ctx context.Context, m *assistant.Message) er
 		return err
 	}
 	if err := x.tx.QueryRowContext(ctx, `UPDATE lingo_assistant_messages
-		SET content = $2, status = $3, error = $4, intent = $5, outcome = $6, citations = $7, updated_at = now()
-		WHERE id = $1 RETURNING updated_at`, m.ID, m.Content, m.Status, m.Error, m.Intent, m.Outcome, cites).Scan(&m.UpdatedAt); err != nil {
+		SET content = $2, status = $3, error = $4, intent = $5, outcome = $6, citations = $7, model_ok = $8, updated_at = now()
+		WHERE id = $1 RETURNING updated_at`, m.ID, m.Content, m.Status, m.Error, m.Intent, m.Outcome, cites, nullBool(m.ModelOK)).Scan(&m.UpdatedAt); err != nil {
 		return fmt.Errorf("store: update message %d: %w", m.ID, err)
 	}
 	return nil

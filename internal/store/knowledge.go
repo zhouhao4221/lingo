@@ -22,7 +22,11 @@ type sqlRunner interface {
 
 const knowledgeColumns = `k.id, p.key, COALESCE(r.owner || '/' || r.name, ''), k.question, k.answer, k.source,
 	COALESCE(k.source_ticket_id, 0), k.status, k.cite_count, k.created_by, k.updated_by, k.created_at, k.updated_at,
-	COALESCE(k.duplicate_of, 0), k.helpful_count, k.unhelpful_count`
+	COALESCE(k.duplicate_of, 0), k.helpful_count, k.unhelpful_count, ` + knowledgeModelExpr
+
+// knowledgeModelExpr 是条目可作为模型输入（knowledge.Entry.ModelInput，REQ-012）：人工在灵工中填写的来源，或 model_ok 为
+// true 的派生条目；升级前生成的派生条目（NULL，来源未知）与不可信的（false）不准入。
+const knowledgeModelExpr = `(k.source IN ('manual', 'ticket_answer', 'ticket_comment') OR k.model_ok IS TRUE)`
 
 const knowledgeFrom = ` FROM lingo_knowledge k JOIN lingo_projects p ON p.id = k.project_id
 	LEFT JOIN lingo_repos r ON r.id = k.repo_id`
@@ -30,7 +34,8 @@ const knowledgeFrom = ` FROM lingo_knowledge k JOIN lingo_projects p ON p.id = k
 func scanKnowledge(sc interface{ Scan(...any) error }, extra ...any) (*knowledge.Entry, error) {
 	e := &knowledge.Entry{}
 	err := sc.Scan(append([]any{&e.ID, &e.ProjectKey, &e.Repo, &e.Question, &e.Answer, &e.Source, &e.SourceTicketID, &e.Status,
-		&e.CiteCount, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt, &e.DuplicateOf, &e.HelpfulCount, &e.UnhelpfulCount},
+		&e.CiteCount, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt, &e.DuplicateOf, &e.HelpfulCount, &e.UnhelpfulCount,
+		&e.ModelInput},
 		extra...)...)
 	return e, err
 }
@@ -66,11 +71,11 @@ func insertKnowledge(ctx context.Context, q sqlRunner, e knowledge.NewEntry) (in
 	}
 	var id int64
 	err = q.QueryRowContext(ctx, `INSERT INTO lingo_knowledge (project_id, repo_id, question, answer, source, source_ticket_id,
-		search_tokens, created_by, updated_by, status, source_message_id, duplicate_of)
-		VALUES ($1, $2, $3, $4, $5, $6, ($7::text)::text[], $8, $8, $9, $10, $11)
+		search_tokens, created_by, updated_by, status, source_message_id, duplicate_of, model_ok)
+		VALUES ($1, $2, $3, $4, $5, $6, ($7::text)::text[], $8, $8, $9, $10, $11, $12)
 		ON CONFLICT DO NOTHING RETURNING id`,
 		pid, rid, e.Question, e.Answer, e.Source, nullInt64(e.SourceTicketID), textArray(e.Tokens), e.By, status,
-		nullInt64(e.SourceMessageID), nullInt64(e.DuplicateOf)).Scan(&id)
+		nullInt64(e.SourceMessageID), nullInt64(e.DuplicateOf), nullBool(e.ModelOK)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 同一回答（source_message_id）或同一工单的抽取候选已存在
 		return 0, fmt.Errorf("%w: knowledge from this source already exists", ticket.ErrConflict)
@@ -207,18 +212,18 @@ func (s *Store) knowledgeHits(ctx context.Context, query string, args ...any) ([
 
 // SearchKnowledgeTokens 实现 knowledge.Store：重合词数不少于 min(提问词数, 条目词数) × minRatio 的条目，按重合度 =
 // 重合词数 / sqrt(条目词数) 降序，同分时新的在前。
-func (s *Store) SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int) ([]knowledge.Hit, error) {
+func (s *Store) SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int, modelOnly bool) ([]knowledge.Hit, error) {
 	return s.knowledgeHits(ctx, "SELECT "+knowledgeColumns+`, o.n::float8 / sqrt(GREATEST(cardinality(k.search_tokens), 1)) AS score`+
 		knowledgeFrom+`
 		CROSS JOIN LATERAL (SELECT count(*) AS n FROM unnest(k.search_tokens) t WHERE t = ANY(($3::text)::text[])) o
 		WHERE k.status = 'active' AND k.search_tokens && ($3::text)::text[]
 		  AND o.n >= GREATEST(1, ceil($5::float8 * LEAST($6::int, cardinality(k.search_tokens))))
-		  AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
-		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(tokens), limit, minRatio, len(tokens))
+		  AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2) AND (NOT $7 OR `+knowledgeModelExpr+`)
+		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(tokens), limit, minRatio, len(tokens), modelOnly)
 }
 
 // SearchKnowledgeWords 实现 knowledge.Store。
-func (s *Store) SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int) ([]knowledge.Hit, error) {
+func (s *Store) SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int, modelOnly bool) ([]knowledge.Hit, error) {
 	pats := make([]string, len(words))
 	for i, w := range words {
 		pats[i] = "%" + likeEscape(w) + "%"
@@ -226,9 +231,15 @@ func (s *Store) SearchKnowledgeWords(ctx context.Context, projects []string, pro
 	return s.knowledgeHits(ctx, "SELECT "+knowledgeColumns+`,
 		(SELECT count(*) FROM unnest(($3::text)::text[]) w WHERE k.question ILIKE w ESCAPE '\' OR k.answer ILIKE w ESCAPE '\')::float8 AS score`+
 		knowledgeFrom+`
-		WHERE k.status = 'active' AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2)
+		WHERE k.status = 'active' AND p.key = ANY(($1::text)::text[]) AND ($2 = '' OR p.key = $2) AND (NOT $5 OR `+knowledgeModelExpr+`)
 		  AND EXISTS (SELECT 1 FROM unnest(($3::text)::text[]) w WHERE k.question ILIKE w ESCAPE '\' OR k.answer ILIKE w ESCAPE '\')
-		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(pats), limit)
+		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(pats), limit, modelOnly)
+}
+
+// TicketExtracts 实现 knowledge.Store。
+func (s *Store) TicketExtracts(ctx context.Context, ticketID int64) ([]*knowledge.Entry, error) {
+	return s.knowledgeList(ctx, "SELECT "+knowledgeColumns+knowledgeFrom+` WHERE k.source_ticket_id = $1 AND k.source = 'ticket_extract'
+		ORDER BY k.id`, ticketID)
 }
 
 // KnowledgeEmbeddings 实现 knowledge.Store。
@@ -261,13 +272,13 @@ func (s *Store) AddKnowledgeCites(ctx context.Context, ids []int64) error {
 }
 
 // ClaimKnowledgeEmbeds 实现 knowledge.Store。
-func (s *Store) ClaimKnowledgeEmbeds(ctx context.Context, model string, limit int, lease time.Duration) ([]knowledge.Pending, error) {
+func (s *Store) ClaimKnowledgeEmbeds(ctx context.Context, model string, limit int, lease time.Duration, modelOnly bool) ([]knowledge.Pending, error) {
 	rows, err := s.db.QueryContext(ctx, `UPDATE lingo_knowledge k SET embed_locked_until = now() + $3 * interval '1 millisecond'
-		FROM (SELECT id FROM lingo_knowledge
-		      WHERE status = 'active' AND (embedding IS NULL OR ($1 <> '' AND embed_model IS DISTINCT FROM $1))
-		        AND (embed_locked_until IS NULL OR embed_locked_until < now())
-		      ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED) c
-		WHERE k.id = c.id RETURNING k.id, k.question || E'\n' || k.answer, k.updated_at`, model, limit, lease.Milliseconds())
+		FROM (SELECT k.id FROM lingo_knowledge k
+		      WHERE k.status = 'active' AND (k.embedding IS NULL OR ($1 <> '' AND k.embed_model IS DISTINCT FROM $1))
+		        AND (k.embed_locked_until IS NULL OR k.embed_locked_until < now()) AND (NOT $4 OR `+knowledgeModelExpr+`)
+		      ORDER BY k.id LIMIT $2 FOR UPDATE OF k SKIP LOCKED) c
+		WHERE k.id = c.id RETURNING k.id, k.question || E'\n' || k.answer, k.updated_at`, model, limit, lease.Milliseconds(), modelOnly)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim knowledge embeds: %w", err)
 	}

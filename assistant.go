@@ -349,6 +349,7 @@ func publicActionResult(r *assistant.ActionResult) ActionResult {
 // 连接配置）；未配置主模型时发送返回 ErrNoModel。
 func (l *Lingo) newAssistant() (*assistant.Service, error) {
 	o := assistant.Options{
+		ModelMarked: l.modelMarked(),
 		Store:       l.store,
 		Tickets:     l.tickets,
 		Releases:    l.releases,

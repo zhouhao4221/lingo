@@ -421,6 +421,17 @@ func (s *Service) Comments(ctx context.Context, p auth.Principal, id int64) ([]C
 	return s.queries().Comments(ctx, id, p.Role == auth.RoleExternal)
 }
 
+// ModelComments 返回 cs 中可作为模型输入的评论（Comment.Model，REQ-012），顺序不变。
+func ModelComments(cs []Comment) []Comment {
+	out := make([]Comment, 0, len(cs))
+	for _, c := range cs {
+		if c.Model {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Detail 返回工单、评论与附件（一次鉴权），可见范围同 Comments；附件只对 Visible 的调用者返回（被放宽可见的同事
 // 看不到附件：截图可能含敏感信息）。
 func (s *Service) Detail(ctx context.Context, p auth.Principal, id int64) (*Ticket, []Comment, []Attachment, error) {

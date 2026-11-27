@@ -244,10 +244,15 @@ func (s *Store) Events(ctx context.Context, q ticket.EventQuery) ([]notify.Event
 	return out, rows.Err()
 }
 
+// commentModelExpr 是评论的模型准入（ticket.Comment.Model，REQ-012）：Gitea 评论取同步时按原始标记的判定，未判定（升级前
+// 同步）的不准入；灵工本地评论取其显式的 public；其他来源不准入。
+const commentModelExpr = `(CASE WHEN source = 'gitea' THEN COALESCE(model_marked, false)
+	WHEN source IN ('user', 'staff', 'agent') THEN public ELSE false END)`
+
 // Comments 实现 ticket.QueryStore：未删除的评论，按时间顺序。
 func (s *Store) Comments(ctx context.Context, ticketID int64, publicOnly bool) ([]ticket.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, ticket_id, COALESCE(gitea_comment_id, 0), source, author_id, author_name, body, public, created_at
+		SELECT id, ticket_id, COALESCE(gitea_comment_id, 0), source, author_id, author_name, body, public, `+commentModelExpr+`, created_at
 		FROM lingo_ticket_comments WHERE ticket_id = $1 AND deleted_at IS NULL AND (NOT $2 OR public)
 		ORDER BY created_at, id`, ticketID, publicOnly)
 	if err != nil {
@@ -257,7 +262,7 @@ func (s *Store) Comments(ctx context.Context, ticketID int64, publicOnly bool) (
 	var out []ticket.Comment
 	for rows.Next() {
 		var c ticket.Comment
-		if err := rows.Scan(&c.ID, &c.TicketID, &c.GiteaID, &c.Source, &c.AuthorID, &c.AuthorName, &c.Body, &c.Public, &c.At); err != nil {
+		if err := rows.Scan(&c.ID, &c.TicketID, &c.GiteaID, &c.Source, &c.AuthorID, &c.AuthorName, &c.Body, &c.Public, &c.Model, &c.At); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

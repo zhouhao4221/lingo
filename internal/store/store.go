@@ -79,3 +79,11 @@ func textArrayInt(ids []int64) string {
 
 // nullInt64 把 0 映射为 NULL。
 func nullInt64(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: v != 0} }
+
+// nullBool 把可空布尔写为 SQL：nil 为 NULL（未知）。
+func nullBool(v *bool) sql.NullBool {
+	if v == nil {
+		return sql.NullBool{}
+	}
+	return sql.NullBool{Bool: *v, Valid: true}
+}

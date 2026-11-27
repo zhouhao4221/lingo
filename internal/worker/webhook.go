@@ -215,11 +215,11 @@ func (w *Worker) applyComment(ctx context.Context, ev *webhook.Event, received t
 	return w.o.Tickets.ApplyComment(ctx, u)
 }
 
-// commentUpdate 把 Gitea 评论映射为工单评论变化（Webhook 与对账共用）：按 ReplyMode 判定是否对外、去掉 /reply 前缀；
-// 评论人是机器人（灵工转发的补充，研发编辑也算）时标记 FromBot。
+// commentUpdate 把 Gitea 评论映射为工单评论变化（Webhook、对账与历史评论重新同步共用）：按 ReplyMode 判定是否对外、
+// 去掉 /reply 前缀；按原始正文标记判定模型准入（Model，与 ReplyMode 无关，REQ-012）；评论人是机器人（灵工转发的补充，研发编辑也算）时标记 FromBot。
 func (w *Worker) commentUpdate(change ticket.CommentChange, repo string, number int64, c *gitea.Comment, sender string) ticket.CommentUpdate {
 	u := ticket.CommentUpdate{Change: change, Repo: repo, Number: number, CommentID: c.ID, Author: sender, Body: c.Body,
-		Public: w.o.ReplyMode == webhook.ReplyAll || gitea.IsPublicReply(c.Body), At: c.UpdatedAt}
+		Public: w.o.ReplyMode == webhook.ReplyAll || gitea.IsPublicReply(c.Body), Model: gitea.IsPublicReply(c.Body), At: c.UpdatedAt}
 	if c.User != nil {
 		u.Author = c.User.Login
 		if bot := w.o.BotLogin(); bot != "" && strings.EqualFold(c.User.Login, bot) {

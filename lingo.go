@@ -37,7 +37,10 @@ type Config struct {
 	Model Model
 	// LightModel 是轻量模型（只用 Chat），用于建 Issue 前整理工单（生成标题、从描述中抽取模板字段、整理描述），以及
 	// 知识问答的意图解析与确认判断。为空时用 Model；两者都为空时按原内容建单。整理失败不影响建单，Issue 末尾附提交人原始描述。
-	LightModel   Model
+	LightModel Model
+	// ModelContent 是模型内容策略（REQ-012），默认 ModelContentDefault（行为不变）；ModelContentMarked 见其说明。
+	// 其他取值 New 返回错误。
+	ModelContent ModelContentPolicy
 	Gitea        GiteaConfig
 	Projects     []Project // 第一个为默认项目（请求未指定 project 时使用）
 	Authenticate Authenticator
@@ -139,6 +142,11 @@ func New(cfg Config) (*Lingo, error) {
 	if err := validatePerspectives(cfg); err != nil {
 		return nil, err
 	}
+	switch cfg.ModelContent {
+	case ModelContentDefault, ModelContentMarked:
+	default:
+		return nil, fmt.Errorf("lingo: Config.ModelContent %q is not supported", cfg.ModelContent)
+	}
 	l := &Lingo{cfg: cfg, log: cfg.Logger, tmpls: &gitea.TemplateCache{}}
 	l.settingsChanged = make(chan struct{}, 1)
 	if l.log == nil {
@@ -197,7 +205,7 @@ func New(cfg Config) (*Lingo, error) {
 	}
 	l.embedKick = make(chan struct{}, 1)
 	if l.knowledge, err = knowledge.New(knowledge.Options{Store: l.store, Embedder: l.knowledgeEmbedder,
-		Extractor: l.knowledgeExtractor, Tickets: l.knowledgeTicket}); err != nil {
+		Extractor: l.knowledgeExtractor, Tickets: l.knowledgeTicket, ModelMarked: l.modelMarked()}); err != nil {
 		return nil, fmt.Errorf("lingo: %w", err)
 	}
 	l.data = l.newDataTools(builtinToolNames(l.mcpTools()))
@@ -209,6 +217,9 @@ func New(cfg Config) (*Lingo, error) {
 	l.botLogin() // 立即在后台获取机器人账号，缩短接收端无法识别机器人事件的窗口
 	return l, nil
 }
+
+// modelMarked 报告是否启用了模型内容策略 ModelContentMarked（REQ-012）。
+func (l *Lingo) modelMarked() bool { return l.cfg.ModelContent == ModelContentMarked }
 
 func (l *Lingo) replyMode() webhook.ReplyMode {
 	if l.cfg.Gitea.ReplyMode == ReplyAll {
