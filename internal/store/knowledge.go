@@ -236,6 +236,30 @@ func (s *Store) SearchKnowledgeWords(ctx context.Context, projects []string, pro
 		ORDER BY score DESC, k.updated_at DESC LIMIT $4`, textArray(projects), project, textArray(pats), limit, modelOnly)
 }
 
+// LeaseKnowledgeExtraction 实现 knowledge.Store：与 ClaimKnowledgeExtractions 共用 locked_until。
+func (s *Store) LeaseKnowledgeExtraction(ctx context.Context, ticketID int64, lease time.Duration) (time.Time, bool, error) {
+	var until time.Time
+	err := s.db.QueryRowContext(ctx, `INSERT INTO lingo_knowledge_extractions AS e (ticket_id, status, locked_until)
+		VALUES ($1, 'done', now() + $2 * interval '1 millisecond')
+		ON CONFLICT (ticket_id) DO UPDATE SET locked_until = EXCLUDED.locked_until, updated_at = now()
+		WHERE e.locked_until IS NULL OR e.locked_until < now()
+		RETURNING e.locked_until`, ticketID, lease.Milliseconds()).Scan(&until)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("store: lease knowledge extraction %d: %w", ticketID, err)
+	}
+	return until, true, nil
+}
+
+// ReleaseKnowledgeExtraction 实现 knowledge.Store。
+func (s *Store) ReleaseKnowledgeExtraction(ctx context.Context, ticketID int64, until time.Time) error {
+	_, err := s.db.ExecContext(ctx, "UPDATE lingo_knowledge_extractions SET locked_until = NULL WHERE ticket_id = $1 AND locked_until = $2",
+		ticketID, until)
+	return err
+}
+
 // TicketExtracts 实现 knowledge.Store。
 func (s *Store) TicketExtracts(ctx context.Context, ticketID int64) ([]*knowledge.Entry, error) {
 	return s.knowledgeList(ctx, "SELECT "+knowledgeColumns+knowledgeFrom+` WHERE k.source_ticket_id = $1 AND k.source = 'ticket_extract'

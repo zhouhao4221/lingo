@@ -41,9 +41,8 @@ type reply struct {
 	streamed bool
 	// fallback 表示模型回答引用了数据之外的编号，已改用确定性回答
 	fallback bool
-	// unmarked 表示本轮送给模型的工单评论、知识条目或历史回答中有不在 ReplyMarked 内容范围内（或来源未知）的内容
-	// （REQ-012），落库为 Message.ModelOK = false
-	unmarked bool
+	// scope 是本轮送给模型的内容范围（REQ-012），落库为 Message.ModelScope
+	scope scopeLevel
 }
 
 func jsonRaw(v any) (json.RawMessage, error) {
@@ -62,8 +61,15 @@ type turnCtx struct {
 	convID   int64      // 会话 ID（业务数据审计记录用）
 	tools    []ToolInfo // 交给意图解析的业务数据工具（REQ-008）
 	images   []Image    // 本条提问附带的图片（REQ-009），随意图解析与组织回答发给模型
-	// unmarked 表示已送给模型的内容中有不在 ReplyMarked 内容范围内（或来源未知）的（REQ-012）
-	unmarked bool
+	// scope 是已送给模型的内容范围（REQ-012）：取最不可信的一档
+	scope scopeLevel
+}
+
+// raise 把本轮的内容范围提高到 l（只升不降）。
+func (tc *turnCtx) raise(l scopeLevel) {
+	if l > tc.scope {
+		tc.scope = l
+	}
 }
 
 // ---- 工单 ----
@@ -246,7 +252,14 @@ func (s *Service) findTickets(ctx context.Context, tc *turnCtx, in *Intent) (*re
 			cs = cs[n-detailComments:]
 		}
 		for _, c := range cs {
-			tc.unmarked = tc.unmarked || !c.Model
+			if !c.Model {
+				// 不在 ReplyMarked 范围内：reviewer / admin / agent 是已授权的评论；external（未启用策略时）为不可信
+				if tc.p.Role == auth.RoleExternal {
+					tc.raise(levelUntrusted)
+				} else {
+					tc.raise(levelAuthorized)
+				}
+			}
 			from := commentFrom[c.Source]
 			if from == "" {
 				from = "研发"
@@ -562,7 +575,9 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 	f := facts{Kind: "knowledge", Total: len(hits) + len(ts), Shown: len(hits) + len(ts)}
 	var cites Citations
 	for _, h := range hits {
-		tc.unmarked = tc.unmarked || !h.ModelInput
+		if !h.ModelInput {
+			tc.raise(levelUntrusted)
+		}
 		f.Knowledge = append(f.Knowledge, factKnowledge{ID: "K" + strconv.FormatInt(h.ID, 10), Question: plainRefs(oneLine(h.Question)),
 			Answer: plainRefs(textutil.ClipEllipsis(h.Answer, knowledgeRunes)), UpdatedAt: fmtTime(h.UpdatedAt, tc.loc)})
 		ref := KnowledgeRef{ID: h.ID, Question: oneLine(h.Question)}

@@ -244,9 +244,11 @@ func (s *Store) Events(ctx context.Context, q ticket.EventQuery) ([]notify.Event
 	return out, rows.Err()
 }
 
-// commentModelExpr 是评论的模型准入（ticket.Comment.Model，REQ-012）：Gitea 评论取同步时按原始标记的判定，未判定（升级前
+// commentModelExpr 是评论的模型准入（ticket.Comment.Model，REQ-012）：Gitea 评论取同步时按原始标记的判定，且判定须与当前
+// 版本一致（model_marked_at = updated_at、model_marked_md5 = md5(body)；旧版本改写正文后不一致，按未知处理）；未判定（升级前
 // 同步）的不准入；灵工本地评论取其显式的 public；其他来源不准入。
-const commentModelExpr = `(CASE WHEN source = 'gitea' THEN COALESCE(model_marked, false)
+const commentModelExpr = `(CASE WHEN source = 'gitea' THEN (model_marked IS TRUE AND model_marked_at = updated_at
+		AND model_marked_md5 = md5(body))
 	WHEN source IN ('user', 'staff', 'agent') THEN public ELSE false END)`
 
 // Comments 实现 ticket.QueryStore：未删除的评论，按时间顺序。

@@ -71,16 +71,27 @@ func (m *recModel) setIntent(s string) {
 
 func newMCLingo(t *testing.T, db *sql.DB, g http.Handler, mode lingo.ReplyMode, policy lingo.ModelContentPolicy, m lingo.Model) *lingo.Lingo {
 	t.Helper()
+	return newMCLingoWith(t, db, g, mode, policy, m, nil)
+}
+
+// newMCLingoWith 同 newMCLingo，cfg 非空时可再调整配置（如 TicketAudience）。
+func newMCLingoWith(t *testing.T, db *sql.DB, g http.Handler, mode lingo.ReplyMode, policy lingo.ModelContentPolicy, m lingo.Model,
+	cfg func(*lingo.Config)) *lingo.Lingo {
+	t.Helper()
 	srv := httptest.NewServer(g)
 	t.Cleanup(srv.Close)
-	l, err := lingo.New(lingo.Config{
+	c := lingo.Config{
 		DB: db, Model: m, ModelContent: policy, SkipSelfCheck: true, ReconcileInterval: -1,
 		Gitea: lingo.GiteaConfig{BaseURL: srv.URL, Token: "t", WebhookSecret: "s", ReplyMode: mode},
 		Projects: []lingo.Project{
 			{Key: "demo", Name: "Demo", Repos: []lingo.Repo{{Owner: "demo", Name: "api"}, {Owner: "demo", Name: "web"}}},
 			{Key: "other", Name: "Other", Repos: []lingo.Repo{{Owner: "other", Name: "svc"}}}},
 		Authenticate: headerUser,
-	})
+	}
+	if cfg != nil {
+		cfg(&c)
+	}
+	l, err := lingo.New(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +114,15 @@ func askTicket(t *testing.T, l *lingo.Lingo, m *recModel, u lingo.User, id int64
 	return m.sent(), msg
 }
 
-func messageModelOK(t *testing.T, db *sql.DB, id int64) sql.NullBool {
+// messageScope 是助手消息的 model_scope（按版本绑定读取：被改写过内容的为空）。
+func messageScope(t *testing.T, db *sql.DB, id int64) string {
 	t.Helper()
-	var v sql.NullBool
-	if err := db.QueryRow("SELECT model_ok FROM lingo_assistant_messages WHERE id = $1", id).Scan(&v); err != nil {
+	var v sql.NullString
+	if err := db.QueryRow(`SELECT CASE WHEN model_scope_at = updated_at AND model_scope_md5 = md5(content) THEN model_scope END
+		FROM lingo_assistant_messages WHERE id = $1`, id).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return v.String
 }
 
 func contains(t *testing.T, what, s string, want []string, not []string) {
@@ -124,6 +137,13 @@ func contains(t *testing.T, what, s string, want []string, not []string) {
 			t.Errorf("%s: must not contain %q", what, n)
 		}
 	}
+}
+
+// bindMarked 为测试直接写入的 Gitea 评论补上与当前版本绑定的判定（同新版本同步时的写法）。
+func bindMarked(t *testing.T, db *sql.DB) {
+	t.Helper()
+	mustExec(t, db, `UPDATE lingo_ticket_comments SET model_marked_at = updated_at, model_marked_md5 = md5(body)
+		WHERE source = 'gitea' AND model_marked IS NOT NULL AND model_marked_at IS NULL`)
 }
 
 func mustExec(t *testing.T, db *sql.DB, q string, args ...any) {
@@ -168,8 +188,8 @@ func TestModelContentMarkedComments(t *testing.T) {
 	// 1. 回补前：来源未知的历史评论不交给模型，但提交人照常可见
 	s, msg := askTicket(t, l, m, alice, t1)
 	contains(t, "before resync", s, []string{"SYN-LOCAL"}, []string{"SYN-LEGACY", "SYN-INTERNAL", "SYN-BOT"})
-	if v := messageModelOK(t, db, msg.ID); !v.Valid || !v.Bool {
-		t.Errorf("external answer model_ok = %+v", v)
+	if v := messageScope(t, db, msg.ID); v != "marked" {
+		t.Errorf("external answer scope = %q", v)
 	}
 	cs, _ := l.ListTicketComments(ctx, alice, t1)
 	contains(t, "visible before", strings.Join(commentBodies(cs), "|"), []string{"SYN-LEGACY", "SYN-LOCAL"}, nil)
@@ -193,8 +213,8 @@ func TestModelContentMarkedComments(t *testing.T) {
 	// 同事（TicketAudience 未配置）看不到他人工单；reviewer / agent 已授权的范围不变
 	s, msg = askTicket(t, l, m, rita, t1)
 	contains(t, "reviewer", s, []string{"SYN-MARKED-A", "SYN-INTERNAL-B", "SYN-LEGACY", "SYN-LOCAL"}, nil)
-	if v := messageModelOK(t, db, msg.ID); !v.Valid || v.Bool {
-		t.Errorf("reviewer answer with internal comments model_ok = %+v", v)
+	if v := messageScope(t, db, msg.ID); v != "authorized" {
+		t.Errorf("reviewer answer with internal comments scope = %q", v)
 	}
 	s, _ = askTicket(t, l, m, agent, t1)
 	contains(t, "agent", s, []string{"SYN-INTERNAL-B"}, nil)
@@ -228,6 +248,29 @@ func TestModelContentMarkedComments(t *testing.T) {
 	if n := countRows(t, db, "SELECT count(*) FROM lingo_ticket_events WHERE ticket_id = $1", t1); n != hist {
 		t.Errorf("idempotent resync added history: %d → %d", hist, n)
 	}
+
+	// 3b. 旧版本（不认识新列）改写正文：判定与版本不再一致，按未知处理；展示不变（B1）
+	mustExec(t, db, `UPDATE lingo_ticket_comments SET body = 'SYN-OLDVER-1 旧版本改写', updated_at = updated_at + interval '1 minute'
+		WHERE gitea_comment_id = 102`)
+	s, _ = askTicket(t, l, m, alice, t1)
+	contains(t, "old-version rewrite", s, nil, []string{"SYN-OLDVER-1", "SYN-MARKED-D"})
+	cs, _ = l.ListTicketComments(ctx, alice, t1)
+	contains(t, "old-version rewrite visible", strings.Join(commentBodies(cs), "|"), []string{"SYN-OLDVER-1"}, nil)
+	// 同一时间戳下只改正文也不准入
+	mustExec(t, db, `UPDATE lingo_ticket_comments SET body = 'SYN-OLDVER-2 同一时间改写' WHERE gitea_comment_id = 101`)
+	mustExec(t, db, `UPDATE lingo_ticket_comments SET model_marked = true WHERE gitea_comment_id = 101`) // 旧判定为准入时同样失效
+	s, _ = askTicket(t, l, m, alice, t1)
+	contains(t, "same-stamp rewrite", s, nil, []string{"SYN-OLDVER-2"})
+	// 新版本重新同步后恢复按当前正文判定
+	if _, err := l.ResyncTicketComments(ctx, rita, t1, lingo.CommentResyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	g.set("demo/api#12", gcomment(102, "dev", "/reply SYN-MARKED-F 重新公开", at.Add(2*time.Hour)))
+	if _, err := l.ResyncTicketComments(ctx, rita, t1, lingo.CommentResyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = askTicket(t, l, m, alice, t1)
+	contains(t, "after new-version resync", s, []string{"SYN-MARKED-F"}, []string{"SYN-OLDVER-1"})
 
 	// 4. Webhook：创建、编辑、删除与回补一致；通知按 ReplyMode 照常
 	runCtx, cancel := context.WithCancel(ctx)
@@ -327,15 +370,17 @@ func TestModelContentDerivedContent(t *testing.T) {
 	m.setIntent(`{"intent":"knowledge_ask","keywords":["打印机","卡纸"]}`)
 	ans := send(t, l, alice, c.ID, "SYN-USER-Q 打印机卡纸怎么办")
 	contains(t, "knowledge answer", m.sent(), []string{"SYN-MANUAL", "SYN-TRUSTED-EXTRACT"}, []string{"SYN-LEGACY"})
-	if v := messageModelOK(t, db, ans.ID); !v.Valid || !v.Bool {
-		t.Errorf("knowledge answer model_ok = %+v", v)
+	if v := messageScope(t, db, ans.ID); v != "marked" {
+		t.Errorf("knowledge answer scope = %q", v)
 	}
 	if got, err := l.SearchKnowledge(ctx, alice, "打印机卡纸", "", 10); err != nil || len(got) != 4 {
 		t.Errorf("user-visible search = %v %v", knowledgeIDs(got), err)
+	} else if got[0].ModelInput != nil {
+		t.Errorf("model_input exposed in user search: %+v", got[0])
 	}
 	es, _ := l.ListKnowledge(ctx, rita, lingo.KnowledgeFilter{})
 	for _, e := range es {
-		if want := !strings.HasPrefix(e.Answer, "SYN-LEGACY"); e.ModelInput != want {
+		if want := !strings.HasPrefix(e.Answer, "SYN-LEGACY"); e.ModelInput == nil || *e.ModelInput != want {
 			t.Errorf("model_input %q = %v", e.Answer, e.ModelInput)
 		}
 		if e.Status != lingo.KnowledgeActive {
@@ -354,17 +399,30 @@ func TestModelContentDerivedContent(t *testing.T) {
 	m.setIntent(`{"intent":"knowledge_ask","keywords":["打印机"]}`)
 	next := send(t, l, alice, c.ID, "还有别的办法吗")
 	contains(t, "history", m.sent(), []string{"SYN-USER-Q"}, []string{"SYN-LEGACY-HIST"})
-	if v := messageModelOK(t, db, next.ID); !v.Valid || !v.Bool {
-		t.Errorf("answer after legacy history model_ok = %+v", v)
+	if v := messageScope(t, db, next.ID); v != "marked" {
+		t.Errorf("answer after legacy history scope = %q", v)
 	}
-	if n := countRows(t, db, "SELECT count(*) FROM lingo_assistant_messages WHERE id = $1 AND content = 'SYN-LEGACY-HIST 旧回答' AND model_ok IS NULL", legacyID); n != 1 {
+	if n := countRows(t, db, "SELECT count(*) FROM lingo_assistant_messages WHERE id = $1 AND content = 'SYN-LEGACY-HIST 旧回答' AND model_scope IS NULL", legacyID); n != 1 {
 		t.Errorf("legacy message modified")
 	}
-	// reviewer 历史中含内部内容的回答（false）属于其已授权范围，照常带上；external 的不带
+	// 旧版本改写了助手消息内容（如重试）而未更新 model_scope：按未知处理，不回放；展示不变（B1）
+	mustExec(t, db, `UPDATE lingo_assistant_messages SET content = 'SYN-OLDVER-MSG 旧版本重试', updated_at = now() + interval '1 second' WHERE id = $1`, next.ID)
+	if v := messageScope(t, db, next.ID); v != "" {
+		t.Errorf("rewritten message scope = %q", v)
+	}
+	m.reset()
+	m.setIntent(`{"intent":"clarify"}`)
+	send(t, l, alice, c.ID, "再说一遍")
+	contains(t, "old-version message", m.sent(), nil, []string{"SYN-OLDVER-MSG"})
+	if ms, _ := l.ListConversationMessages(ctx, alice, c.ID, 0, 0); !strings.Contains(fmt.Sprint(ms), "SYN-OLDVER-MSG") {
+		t.Errorf("rewritten message not shown")
+	}
+	// reviewer 历史中只因内部评论而为 authorized 的回答属于其已授权范围，照常带上；external 的不带
 	for _, u := range []lingo.User{rita, alice} {
 		cv, _ := l.CreateConversation(ctx, u, "")
-		if _, err := db.Exec(`INSERT INTO lingo_assistant_messages (conversation_id, role, content, status, model_ok)
-			VALUES ($1, 'user', 'q0', 'done', NULL), ($1, 'assistant', 'SYN-SCOPED-HIST 含内部评论的回答', 'done', false)`, cv.ID); err != nil {
+		if _, err := db.Exec(`INSERT INTO lingo_assistant_messages (conversation_id, role, content, status, model_scope, model_scope_at, model_scope_md5)
+			VALUES ($1, 'user', 'q0', 'done', NULL, NULL, NULL),
+			       ($1, 'assistant', 'SYN-SCOPED-HIST 含内部评论的回答', 'done', 'authorized', now(), md5('SYN-SCOPED-HIST 含内部评论的回答'))`, cv.ID); err != nil {
 			t.Fatal(err)
 		}
 		m.reset()
@@ -387,7 +445,7 @@ func TestModelContentDerivedContent(t *testing.T) {
 		t.Fatalf("pending candidates = %+v", pend)
 	}
 	for _, e := range pend {
-		if want := !strings.Contains(e.Answer, "SYN-LEGACY-HIST"); e.Source != lingo.KnowledgeSourceAssistantFeedback || e.ModelInput != want {
+		if want := !strings.Contains(e.Answer, "SYN-LEGACY-HIST"); e.Source != lingo.KnowledgeSourceAssistantFeedback || e.ModelInput == nil || *e.ModelInput != want {
 			t.Errorf("candidate %q: source %s model_input %v", e.Answer, e.Source, e.ModelInput)
 		}
 		if _, err := l.ApproveKnowledge(ctx, rita, e.ID, nil); err != nil {
@@ -428,6 +486,7 @@ func TestModelContentReextract(t *testing.T) {
 			($1, 'dev', 'gitea', 'SYN-R-MARKED 对外回复', true, 201, true),
 			($1, 'dev', 'gitea', 'SYN-R-PLAIN 普通评论', true, 202, false),
 			($1, 'dev', 'gitea', 'SYN-R-LEGACY 旧评论', true, 203, NULL)`, rel)
+	bindMarked(t, db)
 	mustExec(t, db, `INSERT INTO lingo_knowledge (project_id, question, answer, source, source_ticket_id, status, search_tokens)
 		SELECT id, '打印机卡纸', 'SYN-R-OLD 旧抽取', 'ticket_extract', t.tid, 'active', '{打印,卡纸}'
 		FROM lingo_projects, (VALUES ($1::bigint), ($2::bigint)) t(tid) WHERE key = 'demo'`, rel, open)
@@ -461,7 +520,7 @@ func TestModelContentReextract(t *testing.T) {
 	if err != nil || r.Outcome != lingo.KnowledgeReextractCreated || r.Entry == nil || r.Comments != 2 || r.Excluded != 2 {
 		t.Fatalf("reextract = %+v %v", r, err)
 	}
-	if e := r.Entry; e.Status != lingo.KnowledgePending || !e.ModelInput || e.Source != lingo.KnowledgeSourceTicketExtract || e.SourceTicketID != rel {
+	if e := r.Entry; e.Status != lingo.KnowledgePending || e.ModelInput == nil || !*e.ModelInput || e.Source != lingo.KnowledgeSourceTicketExtract || e.SourceTicketID != rel {
 		t.Errorf("new candidate = %+v", e)
 	}
 	contains(t, "reextract input", m.sent(), []string{"SYN-R-LOCAL", "SYN-R-MARKED"}, []string{"SYN-R-PLAIN", "SYN-R-LEGACY", "SYN-R-OLD"})
@@ -510,6 +569,7 @@ func TestModelContentReextract(t *testing.T) {
 		($1, 'dev', 'gitea', 'SYN-A-MARKED 对外回复', true, 301, true), ($1, 'dev', 'gitea', 'SYN-A-PLAIN 普通评论', true, 302, false)`, auto); err != nil {
 		t.Fatal(err)
 	}
+	bindMarked(t, db)
 	m.reset()
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -560,8 +620,8 @@ func TestModelContentDefaultUnchanged(t *testing.T) {
 	}
 	s, msg := askTicket(t, l, m, alice, t1)
 	contains(t, "default external", s, []string{"SYN-D-PLAIN", "SYN-D-MARKED"}, nil)
-	if v := messageModelOK(t, db, msg.ID); !v.Valid || v.Bool {
-		t.Errorf("default answer with unmarked comments model_ok = %+v", v)
+	if v := messageScope(t, db, msg.ID); v != "untrusted" {
+		t.Errorf("default answer with unmarked comments scope = %q", v)
 	}
 	// 来源未知的知识与历史照常交给模型
 	if _, err := db.Exec(`INSERT INTO lingo_knowledge (project_id, question, answer, source, status, search_tokens)
@@ -610,8 +670,8 @@ func TestModelContentMigrationIncremental(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `
 		DROP INDEX lingo_knowledge_extract_trusted_idx, lingo_knowledge_extract_ticket_idx;
 		CREATE UNIQUE INDEX lingo_knowledge_extract_ticket_idx ON lingo_knowledge (source_ticket_id) WHERE source = 'ticket_extract';
-		ALTER TABLE lingo_ticket_comments DROP COLUMN model_marked;
-		ALTER TABLE lingo_assistant_messages DROP COLUMN model_ok;
+		ALTER TABLE lingo_ticket_comments DROP COLUMN model_marked, DROP COLUMN model_marked_at, DROP COLUMN model_marked_md5;
+		ALTER TABLE lingo_assistant_messages DROP COLUMN model_scope, DROP COLUMN model_scope_at, DROP COLUMN model_scope_md5;
 		ALTER TABLE lingo_knowledge DROP COLUMN model_ok;
 		DELETE FROM lingo_schema_migrations WHERE name LIKE '0009_%';
 		INSERT INTO lingo_projects (key, name) VALUES ('demo', 'Demo');

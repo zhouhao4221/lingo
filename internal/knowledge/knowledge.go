@@ -175,6 +175,11 @@ type Store interface {
 	ClaimKnowledgeEmbeds(ctx context.Context, model string, limit int, lease time.Duration, modelOnly bool) ([]Pending, error)
 	// TicketExtracts 返回来源为该工单的抽取条目（ticket_extract，任何状态），按 ID 升序。
 	TicketExtracts(ctx context.Context, ticketID int64) ([]*Entry, error)
+	// LeaseKnowledgeExtraction 取得工单抽取的租约（与自动抽取共用同一租约，多实例互斥），返回租约到期时间作为令牌；
+	// 已被占用时 ok 为假。工单还没有抽取登记时登记为已完成（不再自动抽取）。
+	LeaseKnowledgeExtraction(ctx context.Context, ticketID int64, lease time.Duration) (until time.Time, ok bool, err error)
+	// ReleaseKnowledgeExtraction 释放 LeaseKnowledgeExtraction 取得的租约（令牌不符时什么也不做）。
+	ReleaseKnowledgeExtraction(ctx context.Context, ticketID int64, until time.Time) error
 	// SaveKnowledgeEmbedding 保存向量；条目在领取后被编辑过（updated_at 变化）时不保存。
 	SaveKnowledgeEmbedding(ctx context.Context, id int64, updatedAt time.Time, vec []float32, model string) error
 }

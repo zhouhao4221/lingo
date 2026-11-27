@@ -47,10 +47,11 @@ type KnowledgeEntry struct {
 	DuplicateOf    int64 `json:"duplicate_of,omitempty"`
 	HelpfulCount   int64 `json:"helpful_count,omitempty"`
 	UnhelpfulCount int64 `json:"unhelpful_count,omitempty"`
-	// ModelInput 报告条目来源可信、可作为模型输入（REQ-012）：人工在灵工中填写的（manual、ticket_answer、ticket_comment），
-	// 或按可信内容生成的派生条目。为 false 的（升级前生成、来源未知的抽取与回答候选，或来源含 ReplyMarked 范围外内容的）
-	// 在启用 ModelContentMarked 时不参与问答检索与向量生成，但照常展示、审核与维护。
-	ModelInput bool `json:"model_input"`
+	// ModelInput 报告条目来源可信、可作为模型输入（REQ-012，只在维护接口返回，检索结果中为 nil）：人工在灵工中填写的
+	// （manual、ticket_answer、ticket_comment），或按可信内容生成的派生条目。为 false 的（升级前生成、来源未知的抽取与
+	// 回答候选，或来源含 ReplyMarked 范围外内容的）在启用 ModelContentMarked 时不参与问答检索与向量生成，但照常展示、
+	// 审核与维护。
+	ModelInput *bool `json:"model_input,omitempty"`
 }
 
 // KnowledgeReextract 是 ReextractTicketKnowledge 的结果。
@@ -121,8 +122,10 @@ type EmbeddingModelNamer interface {
 
 func publicKnowledge(e *knowledge.Entry, full bool) KnowledgeEntry {
 	out := KnowledgeEntry{ID: e.ID, ProjectKey: e.ProjectKey, Repo: e.Repo, Question: e.Question, Answer: e.Answer, Source: e.Source,
-		Status: e.Status, CiteCount: e.CiteCount, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, ModelInput: e.ModelInput}
+		Status: e.Status, CiteCount: e.CiteCount, CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt}
 	if full {
+		mi := e.ModelInput
+		out.ModelInput = &mi
 		out.SourceTicketID, out.CreatedBy, out.UpdatedBy = e.SourceTicketID, e.CreatedBy, e.UpdatedBy
 		out.DuplicateOf, out.HelpfulCount, out.UnhelpfulCount = e.DuplicateOf, e.HelpfulCount, e.UnhelpfulCount
 	}

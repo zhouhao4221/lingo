@@ -219,7 +219,7 @@ func (s *Service) Rate(ctx context.Context, p auth.Principal, conversationID, me
 	if err != nil || project == "" {
 		return err
 	}
-	return s.o.Knowledge.Suggest(ctx, knowledge.Draft{ProjectKey: project, Question: q.Content, Answer: m.Content}, m.ID, m.ModelOK)
+	return s.o.Knowledge.Suggest(ctx, knowledge.Draft{ProjectKey: project, Question: q.Content, Answer: m.Content}, m.ID, ScopeTrusted(m.ModelScope))
 }
 
 // citedProject 是回答所属的项目：引用的第一个知识条目的项目，没有时取引用的第一张工单的项目。

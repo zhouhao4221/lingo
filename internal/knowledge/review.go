@@ -165,6 +165,12 @@ func (s *Service) extractOne(ctx context.Context, ex Extractor, id int64) (strin
 	if err != nil {
 		return "failed", err.Error()
 	}
+	// 每张工单只自动抽取一次：已有抽取条目（如手动重新抽取的、或上次入库后未能记下完成）时不再调用模型（REQ-012）
+	if es, err := s.o.Store.TicketExtracts(ctx, id); err != nil {
+		return "failed", err.Error()
+	} else if len(es) > 0 {
+		return "done", ""
+	}
 	if _, _, err := s.extractTicket(ctx, ex, t, cs, s.o.ModelMarked); err != nil && !errors.Is(err, ticket.ErrConflict) {
 		return "failed", err.Error() // ErrConflict：其他实例已为该工单入库（每张工单只抽取一次）
 	}
@@ -240,11 +246,15 @@ type ReextractResult struct {
 // ErrNoExtractor 表示没有可用的抽取模型。
 var ErrNoExtractor = errors.New("knowledge: no extraction model")
 
+// reextractWait 是重新抽取等待同一工单上进行中的抽取（另一次重新抽取或自动抽取）的最长时间。
+var reextractWait = 60 * time.Second
+
 // Reextract 按新规则（只用 Comment.Model 的评论）为工单重新抽取一条待审核候选（reviewer / admin，REQ-012 方案 A）。
 // 只适用于已有来源未知或不可信的抽取条目、且仍为已结案的 Bug / 需求工单（否则 ticket.ErrConflict）；旧条目原样保留
 // （内容、状态与审核结果都不改），新候选走正常审核。已有来源可信的抽取条目时直接返回它（Outcome=exists，不调用模型）。
-// 只由调用方手动触发，不会自动执行；每次调用（exists 除外）调用一次抽取模型。工单不存在或不在调用者项目内返回
-// ticket.ErrNotFound；没有抽取模型返回 ErrNoExtractor。
+// 只由调用方手动触发，不会自动执行；每次调用（exists 除外）调用一次抽取模型。同一工单上的重新抽取与自动抽取经同一租约
+// 串行：同时调用时后到的等待先到的完成后返回 exists（不重复调用模型），等待超过 reextractWait 返回 ticket.ErrConflict。
+// 工单不存在或不在调用者项目内返回 ticket.ErrNotFound；没有抽取模型返回 ErrNoExtractor。
 func (s *Service) Reextract(ctx context.Context, p auth.Principal, ticketID int64) (ReextractResult, error) {
 	var res ReextractResult
 	if !p.Staff() {
@@ -263,14 +273,8 @@ func (s *Service) Reextract(ctx context.Context, p auth.Principal, ticketID int6
 	if !p.InProject(t.ProjectKey) {
 		return res, ticket.ErrNotFound
 	}
-	trusted, unknown, err := s.ticketExtracts(ctx, ticketID)
-	switch {
-	case err != nil:
-		return res, err
-	case trusted != nil:
-		return ReextractResult{Outcome: ReextractExists, Entry: trusted}, nil
-	case !unknown:
-		return res, fmt.Errorf("%w: ticket has no extracted knowledge of unknown provenance", ticket.ErrConflict)
+	if r, done, err := s.reextractable(ctx, ticketID); done || err != nil {
+		return r, err
 	}
 	switch t.Status {
 	case ticket.StatusReleased, ticket.StatusDeployed, ticket.StatusClosed:
@@ -284,11 +288,26 @@ func (s *Service) Reextract(ctx context.Context, p auth.Principal, ticketID int6
 	if ex == nil {
 		return res, ErrNoExtractor
 	}
+	// 租约放在所有前置检查之后：取租约时可能为没有抽取登记的工单登记为已完成
+	until, err := s.leaseExtraction(ctx, ticketID)
+	if err != nil {
+		return res, err
+	}
+	defer func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = s.o.Store.ReleaseKnowledgeExtraction(rctx, ticketID, until)
+	}()
+	// 取得租约后重新判断：等待期间另一次抽取可能已入库
+	if r, done, err := s.reextractable(ctx, ticketID); done || err != nil {
+		return r, err
+	}
 	_, _, res.Excluded = extractInput(t, cs, true)
 	id, n, err := s.extractTicket(ctx, ex, t, cs, true)
 	res.Comments = n
 	if errors.Is(err, ticket.ErrConflict) { // 同时有另一次重新抽取已入库
-		if trusted, _, err = s.ticketExtracts(ctx, ticketID); err != nil {
+		trusted, _, err := s.ticketExtracts(ctx, ticketID)
+		if err != nil {
 			return res, err
 		}
 		res.Outcome, res.Entry = ReextractExists, trusted
@@ -306,6 +325,40 @@ func (s *Service) Reextract(ctx context.Context, p auth.Principal, ticketID int6
 	}
 	res.Outcome = ReextractCreated
 	return res, nil
+}
+
+// reextractable 判断工单能否重新抽取：已有可信抽取条目时 done 为真并返回 exists；没有来源未知或不可信的抽取条目时返回
+// ticket.ErrConflict。
+func (s *Service) reextractable(ctx context.Context, ticketID int64) (ReextractResult, bool, error) {
+	trusted, unknown, err := s.ticketExtracts(ctx, ticketID)
+	switch {
+	case err != nil:
+		return ReextractResult{}, true, err
+	case trusted != nil:
+		return ReextractResult{Outcome: ReextractExists, Entry: trusted}, true, nil
+	case !unknown:
+		return ReextractResult{}, true, fmt.Errorf("%w: ticket has no extracted knowledge of unknown provenance", ticket.ErrConflict)
+	}
+	return ReextractResult{}, false, nil
+}
+
+// leaseExtraction 取得工单抽取的租约，被占用时每 200ms 重试，最多等 reextractWait。
+func (s *Service) leaseExtraction(ctx context.Context, ticketID int64) (time.Time, error) {
+	deadline := time.Now().Add(reextractWait)
+	for {
+		until, ok, err := s.o.Store.LeaseKnowledgeExtraction(ctx, ticketID, extractLease)
+		if err != nil || ok {
+			return until, err
+		}
+		if time.Now().After(deadline) {
+			return time.Time{}, fmt.Errorf("%w: knowledge extraction for this ticket is in progress, retry later", ticket.ErrConflict)
+		}
+		select {
+		case <-ctx.Done():
+			return time.Time{}, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // ticketExtracts 返回工单来源可信的抽取条目（没有时为 nil），并报告是否有来源未知或不可信的抽取条目。
