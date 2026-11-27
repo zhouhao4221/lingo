@@ -24,7 +24,7 @@ func TestSuggestStripsRefs(t *testing.T) {
 	st := &captureStore{}
 	s, _ := New(Options{Store: st})
 	if err := s.Suggest(context.Background(), Draft{ProjectKey: "demo", Question: " SSO 怎么配置 ",
-		Answer: "参考 K12：在集成页填写元数据，见 #7，联系 a@b.com"}, 99); err != nil {
+		Answer: "参考 K12：在集成页填写元数据，见 #7，联系 a@b.com"}, 99, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(st.got) != 1 {
@@ -37,7 +37,7 @@ func TestSuggestStripsRefs(t *testing.T) {
 		t.Errorf("entry = %+v", e)
 	}
 	// 内容为空：不入库
-	if err := s.Suggest(context.Background(), Draft{ProjectKey: "demo", Question: "q", Answer: "K3 #4"}, 100); err != nil || len(st.got) != 1 {
+	if err := s.Suggest(context.Background(), Draft{ProjectKey: "demo", Question: "q", Answer: "K3 #4"}, 100, nil); err != nil || len(st.got) != 1 {
 		t.Errorf("empty answer inserted: %v %d", err, len(st.got))
 	}
 }

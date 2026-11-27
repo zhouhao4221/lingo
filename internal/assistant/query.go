@@ -41,6 +41,8 @@ type reply struct {
 	streamed bool
 	// fallback 表示模型回答引用了数据之外的编号，已改用确定性回答
 	fallback bool
+	// scope 是本轮送给模型的内容范围（REQ-012），落库为 Message.ModelScope
+	scope scopeLevel
 }
 
 func jsonRaw(v any) (json.RawMessage, error) {
@@ -59,6 +61,15 @@ type turnCtx struct {
 	convID   int64      // 会话 ID（业务数据审计记录用）
 	tools    []ToolInfo // 交给意图解析的业务数据工具（REQ-008）
 	images   []Image    // 本条提问附带的图片（REQ-009），随意图解析与组织回答发给模型
+	// scope 是已送给模型的内容范围（REQ-012）：取最不可信的一档
+	scope scopeLevel
+}
+
+// raise 把本轮的内容范围提高到 l（只升不降）。
+func (tc *turnCtx) raise(l scopeLevel) {
+	if l > tc.scope {
+		tc.scope = l
+	}
 }
 
 // ---- 工单 ----
@@ -232,11 +243,23 @@ func (s *Service) findTickets(ctx context.Context, tc *turnCtx, in *Intent) (*re
 			if cs, err = s.o.Tickets.Comments(ctx, tc.p, t.ID); err != nil {
 				return nil, err
 			}
+			if s.o.ModelMarked && tc.p.Role == auth.RoleExternal {
+				// 模型内容策略（REQ-012）：普通用户问答只把 ReplyMarked 内容范围内的评论交给模型，用户可见范围不变
+				cs = ticket.ModelComments(cs)
+			}
 		}
 		if n := len(cs); n > detailComments {
 			cs = cs[n-detailComments:]
 		}
 		for _, c := range cs {
+			if !c.Model {
+				// 不在 ReplyMarked 范围内：reviewer / admin / agent 是已授权的评论；external（未启用策略时）为不可信
+				if tc.p.Role == auth.RoleExternal {
+					tc.raise(levelUntrusted)
+				} else {
+					tc.raise(levelAuthorized)
+				}
+			}
 			from := commentFrom[c.Source]
 			if from == "" {
 				from = "研发"
@@ -528,7 +551,7 @@ const (
 // askKnowledge 回答知识类问题：检索调用者项目内已生效的知识条目，并检索调用者可见的同类工单，一并交给模型作答；
 // 都没有命中时引导提交咨询工单。来源工单只在调用者能查看时出现在引用中。
 func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*reply, error) {
-	hits, err := s.o.Knowledge.Search(ctx, tc.p, in.Project, tc.question, in.Keywords, knowledgeHits)
+	hits, err := s.o.Knowledge.SearchForModel(ctx, tc.p, in.Project, tc.question, in.Keywords, knowledgeHits)
 	if err != nil {
 		return nil, err
 	}
@@ -552,6 +575,9 @@ func (s *Service) askKnowledge(ctx context.Context, tc *turnCtx, in *Intent) (*r
 	f := facts{Kind: "knowledge", Total: len(hits) + len(ts), Shown: len(hits) + len(ts)}
 	var cites Citations
 	for _, h := range hits {
+		if !h.ModelInput {
+			tc.raise(levelUntrusted)
+		}
 		f.Knowledge = append(f.Knowledge, factKnowledge{ID: "K" + strconv.FormatInt(h.ID, 10), Question: plainRefs(oneLine(h.Question)),
 			Answer: plainRefs(textutil.ClipEllipsis(h.Answer, knowledgeRunes)), UpdatedAt: fmtTime(h.UpdatedAt, tc.loc)})
 		ref := KnowledgeRef{ID: h.ID, Question: oneLine(h.Question)}

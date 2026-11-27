@@ -70,6 +70,10 @@ type Entry struct {
 	DuplicateOf    int64 // 入库时检出的可能重复条目，0 表示无
 	HelpfulCount   int64
 	UnhelpfulCount int64
+	// ModelInput 报告条目来源可信、可作为模型输入（REQ-012，读取时由 store 计算）：人工在灵工中填写的（manual、
+	// ticket_answer、ticket_comment），或按可信内容生成的派生条目（model_ok 为 true）。升级前生成的派生条目（来源未知）
+	// 与来源含 ReplyMarked 范围外内容的为 false。
+	ModelInput bool
 }
 
 // Hit 是一条检索结果。
@@ -115,6 +119,9 @@ type NewEntry struct {
 	DuplicateOf     int64
 	Tokens          []string
 	By              string
+	// ModelOK 是派生条目（ticket_extract、assistant_feedback）的来源是否可信（REQ-012）：nil 为未知（如来源回答是升级前
+	// 生成的）。人工填写的来源不看它。
+	ModelOK *bool
 }
 
 // Pending 是待生成向量的条目。
@@ -156,15 +163,23 @@ type Store interface {
 	DisableKnowledgeByTicket(ctx context.Context, ticketID int64, projects []string, by string) (int, error)
 	ListKnowledge(ctx context.Context, q ListQuery) ([]*Entry, error)
 	// SearchKnowledgeTokens 返回已生效、在 projects（及 project，非空时）内的条目：重合词数不少于 len(tokens) 与条目词数
-	// 中较小者的 minRatio（向上取整，至少 1），按重合度降序。
-	SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int) ([]Hit, error)
-	// SearchKnowledgeWords 关键词兜底：问题或答案包含任一片段（不区分大小写）。
-	SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int) ([]Hit, error)
+	// 中较小者的 minRatio（向上取整，至少 1），按重合度降序。modelOnly 时只含 Entry.ModelInput 的条目。
+	SearchKnowledgeTokens(ctx context.Context, projects []string, project string, tokens []string, minRatio float64, limit int, modelOnly bool) ([]Hit, error)
+	// SearchKnowledgeWords 关键词兜底：问题或答案包含任一片段（不区分大小写）；modelOnly 同上。
+	SearchKnowledgeWords(ctx context.Context, projects []string, project string, words []string, limit int, modelOnly bool) ([]Hit, error)
 	// KnowledgeEmbeddings 返回 ids 中向量模型为 model 的条目向量。
 	KnowledgeEmbeddings(ctx context.Context, ids []int64, model string) (map[int64][]float32, error)
 	AddKnowledgeCites(ctx context.Context, ids []int64) error
-	// ClaimKnowledgeEmbeds 领取待生成向量的已生效条目（向量为空，或 model 非空且与之不同），加租约。
-	ClaimKnowledgeEmbeds(ctx context.Context, model string, limit int, lease time.Duration) ([]Pending, error)
+	// ClaimKnowledgeEmbeds 领取待生成向量的已生效条目（向量为空，或 model 非空且与之不同），加租约；modelOnly 时只领取
+	// Entry.ModelInput 的条目。
+	ClaimKnowledgeEmbeds(ctx context.Context, model string, limit int, lease time.Duration, modelOnly bool) ([]Pending, error)
+	// TicketExtracts 返回来源为该工单的抽取条目（ticket_extract，任何状态），按 ID 升序。
+	TicketExtracts(ctx context.Context, ticketID int64) ([]*Entry, error)
+	// LeaseKnowledgeExtraction 取得工单抽取的租约（与自动抽取共用同一租约，多实例互斥），返回租约到期时间作为令牌；
+	// 已被占用时 ok 为假。工单还没有抽取登记时登记为已完成（不再自动抽取）。
+	LeaseKnowledgeExtraction(ctx context.Context, ticketID int64, lease time.Duration) (until time.Time, ok bool, err error)
+	// ReleaseKnowledgeExtraction 释放 LeaseKnowledgeExtraction 取得的租约（令牌不符时什么也不做）。
+	ReleaseKnowledgeExtraction(ctx context.Context, ticketID int64, until time.Time) error
 	// SaveKnowledgeEmbedding 保存向量；条目在领取后被编辑过（updated_at 变化）时不保存。
 	SaveKnowledgeEmbedding(ctx context.Context, id int64, updatedAt time.Time, vec []float32, model string) error
 }
@@ -227,7 +242,10 @@ type Options struct {
 	Extractor func() Extractor
 	// Tickets 读取工单与对外评论，抽取时使用。
 	Tickets TicketSource
-	Now     func() time.Time
+	// ModelMarked 为真时启用模型内容策略 ModelContentMarked（REQ-012）：自动抽取只用 Comment.Model 的评论，问答检索
+	// （SearchForModel）与向量只用 Entry.ModelInput 的条目。为假时行为与升级前相同。
+	ModelMarked bool
+	Now         func() time.Time
 }
 
 // Service 是知识库。
@@ -414,6 +432,16 @@ func (s *Service) Cite(ctx context.Context, ids []int64) error {
 // Search 在调用者可访问的项目（project 非空时只含该项目）中检索已生效条目：按切词重合度取前 50 条，向量可用时按
 // 相似度重排，返回前 limit 条；切词无命中时用 keywords（为空时取自 query）做包含匹配兜底。
 func (s *Service) Search(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]Hit, error) {
+	return s.search(ctx, p, project, query, keywords, limit, false)
+}
+
+// SearchForModel 同 Search，供知识问答把结果交给模型：启用 ModelMarked 时只检索 Entry.ModelInput 的条目（来源未知或
+// 不可信的条目不作为模型输入，但照常在 Search 与维护接口中展示）。
+func (s *Service) SearchForModel(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]Hit, error) {
+	return s.search(ctx, p, project, query, keywords, limit, s.o.ModelMarked)
+}
+
+func (s *Service) search(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int, modelOnly bool) ([]Hit, error) {
 	if !p.Known() {
 		return nil, fmt.Errorf("%w: unknown role", ticket.ErrForbidden)
 	}
@@ -435,7 +463,7 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, project, query s
 	}
 	// 重合词数至少为提问与条目中词数较少一方的 MinMatchRatio：只因"怎么""为什么"等常用词重合的条目不算相关，长问题
 	// 也能找到短条目
-	hits, err := s.o.Store.SearchKnowledgeTokens(ctx, p.Projects, project, toks, MinMatchRatio, rerankPool)
+	hits, err := s.o.Store.SearchKnowledgeTokens(ctx, p.Projects, project, toks, MinMatchRatio, rerankPool, modelOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +475,7 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, project, query s
 		if len(ws) == 0 {
 			return nil, nil
 		}
-		if hits, err = s.o.Store.SearchKnowledgeWords(ctx, p.Projects, project, ws, limit); err != nil {
+		if hits, err = s.o.Store.SearchKnowledgeWords(ctx, p.Projects, project, ws, limit, modelOnly); err != nil {
 			return nil, err
 		}
 	}
@@ -527,14 +555,15 @@ func cosine(a, b []float32) float64 {
 }
 
 // EmbedPending 为待生成向量的条目生成一批向量（多实例经租约互斥），返回生成的条数；向量模型不可用时返回 0。
-// 模型有名称时，向量模型与之不同的条目也重新生成；没有名称时只处理向量为空的条目。
+// 模型有名称时，向量模型与之不同的条目也重新生成；没有名称时只处理向量为空的条目。启用 ModelMarked 时只为
+// Entry.ModelInput 的条目生成（条目正文会发给向量模型）；其他条目已有的向量保留、不删除。
 func (s *Service) EmbedPending(ctx context.Context) (int, error) {
 	em := s.o.Embedder()
 	if em == nil {
 		return 0, nil
 	}
 	name := strings.TrimSpace(em.Name())
-	ps, err := s.o.Store.ClaimKnowledgeEmbeds(ctx, name, embedBatch, embedLease)
+	ps, err := s.o.Store.ClaimKnowledgeEmbeds(ctx, name, embedBatch, embedLease, s.o.ModelMarked)
 	if err != nil || len(ps) == 0 {
 		return 0, err
 	}

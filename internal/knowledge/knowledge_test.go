@@ -50,10 +50,10 @@ type fakeStore struct {
 	model string
 }
 
-func (f *fakeStore) SearchKnowledgeTokens(context.Context, []string, string, []string, float64, int) ([]Hit, error) {
+func (f *fakeStore) SearchKnowledgeTokens(context.Context, []string, string, []string, float64, int, bool) ([]Hit, error) {
 	return slices.Clone(f.hits), nil
 }
-func (f *fakeStore) SearchKnowledgeWords(context.Context, []string, string, []string, int) ([]Hit, error) {
+func (f *fakeStore) SearchKnowledgeWords(context.Context, []string, string, []string, int, bool) ([]Hit, error) {
 	return nil, nil
 }
 func (f *fakeStore) KnowledgeEmbeddings(_ context.Context, _ []int64, model string) (map[int64][]float32, error) {

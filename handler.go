@@ -29,6 +29,7 @@ import (
 // 后台：POST /tickets/{id}/forward|answer|merge|reject、POST /tickets/{id}/reject-forwarded（驳回已转研发工单）、
 // GET /tickets/{id}/issue-close、POST /tickets/{id}/issue-close/retry（关闭关联 Issue 的进度与重试）、
 // POST /tickets/{id}/comments/resync（按当前 ReplyMode 重新同步历史 Gitea 评论，可带 {"notify":true}，REQ-011）、
+// POST /tickets/{id}/knowledge/reextract（按新规则为来源未知的旧抽取知识重新抽取候选，reviewer / admin，REQ-012）、
 // GET /triage、GET /triage/summary、
 // GET / PUT /settings/auto-forward、GET /usage（模型用量，admin）；变更流：GET /events?after=。
 // 连接配置（模型与 Gitea，权限见 Config.AuthorizeSettings）：GET / PUT /settings/connections、
@@ -282,6 +283,13 @@ func (l *Lingo) newRESTHandler() http.Handler {
 			return nil, err
 		}
 		return l.ResyncTicketComments(ctx(r), user(r), id, CommentResyncOptions{Notify: in.Notify})
+	})
+	rt.Handle("POST /tickets/{id}/knowledge/reextract", func(r *httpapi.Request) (any, error) {
+		id, err := r.PathID("id")
+		if err != nil {
+			return nil, err
+		}
+		return l.ReextractTicketKnowledge(ctx(r), user(r), id)
 	})
 	rt.Handle("GET /tickets/{id}/issue-close", func(r *httpapi.Request) (any, error) {
 		id, err := r.PathID("id")

@@ -17,6 +17,9 @@ import (
 
 const historyRunes = 1000 // 每条历史消息带给模型的长度上限
 
+// historyWithheld 代替不作为模型输入的历史回答正文（REQ-012）：保留这一轮的位置，避免出现空的助手消息。
+const historyWithheld = "（此条回答已省略）"
+
 // Send 在会话中提问并返回助手消息。onDelta 非空时逐片段回调回答文本（固定回复整段回调一次）。
 // attachments 是附带的图片引用（REQ-009），带图时提问可以为空；模型不支持图片或未配置读取图片时返回
 // ErrImagesUnsupported（提问不保存）。模型出错、图片读取失败时提问照常保存，返回 status=failed 的助手消息（err 为 nil），
@@ -210,7 +213,7 @@ func (s *Service) run(ctx context.Context, p auth.Principal, conv *Conversation,
 	fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer fcancel()
 	if err != nil {
-		msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations = StatusFailed, errKind(ctx, err), "", "", Citations{}
+		msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations, msg.ModelScope = StatusFailed, errKind(ctx, err), "", "", Citations{}, ""
 		if ferr := s.finish(fctx, p, conv, msg, nil); ferr != nil {
 			return s.salvage(ctx, conv, msg, origID, ferr)
 		}
@@ -232,7 +235,7 @@ func (s *Service) salvage(ctx context.Context, conv *Conversation, msg *Message,
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	msg.ID = origID
-	msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations, msg.Action = StatusFailed, ErrKindInternal, "", "", Citations{}, nil
+	msg.Status, msg.Error, msg.Content, msg.Outcome, msg.Citations, msg.Action, msg.ModelScope = StatusFailed, ErrKindInternal, "", "", Citations{}, nil, ""
 	err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
 		if err := s.saveMessage(ctx, tx, conv, msg, ""); err != nil {
 			return err
@@ -299,6 +302,7 @@ func (s *Service) finish(ctx context.Context, p auth.Principal, conv *Conversati
 		return s.o.Store.InAssistantTx(ctx, save)
 	}
 	msg.Intent, msg.Outcome, msg.Content, msg.Citations = r.intent, r.outcome, r.content, r.cites
+	msg.ModelScope = r.scope.scope()
 	if r.execute != nil {
 		var a *Action
 		err := s.o.Store.InAssistantTx(ctx, func(tx Tx) error {
@@ -376,12 +380,12 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 		}
 		cancelled = act // 用户转而问了别的：操作作废，按新问题回答
 	}
-	hist, err := s.history(ctx, p, conv.ID, user.ID)
+	hist, level, err := s.history(ctx, p, conv.ID, user.ID)
 	if err != nil {
 		return nil, err
 	}
 	tc := &turnCtx{p: p, loc: loc, now: s.o.Now(), history: hist, question: user.Content, onDelta: onDelta, convID: conv.ID,
-		tools: s.intentTools(ctx), images: images}
+		tools: s.intentTools(ctx), images: images, scope: level}
 	in, err := s.brainOf(ctx).Intent(ctx, IntentInput{Today: today(tc.now, loc), Projects: s.o.Projects(p), History: hist,
 		Question: user.Content, NeedTitle: conv.Title == "", Tools: tc.tools, Images: images})
 	if err != nil {
@@ -404,6 +408,7 @@ func (s *Service) respond(ctx context.Context, p auth.Principal, conv *Conversat
 	if err != nil {
 		return nil, err
 	}
+	r.scope = max(r.scope, tc.scope)
 	r.intent, r.title = in.Kind, cleanTitle(in.Title)
 	if r.title == "" && conv.Title == "" {
 		r.title = cleanTitle(textutil.Clip(user.Content, 30))
@@ -474,24 +479,39 @@ func (s *Service) accessible(p auth.Principal, key string) bool {
 }
 
 // history 返回当前提问之前的最近 HistoryTurns 轮已完成消息；引用的工单按当前可读范围重新判断（见 recheckCites）。
-func (s *Service) history(ctx context.Context, p auth.Principal, convID, beforeID int64) ([]HistoryItem, error) {
+// 返回的档位是交给模型的历史回答的内容范围（REQ-012）。回放规则：ScopeMarked 照常；ScopeAuthorized 只在当前为
+// reviewer / admin / agent 时回放（已授权的评论范围）；其他（未知——升级前、失败或被旧版本改写过的消息——与
+// ScopeUntrusted）在启用模型内容策略时对所有角色都不回放：只保留引用的工单与版本（用于理解指代与留言目标），正文与引用的
+// 知识条目不交给模型；消息本身不改。未启用时照常回放，并如实计入档位。
+func (s *Service) history(ctx context.Context, p auth.Principal, convID, beforeID int64) ([]HistoryItem, scopeLevel, error) {
 	ms, err := s.o.Store.RecentDone(ctx, convID, beforeID, 2*HistoryTurns)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := s.recheckCites(ctx, p, ms); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]HistoryItem, 0, len(ms))
+	level := levelMarked
 	for _, m := range ms {
 		h := HistoryItem{Role: m.Role, Content: textutil.ClipEllipsis(m.Content, historyRunes), Tickets: m.Citations.Tickets,
 			Knowledge: m.Citations.Knowledge, Images: len(m.Attachments)}
 		for _, r := range m.Citations.Releases {
 			h.Tags = append(h.Tags, r.Repo+" "+r.Tag)
 		}
+		if m.Role == RoleAssistant && m.ModelScope != ScopeMarked {
+			switch {
+			case m.ModelScope == ScopeAuthorized && p.Role != auth.RoleExternal:
+				level = max(level, levelAuthorized)
+			case s.o.ModelMarked:
+				h.Content, h.Knowledge = historyWithheld, nil
+			default:
+				level = levelUntrusted
+			}
+		}
 		out = append(out, h)
 	}
-	return out, nil
+	return out, level, nil
 }
 
 var spaceRe = regexp.MustCompile(`\s+`)

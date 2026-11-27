@@ -116,7 +116,10 @@ type Message struct {
 	Citations      Citations
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
-	Action         *Action // 该助手消息提出的待确认操作（读取时回填）
+	// ModelScope 是助手消息生成时送给模型的内容范围（ScopeMarked / ScopeAuthorized / ScopeUntrusted，REQ-012）；
+	// 空为未知：升级前的消息、失败的回答、用户消息（提问是用户自己的内容），或写入后被旧版本改写过内容（与版本绑定）。
+	ModelScope string
+	Action     *Action // 该助手消息提出的待确认操作（读取时回填）
 	// Attachments 是用户消息附带的图片引用（REQ-009）；助手消息为空
 	Attachments []Attachment
 }
@@ -164,11 +167,13 @@ type KnowledgeRef struct {
 
 // Knowledge 是知识库检索，由 knowledge.Service 实现。
 type Knowledge interface {
-	Search(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]knowledge.Hit, error)
+	// SearchForModel 检索交给模型的知识条目：启用模型内容策略时只含来源可信的条目（Hit.ModelInput，REQ-012）。
+	SearchForModel(ctx context.Context, p auth.Principal, project, query string, keywords []string, limit int) ([]knowledge.Hit, error)
 	ByIDs(ctx context.Context, ids []int64) ([]*knowledge.Entry, error)
 	Cite(ctx context.Context, ids []int64) error
-	// Suggest 以待审核状态入库回答候选；Miss 记录未答上的提问（REQ-007）。
-	Suggest(ctx context.Context, d knowledge.Draft, messageID int64) error
+	// Suggest 以待审核状态入库回答候选（modelOK 由该回答的 Message.ModelScope 换算：只有 ScopeMarked 为 true，未知为 nil，
+	// 其他为 false）；Miss 记录未答上的提问（REQ-007）。
+	Suggest(ctx context.Context, d knowledge.Draft, messageID int64, modelOK *bool) error
 	Miss(ctx context.Context, p auth.Principal, project, question string) error
 }
 
@@ -303,6 +308,51 @@ type Options struct {
 	Now      func() time.Time
 	// Location 是未指定时区时解析"今天 / 上周"等用的时区，默认 time.Local。
 	Location *time.Location
+	// ModelMarked 为真时启用模型内容策略 ModelContentMarked（REQ-012）：external 的问答只把 Comment.Model 的评论交给模型；
+	// 历史中只回放 ScopeMarked 的回答，以及当前为 reviewer / admin / agent 时 ScopeAuthorized 的回答；其他（未知、
+	// ScopeUntrusted）不作为模型输入（只保留引用的工单与版本，用于理解指代）。知识检索经 Knowledge.SearchForModel。
+	// 为假时行为与升级前相同（仍记录 ModelScope）。
+	ModelMarked bool
+}
+
+// 助手消息的模型内容范围（Message.ModelScope，REQ-012），按本轮实际送给模型的内容取最不可信的一档。
+const (
+	// ScopeMarked：送给模型的评论都在 ReplyMarked 范围内，知识条目与历史回答都来源可信。
+	ScopeMarked = "marked"
+	// ScopeAuthorized：另含提问人角色已授权的评论（reviewer / admin / agent 可见、不在 ReplyMarked 范围内的评论，或回放了
+	// 这样的历史回答），没有其他不可信内容。只对 reviewer / admin / agent 回放；不作为知识候选的可信来源。
+	ScopeAuthorized = "authorized"
+	// ScopeUntrusted：含来源未知或不可信的知识条目、历史回答，或 external 问答中不在 ReplyMarked 范围内的评论
+	// （未启用策略时）。启用策略后对所有角色都不回放。
+	ScopeUntrusted = "untrusted"
+)
+
+// scopeLevel 是 ModelScope 的档位，数值越大越不可信。
+type scopeLevel int
+
+const (
+	levelMarked scopeLevel = iota
+	levelAuthorized
+	levelUntrusted
+)
+
+func (l scopeLevel) scope() string {
+	switch l {
+	case levelMarked:
+		return ScopeMarked
+	case levelAuthorized:
+		return ScopeAuthorized
+	}
+	return ScopeUntrusted
+}
+
+// ScopeTrusted 把回答的 ModelScope 换算为知识候选的来源可信（只有 ScopeMarked 可信；未知为 nil）。
+func ScopeTrusted(scope string) *bool {
+	if scope == "" {
+		return nil
+	}
+	ok := scope == ScopeMarked
+	return &ok
 }
 
 // Service 是问答会话与回答。
